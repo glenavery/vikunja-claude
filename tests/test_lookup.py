@@ -61,13 +61,53 @@ class TicketLookup(ServiceTestCase):
             self.service.get(33)
         self.assertIn("#33 matches 2 tasks", str(caught.exception))
 
-    def test_tasks_without_a_number_are_skipped(self):
+    def test_tasks_without_a_number_are_still_usable(self):
+        """Identity is the task id, so a missing #NN prefix is not fatal."""
         self.vikunja.layout["Ready"].append(
             task(78, "No ticket prefix at all", "2026-07-26T06:00:00Z")
         )
-        numbers = [t.number for t in self.client.list_tickets(2, 12)]
-        self.assertNotIn(78, [t.task_id for t in self.client.list_tickets(2, 12)])
-        self.assertTrue(all(isinstance(n, int) for n in numbers))
+        ticket = self.service.get_task(78)
+        self.assertIsNone(ticket.number)
+        self.assertEqual(ticket.summary, "No ticket prefix at all")
+        self.assertEqual(ticket.reference, "task 78")
+        self.assertEqual(ticket.commit_ref, "(vikunja task 78)")
+
+
+class TaskIdLookup(ServiceTestCase):
+    """The canonical lookup: Vikunja's immutable task id."""
+
+    def test_finds_the_task_by_id(self):
+        ticket = self.service.get_task(9)
+        self.assertEqual(ticket.number, 33)
+        self.assertEqual(ticket.summary, "Back up Vikunja database")
+        self.assertEqual(ticket.reference, "#33")
+
+    def test_unknown_task_id_is_not_found(self):
+        with self.assertRaises(TicketNotFound):
+            self.service.get_task(4242)
+
+    def test_not_found_message_warns_about_board_view_urls(self):
+        with self.assertRaises(TicketNotFound) as caught:
+            self.service.get_task(4242)
+        self.assertIn("/projects/N/M is a board view", str(caught.exception))
+
+    def test_task_id_is_stable_when_the_title_prefix_changes(self):
+        """Renumbering the title must not change which task is resolved."""
+        before = self.service.get_task(9)
+        for item in self.vikunja.layout["Ready"]:
+            if item["id"] == 9:
+                item["title"] = "#99 Back up Vikunja database"
+        after = self.service.get_task(9)
+        self.assertEqual(before.task_id, after.task_id)
+        self.assertEqual(before.number, 33)
+        self.assertEqual(after.number, 99)
+
+    def test_duplicate_hash_prefixes_do_not_affect_task_id_lookup(self):
+        self.vikunja.layout["Backlog"].append(
+            task(77, "#33 A second ticket claiming 33", "2026-07-26T06:00:00Z")
+        )
+        self.assertEqual(self.service.get_task(9).task_id, 9)
+        self.assertEqual(self.service.get_task(77).task_id, 77)
 
 
 class NextReadyTicket(ServiceTestCase):

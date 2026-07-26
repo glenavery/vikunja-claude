@@ -16,7 +16,7 @@ VKCTL = PACKAGE_ROOT / "vkctl.py"
 TEMPLATE = """\
 You are working a single ticket from the Vikunja board "{project}".
 
-TICKET #{number}: {summary}
+TICKET {reference}: {summary}
 Vikunja task id: {task_id}
 Vikunja URL: {url}
 Repository: {workdir}
@@ -27,29 +27,29 @@ Repository: {workdir}
 
 Rules for this run:
 
-1. SCOPE. Do only what ticket #{number} asks. Do not fix unrelated bugs, do not
-   refactor code the ticket does not touch, and do not start other tickets. If
-   you find a separate problem, mention it in your completion comment rather
+1. SCOPE. Do only what ticket {reference} asks. Do not fix unrelated bugs, do
+   not refactor code the ticket does not touch, and do not start other tickets.
+   If you find a separate problem, mention it in your completion comment rather
    than fixing it.
 2. TESTS. The change is not finished without tests. Add or extend tests that
    would fail without your change, and run the relevant suite. Never weaken,
    skip or delete an existing test or assertion to make a failure disappear.
 3. COMMIT. Commit your work with a message referencing the ticket, e.g.
-   "<type>: <what changed> (#{number})". Commit only the files this ticket
+   "<type>: <what changed> {commit_ref}". Commit only the files this ticket
    required.
 4. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
    commit local.
-5. REPORT BACK to Vikunja when you stop, using the helper below. Do not call the
-   Vikunja API directly and do not look for an API token — the helper already
-   has what it needs.
+5. REPORT BACK to Vikunja when you stop, using the helper below. It takes the
+   task id, not the #NN prefix. Do not call the Vikunja API directly and do not
+   look for an API token — the helper already has what it needs.
 
    If you finished the ticket:
-       python3 {vkctl} comment {number} "<what you changed, which tests you ran, the commit sha>"
-       python3 {vkctl} move {number} Done
+       python3 {vkctl} comment --task {task_id} "<what you changed, which tests you ran, the commit sha>"
+       python3 {vkctl} move --task {task_id} Done
 
    If you are blocked and cannot finish:
-       python3 {vkctl} comment {number} "BLOCKED: <what is blocking you and what you need>"
-       python3 {vkctl} move {number} Waiting
+       python3 {vkctl} comment --task {task_id} "BLOCKED: <what is blocking you and what you need>"
+       python3 {vkctl} move --task {task_id} Waiting
 
    Comment first, then move — the comment is the part a human needs.
 
@@ -67,7 +67,8 @@ def build_prompt(
     description = ticket.description.strip() or "(no description on the ticket)"
     return TEMPLATE.format(
         project=project_title,
-        number=ticket.number,
+        reference=ticket.reference,
+        commit_ref=ticket.commit_ref,
         summary=ticket.summary,
         task_id=ticket.task_id,
         url=ticket.url(frontend_url),

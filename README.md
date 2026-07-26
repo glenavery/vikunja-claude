@@ -8,7 +8,7 @@ that ticket only, required to write tests, required to commit, forbidden from
 pushing, and told to report back to the board when it stops.
 
 Vikunja itself is not forked, patched or modified. The browser side is a
-bookmarklet.
+bookmarklet or userscript that adds a 🤖 button to a task page.
 
 - Python 3.11+, **standard library only**. No pip install, no virtualenv.
 - Binds to `127.0.0.1:3460` and refuses to bind anywhere else.
@@ -60,62 +60,110 @@ service, no compose file.
 
 ## Use
 
-Open <http://127.0.0.1:3460/>. Enter a ticket number and either preview the
-prompt or launch. `Work next Ready ticket` takes the oldest ticket in the
-**Ready** bucket.
+Normally you never open this directly — you click the 🤖 button on a Vikunja
+task (see below). The console at <http://127.0.0.1:3460/> is the manual
+fallback: enter a `#NN` ticket number to preview or launch, or use
+`Work next Ready ticket` for the oldest ticket in the **Ready** bucket.
+
+Reachable over Tailscale by putting `tailscale serve` in front of it — the
+service itself stays bound to loopback, and generated buttons pick up whichever
+address you loaded them from. Note that anyone on your tailnet who can reach it
+can start a Claude run on this host.
 
 | Method | Path | Does |
 |---|---|---|
 | GET | `/` | Console: ticket input, Preview prompt, Work ticket, Work next Ready |
 | GET | `/health` | Service + Vikunja reachability (`503` when Vikunja is down) |
-| GET | `/ticket/{n}` | Ticket details and the generated prompt. **Never launches.** |
-| POST | `/ticket/{n}/work` | Move to In Progress, then launch Claude Code |
-| GET | `/next` | The oldest Ready ticket, same view as `/ticket/{n}` |
+| GET | `/task/{id}` | Ticket details and the generated prompt. **Never launches.** |
+| POST | `/task/{id}/work` | Move to In Progress, then launch Claude Code |
+| GET | `/task/{id}/launch` | Landing page for the browser button: launches on load |
+| GET | `/ticket/{n}` | `#NN` convenience lookup; redirects to `/task/{id}` |
+| POST | `/ticket/{n}/work` | Same, by `#NN` |
+| GET | `/next` | The oldest Ready ticket, same view as `/task/{id}` |
 | POST | `/next/work` | Launch the oldest Ready ticket |
 | GET | `/launches` | Recent launch log as JSON |
 | GET | `/bookmarklet` | Install page for the browser button |
+| GET | `/userscript` | Tampermonkey userscript (host-aware) |
 
 Any endpoint returns JSON instead of HTML with `Accept: application/json` or
 `?format=json`.
 
 ```bash
 curl -s localhost:3460/health | jq
-curl -s -H 'Accept: application/json' localhost:3460/ticket/33 | jq .prompt -r
-curl -s -X POST localhost:3460/ticket/33/work | jq
+curl -s -H 'Accept: application/json' localhost:3460/task/9 | jq .prompt -r
+curl -s -X POST localhost:3460/task/9/work | jq
 ```
 
-Tickets are resolved by the `#NN` prefix of the Vikunja task title
-(`#33 Back up Vikunja database` → ticket 33). Two tasks claiming the same
-number is a `409`, not a coin flip.
+## Identity: task id, not `#NN`
+
+A ticket is identified by its **Vikunja task id** — immutable, assigned by
+Vikunja, and what `/tasks/<id>` in the browser URL refers to. That is what the
+launcher resolves, what the run lock is keyed on, and what `vkctl.py` takes.
+
+The `#NN` prefix in the title is editable, so it is used only for display and
+for the commit reference. A task with no `#NN` prefix still works; its commit
+reference becomes `(vikunja task <id>)`.
+
+`/ticket/{n}` remains as a convenience for humans who think in ticket numbers —
+it resolves the prefix and redirects to the canonical `/task/{id}`. Two tasks
+claiming the same `#NN` is a `409` there, not a coin flip; by task id it is
+never ambiguous at all.
+
+### Which number is in the URL
+
+| Vikunja URL | Meaning |
+|---|---|
+| `/tasks/11` | task 11 — **this** is a task id |
+| `/projects/2/11` | project 2, **view** 11 (List/Gantt/Table/Kanban) |
+
+Both are numbers in a URL and they are easy to confuse. The button only ever
+reads an id from `/tasks/<id>`; on a board view it refuses rather than guessing,
+because acting on a view id would launch the wrong ticket.
 
 ## The browser button
 
-Vikunja is not modified. Open <http://127.0.0.1:3460/bookmarklet> and drag the
-link to your bookmarks bar.
+The flow is: **open the task in Vikunja → click 🤖 Work with Claude → Claude is
+running.** No ticket number typed anywhere. Vikunja is not forked or modified.
 
-**Chrome**
+Open `/bookmarklet` on the launcher for both options. Everything it generates is
+built from the address you loaded it from, so it works over Tailscale as well as
+loopback.
+
+**Option 1 — bookmarklet (no extension)**
 
 1. `Ctrl+Shift+B` to show the bookmarks bar.
-2. Drag the **Work with Claude** link from `/bookmarklet` onto the bar. If
+2. Drag the **🤖 Work with Claude** link from `/bookmarklet` onto the bar. If
    Chrome blocks the drag, right-click the bar → **Add page…**, name it
-   `Work with Claude`, and paste the source from
-   `browser/work-with-claude.bookmarklet.js` (the single-line version on the
-   install page) as the URL.
-3. Open a Vikunja task and click the bookmark. It reads the `#NN` from the task
-   title and opens `http://127.0.0.1:3460/ticket/NN`.
+   `Work with Claude`, and paste the source shown on that page as the URL.
+3. Open a Vikunja task and click it.
 
-The bookmarklet only *opens the preview page*. Launching is still a deliberate
-click on that page.
+**Option 2 — userscript (a real button on the page)**
+
+1. Install Tampermonkey in Chrome.
+2. Open `/userscript` on the launcher; Tampermonkey offers to install it.
+3. Every Vikunja task page now shows a 🤖 button (bottom-right). It tracks
+   single-page navigation, and disappears when you leave a task.
+
+Clicking either opens `/task/<id>/launch`, which fires the launch immediately
+and shows the outcome — launched, already running, or the error. Navigating
+there is cross-origin (always allowed) and the POST it makes is same-origin, so
+no CORS configuration is needed anywhere.
+
+> The userscript's inline placement next to Vikunja's own task actions is
+> best-effort — if that container isn't found it falls back to a floating
+> button, which is the guaranteed path. I could not drive a real browser in this
+> environment to confirm the inline selector.
 
 ## What Claude is told
 
-`GET /ticket/{n}` shows the exact prompt. It always:
+`GET /task/{id}` shows the exact prompt. It always:
 
-- identifies the ticket (number, task id, Vikunja URL, repository);
+- identifies the ticket (reference, task id, Vikunja URL, repository);
 - includes the complete ticket description, inside explicit delimiters;
 - restricts work to that one ticket;
 - requires tests, and forbids weakening existing ones;
-- requires a commit referencing `(#NN)`;
+- requires a commit referencing `(#NN)`, or `(vikunja task <id>)` when the
+  title carries no `#NN` prefix;
 - **forbids pushing** — no push, no PR, no remote;
 - tells Claude to comment and move the ticket to **Waiting** if blocked, or to
   comment and move it to **Done** if it finished.
@@ -127,9 +175,10 @@ launcher puts it in the child process's **environment**, and the prompt tells
 Claude to update the board through the bundled helper:
 
 ```bash
-python3 /home/glen/stacks/vikunja-claude/vkctl.py show    33
-python3 /home/glen/stacks/vikunja-claude/vkctl.py comment 33 "done: ..."
-python3 /home/glen/stacks/vikunja-claude/vkctl.py move    33 Done
+python3 /home/glen/stacks/vikunja-claude/vkctl.py show    --task 11
+python3 /home/glen/stacks/vikunja-claude/vkctl.py comment --task 11 "done: ..."
+python3 /home/glen/stacks/vikunja-claude/vkctl.py move    --task 11 Done
+python3 /home/glen/stacks/vikunja-claude/vkctl.py show    --ticket 35   # by #NN
 ```
 
 Moving to `Done` marks the task done — the Done bucket is the project's
@@ -156,9 +205,10 @@ Decide that consciously; the service will not decide it for you.
 - The only value taken from a request is a ticket number, matched as `\d+` by
   the router. No request value ever reaches a shell; `Popen` is called with an
   argument list and `shell=False`.
-- **One run per ticket.** A per-ticket lock file (`O_EXCL`) blocks a second
-  launch, and survives a restart of this service. A lock whose PID is dead is
-  treated as stale and reclaimed.
+- **One run per task.** A lock file keyed on the immutable task id (`O_EXCL`)
+  blocks a second launch, and survives a restart of this service. A lock whose
+  PID is dead is treated as stale and reclaimed. Keying on the task id means
+  renaming a ticket cannot smuggle a second concurrent run past the guard.
 - Every launch, failure, timeout and exit is appended as JSON to
   `~/.local/state/vikunja-claude/launches.jsonl`; each run's full output goes to
   `~/.local/state/vikunja-claude/runs/ticket-NN-<timestamp>.log`.
@@ -188,11 +238,14 @@ cd /home/glen/stacks/vikunja-claude
 python3 -m unittest discover -s tests -t .
 ```
 
-60 tests, no network and no live Vikunja: the API is faked through an
+83 tests, no network and no live Vikunja: the API is faked through an
 injectable transport, and process spawning through an injectable `spawn`.
 
-Covered: `#NN` parsing and lookup (missing, duplicate, unnumbered, next-Ready
-selection), prompt generation (every required clause, and that the token never
-appears), duplicate launch prevention (live, stale, cross-instance, per-ticket
-isolation), and API error handling (401/500/unreachable/bad bucket, and the
-HTTP status each maps to).
+Covered: task-id lookup (including that renumbering a title does not change
+which task resolves) and `#NN` lookup (missing, duplicate, unnumbered,
+next-Ready selection); prompt generation (every required clause, and that the
+token never appears); duplicate launch prevention (live, stale, cross-instance,
+per-task isolation); API error handling (401/500/unreachable/bad bucket and the
+HTTP status each maps to); and the browser flow (task routes, `#NN` redirect,
+the launch page's same-origin POST, and that neither generated button will read
+an id from a board-view URL).

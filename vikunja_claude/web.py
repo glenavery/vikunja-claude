@@ -80,8 +80,13 @@ def console(project: str, workdir: str, running: list[dict], recent: list[dict])
     running_html = ""
     if running:
         items = "".join(
-            f"<li>#{escape(str(r.get('ticket')))} — pid {escape(str(r.get('pid')))}"
-            f", started {escape(str(r.get('started_at')))}</li>"
+            "<li><a href=\"/task/{tid}\">{ref}</a> — task {tid}, pid {pid}, "
+            "started {at}</li>".format(
+                tid=escape(str(r.get("task_id"))),
+                ref=escape(str(r.get("reference") or r.get("task_id"))),
+                pid=escape(str(r.get("pid"))),
+                at=escape(str(r.get("started_at"))),
+            )
             for r in running
         )
         running_html = f"<h2>Running now</h2><ul>{items}</ul>"
@@ -130,7 +135,8 @@ here straight from a Vikunja task.</p>
 
 
 def ticket_page(data: dict) -> str:
-    number = escape(str(data["ticket"]))
+    task_id = escape(str(data["task_id"]))
+    reference = escape(str(data["reference"]))
     labels = "".join(f"<span class=\"tag\">{escape(l)}</span>" for l in data["labels"])
     running = data.get("running")
     warn = ""
@@ -142,11 +148,11 @@ def ticket_page(data: dict) -> str:
             f"refused.</div>"
         )
     return page(
-        f"#{data['ticket']} — Work with Claude",
+        f"{data['reference']} — Work with Claude",
         f"""
-<h1>#{number} {escape(data['summary'])}</h1>
+<h1>{reference} {escape(data['summary'])}</h1>
 <p class="sub"><a href="{escape(data['url'])}">open in Vikunja</a> &middot;
-task id {escape(str(data['task_id']))}</p>
+task id {task_id}</p>
 {warn}
 <table>
   <tr><th>Bucket</th><td>{escape(str(data['bucket']))}</td></tr>
@@ -159,8 +165,8 @@ task id {escape(str(data['task_id']))}</p>
 <h2>Generated prompt</h2>
 <pre>{escape(data['prompt'])}</pre>
 <div class="row">
-  <button class="primary" onclick="call('POST','/ticket/{number}/work')">
-    Work ticket #{number}</button>
+  <button class="primary" onclick="call('POST','/task/{task_id}/work')">
+    Work {reference}</button>
   <button onclick="location.href='/'">Back to console</button>
 </div>
 <pre id="out"></pre>
@@ -168,25 +174,179 @@ task id {escape(str(data['task_id']))}</p>
     )
 
 
+def launch_page(
+    task_id: int, reference: str, summary: str, vikunja_url: str
+) -> str:
+    """Auto-launching landing page for the browser button.
+
+    Navigating here is cross-origin and always allowed; the POST it fires is
+    same-origin, so the one-click flow needs no CORS.
+    """
+    return page(
+        f"Launching {reference}",
+        f"""
+<h1 id="state">Launching {escape(reference)}…</h1>
+<p class="sub">{escape(summary)} &middot;
+<a href="{escape(vikunja_url)}">back to Vikunja</a></p>
+<pre id="out">starting…</pre>
+<div class="row">
+  <button onclick="location.href='/task/{task_id}'">View prompt</button>
+  <button onclick="location.href='/'">Console</button>
+</div>
+<script>
+(async function () {{
+  const state = document.getElementById('state');
+  const out = document.getElementById('out');
+  try {{
+    const res = await fetch('/task/{task_id}/work', {{
+      method: 'POST', headers: {{'Accept': 'application/json'}}
+    }});
+    const body = await res.json();
+    if (res.status === 202) {{
+      state.textContent = '✅ Claude is working {escape(reference)}';
+    }} else if (res.status === 409) {{
+      state.textContent = '⏳ Already running';
+    }} else {{
+      state.textContent = '❌ Launch failed (HTTP ' + res.status + ')';
+    }}
+    out.textContent = JSON.stringify(body, null, 2);
+  }} catch (err) {{
+    state.textContent = '❌ Could not reach the launcher';
+    out.textContent = String(err);
+  }}
+}})();
+</script>
+""",
+    )
+
+
+def userscript(service_origin: str, vikunja_origins: list[str]) -> str:
+    """A Tampermonkey userscript that puts a 🤖 button on Vikunja task pages."""
+    matches = "\n".join(
+        f"// @match        {origin}/*" for origin in dict.fromkeys(vikunja_origins)
+    )
+    return f"""\
+// ==UserScript==
+// @name         Work with Claude (Vikunja)
+// @namespace    vikunja-claude
+// @version      1.1
+// @description  Adds a 🤖 Work with Claude button to Vikunja task pages.
+// @author       vikunja-claude
+{matches}
+// @grant        none
+// @run-at       document-idle
+// ==/UserScript==
+
+(function () {{
+  'use strict';
+
+  const SERVICE = '{service_origin}';
+  const BUTTON_ID = 'work-with-claude-btn';
+
+  // Only /tasks/<id> is a task. /projects/<id>/<viewId> is a board view, and
+  // reading an id from it would launch the wrong ticket.
+  function taskId() {{
+    const m = location.pathname.match(/\\/tasks\\/(\\d+)/);
+    return m ? m[1] : null;
+  }}
+
+  function removeButton() {{
+    const existing = document.getElementById(BUTTON_ID);
+    if (existing) existing.remove();
+  }}
+
+  function addButton(id) {{
+    if (document.getElementById(BUTTON_ID)) return;
+
+    const button = document.createElement('button');
+    button.id = BUTTON_ID;
+    button.type = 'button';
+    button.textContent = '🤖 Work with Claude';
+    button.title = 'Launch Claude Code for task ' + id;
+    button.style.cssText = [
+      'position:fixed', 'right:1.25rem', 'bottom:1.25rem', 'z-index:9999',
+      'padding:.6rem 1rem', 'border:0', 'border-radius:999px',
+      'background:#2f6f4f', 'color:#fff', 'font:600 14px/1 system-ui,sans-serif',
+      'cursor:pointer', 'box-shadow:0 2px 10px rgba(0,0,0,.3)'
+    ].join(';');
+    button.addEventListener('click', function () {{
+      window.open(SERVICE + '/task/' + id + '/launch', '_blank');
+    }});
+
+    // Prefer sitting next to the task's own actions; fall back to floating.
+    const actions = document.querySelector('.task-view .action-buttons');
+    if (actions) {{
+      button.style.position = 'static';
+      button.style.width = '100%';
+      button.style.marginTop = '.5rem';
+      actions.prepend(button);
+    }} else {{
+      document.body.appendChild(button);
+    }}
+  }}
+
+  function sync() {{
+    const id = taskId();
+    if (id) {{
+      addButton(id);
+    }} else {{
+      removeButton();
+    }}
+  }}
+
+  // Vikunja is a single-page app: the URL changes without a reload.
+  let lastPath = location.pathname;
+  new MutationObserver(function () {{
+    if (location.pathname !== lastPath) {{
+      lastPath = location.pathname;
+      removeButton();
+    }}
+    sync();
+  }}).observe(document.body, {{ childList: true, subtree: true }});
+
+  sync();
+}})();
+"""
+
+
 def bookmarklet_page(bookmarklet: str, service_url: str) -> str:
     return page(
-        "Work with Claude — bookmarklet",
+        "Work with Claude — browser button",
         f"""
-<h1>“Work with Claude” bookmarklet</h1>
-<p class="sub">Adds a button to any Vikunja task without forking Vikunja.</p>
-<p>Drag this link to your bookmarks bar:
-<a href="{escape(bookmarklet, quote=True)}">Work with Claude</a></p>
-<h2>Install in Chrome</h2>
+<h1>🤖 Work with Claude</h1>
+<p class="sub">One click on an open Vikunja task launches Claude Code for it.
+Vikunja itself is not forked or modified.</p>
+
+<h2>Option 1 — bookmarklet</h2>
+<p>Drag this to your bookmarks bar:
+<a href="{escape(bookmarklet, quote=True)}">🤖 Work with Claude</a></p>
 <ol>
   <li>Show the bookmarks bar: <kbd>Ctrl+Shift+B</kbd>.</li>
-  <li>Drag the link above onto the bar. (Chrome blocks dragging in some
-      versions — if so, right-click the bar → <em>Add page…</em>, name it
-      “Work with Claude”, and paste the code below as the URL.)</li>
-  <li>Open a Vikunja task, click the bookmark. It reads the <code>#NN</code>
-      from the task title and opens <code>{escape(service_url)}/ticket/NN</code>.</li>
+  <li>Drag the link above onto the bar. If Chrome blocks the drag, right-click
+      the bar → <em>Add page…</em>, name it “Work with Claude”, and paste the
+      source below as the URL.</li>
+  <li>Open a Vikunja <strong>task</strong> — the URL must look like
+      <code>/tasks/123</code> — and click the bookmark. Claude launches for
+      that task and this page shows the result.</li>
 </ol>
-<h2>Bookmarklet source</h2>
+<p>A board view (<code>/projects/2/11</code>) is deliberately rejected: the
+number there is a <em>view</em> id, not a task id, so acting on it would launch
+the wrong ticket.</p>
 <pre>{escape(bookmarklet)}</pre>
+
+<h2>Option 2 — userscript (adds a real button)</h2>
+<p>With Tampermonkey installed, <a href="/userscript">install the userscript</a>
+to get a persistent 🤖 button on every task page instead of a bookmark click.</p>
+<ol>
+  <li>Install the Tampermonkey extension in Chrome.</li>
+  <li>Open <a href="/userscript"><code>{escape(service_url)}/userscript</code></a>
+      — Tampermonkey offers to install it.</li>
+  <li>Open any Vikunja task; the button appears bottom-right.</li>
+</ol>
+
+<h2>Links point at</h2>
+<p><code>{escape(service_url)}</code> — generated from the address you loaded
+this page from, so the button keeps working over Tailscale.</p>
 """,
     )
 

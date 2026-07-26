@@ -26,7 +26,13 @@ class TicketService:
         )
         return project_id, self.client.kanban_view_id(project_id)
 
+    def get_task(self, task_id: int) -> Ticket:
+        """Canonical lookup, by Vikunja's immutable task id."""
+        project_id, view_id = self._ids()
+        return self.client.find_by_task_id(task_id, project_id, view_id)
+
     def get(self, number: int) -> Ticket:
+        """Convenience lookup by the editable #NN title prefix."""
         project_id, view_id = self._ids()
         return self.client.find_ticket(number, project_id, view_id)
 
@@ -43,10 +49,11 @@ class TicketService:
         )
 
     def preview(self, ticket: Ticket) -> dict:
-        active = self.launcher.active_launch(ticket.number)
+        active = self.launcher.active_launch(ticket.task_id)
         return {
-            "ticket": ticket.number,
             "task_id": ticket.task_id,
+            "ticket": ticket.number,
+            "reference": ticket.reference,
             "title": ticket.title,
             "summary": ticket.summary,
             "bucket": ticket.bucket_title,

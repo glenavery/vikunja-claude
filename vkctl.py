@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Board updates for a Claude run working a ticket.
 
+Identify the task with --task (Vikunja's immutable task id, preferred) or
+--ticket (the editable #NN title prefix).
+
 Usage:
-    vkctl.py show <ticket>
-    vkctl.py comment <ticket> "<text>"
-    vkctl.py move <ticket> <bucket>          # Backlog|Ready|In Progress|Waiting|Done
+    vkctl.py show    --task 11
+    vkctl.py comment --task 11 "<text>"
+    vkctl.py move    --task 11 Done          # Backlog|Ready|In Progress|Waiting|Done
+    vkctl.py show    --ticket 35
 
 The Vikunja token is read from the VIKUNJA_API_TOKEN environment variable that
 the launcher puts in this process's environment. It is never a CLI argument.
@@ -26,15 +30,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="vkctl", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    show = sub.add_parser("show", help="print a ticket")
-    show.add_argument("ticket", type=int)
+    def with_selector(sub_parser):
+        group = sub_parser.add_mutually_exclusive_group(required=True)
+        group.add_argument("--task", type=int, help="Vikunja task id (preferred)")
+        group.add_argument("--ticket", type=int, help="#NN title prefix")
+        return sub_parser
 
-    comment = sub.add_parser("comment", help="add a comment to a ticket")
-    comment.add_argument("ticket", type=int)
+    with_selector(sub.add_parser("show", help="print a ticket"))
+
+    comment = with_selector(sub.add_parser("comment", help="comment on a ticket"))
     comment.add_argument("text")
 
-    move = sub.add_parser("move", help="move a ticket to a kanban bucket")
-    move.add_argument("ticket", type=int)
+    move = with_selector(sub.add_parser("move", help="move a ticket to a bucket"))
     move.add_argument("bucket")
 
     args = parser.parse_args(argv)
@@ -49,19 +56,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         project_id = client.project_id(config.project_title, config.project_id)
         view_id = client.kanban_view_id(project_id)
-        ticket = client.find_ticket(args.ticket, project_id, view_id)
+        if args.task is not None:
+            ticket = client.find_by_task_id(args.task, project_id, view_id)
+        else:
+            ticket = client.find_ticket(args.ticket, project_id, view_id)
 
         if args.command == "show":
-            print(f"#{ticket.number} {ticket.summary}")
+            print(f"{ticket.reference} {ticket.summary}")
             print(f"bucket: {ticket.bucket_title}  task id: {ticket.task_id}")
             print()
             print(ticket.description)
         elif args.command == "comment":
             client.add_comment(ticket.task_id, args.text)
-            print(f"commented on #{ticket.number}")
+            print(f"commented on {ticket.reference} (task {ticket.task_id})")
         elif args.command == "move":
             client.move_to_bucket(project_id, view_id, ticket.task_id, args.bucket)
-            print(f"moved #{ticket.number} to {args.bucket}")
+            print(f"moved {ticket.reference} to {args.bucket}")
     except VikunjaError as exc:
         print(f"vikunja error: {exc}", file=sys.stderr)
         return 1

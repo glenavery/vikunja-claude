@@ -18,17 +18,21 @@ from .launcher import AlreadyRunning, LaunchError, Launcher
 from .service import TicketService
 from .vikunja import AmbiguousTicket, TicketNotFound, VikunjaClient, VikunjaError
 
-BOOKMARKLET = (
-    "javascript:(function(){"
-    "var s='http://127.0.0.1:3460';"
-    "var h=document.querySelector('h1,.task-heading,.task-title');"
-    "var t=[h&&h.textContent||'',document.title,"
-    "(window.getSelection?String(window.getSelection()):'')].join(' ');"
-    "var m=t.match(/#(\\d+)/);"
-    "if(!m){alert('No #NN ticket number found on this page.');return;}"
-    "window.open(s+'/ticket/'+m[1],'_blank');"
-    "})();"
-)
+def bookmarklet_for(service_origin: str) -> str:
+    """One-click launcher, pointed at whichever origin served this page.
+
+    Only /tasks/<id> is treated as a task. /projects/<id>/<viewId> is a board
+    view — reading an id from it would launch the wrong ticket.
+    """
+    return (
+        "javascript:(function(){"
+        f"var s='{service_origin}';"
+        "var m=location.pathname.match(/\\/tasks\\/(\\d+)/);"
+        "if(!m){alert('Open a Vikunja task first — its URL must look like "
+        "/tasks/123. A board view (/projects/2/11) is not a task.');return;}"
+        "window.open(s+'/task/'+m[1]+'/launch','_blank');"
+        "})();"
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -75,12 +79,16 @@ class Handler(BaseHTTPRequestHandler):
         (re.compile(r"^/$"), "index"),
         (re.compile(r"^/health$"), "health"),
         (re.compile(r"^/bookmarklet$"), "bookmarklet"),
+        (re.compile(r"^/userscript$"), "userscript"),
         (re.compile(r"^/launches$"), "launches"),
         (re.compile(r"^/next$"), "next"),
+        (re.compile(r"^/task/(\d+)$"), "task"),
+        (re.compile(r"^/task/(\d+)/launch$"), "task_launch_page"),
         (re.compile(r"^/ticket/(\d+)$"), "ticket"),
     )
     ROUTES_POST = (
         (re.compile(r"^/next/work$"), "work_next"),
+        (re.compile(r"^/task/(\d+)/work$"), "work_task"),
         (re.compile(r"^/ticket/(\d+)/work$"), "work_ticket"),
     )
 
@@ -147,29 +155,79 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, status)
 
-    def handle_bookmarklet(self) -> None:
-        config = self.service.config
-        self._html(
-            200,
-            web.bookmarklet_page(BOOKMARKLET, f"http://{config.host}:{config.port}"),
+    def _origin(self) -> str:
+        """The origin the browser used, so generated links work over Tailscale."""
+        host = self.headers.get("Host")
+        if not host:
+            config = self.service.config
+            return f"http://{config.host}:{config.port}"
+        # Host carries the port, so strip it before judging the hostname.
+        hostname = re.sub(r":\d+$", "", host)
+        scheme = self.headers.get("X-Forwarded-Proto") or (
+            "https" if hostname.endswith(".ts.net") else "http"
         )
+        return f"{scheme}://{host}"
+
+    def handle_bookmarklet(self) -> None:
+        origin = self._origin()
+        self._html(200, web.bookmarklet_page(bookmarklet_for(origin), origin))
+
+    def handle_userscript(self) -> None:
+        origin = self._origin()
+        # Vikunja sits on the same host as the launcher but on the default
+        # port (Tailscale Serve proxies / → Vikunja, :3460 → this service).
+        vikunja_origins = [self.service.config.frontend_url]
+        without_port = re.sub(r":\d+$", "", origin)
+        if without_port != origin:
+            vikunja_origins.append(without_port)
+        self._send(200, web.userscript(origin, vikunja_origins), "text/plain")
 
     def handle_launches(self) -> None:
         self._json(200, {"launches": self.service.launcher.recent(50)})
 
-    def handle_ticket(self, number: str) -> None:
-        data = self.service.preview(self.service.get(int(number)))
+    def _preview(self, ticket) -> None:
+        data = self.service.preview(ticket)
         if self._wants_json():
             self._json(200, data)
         else:
             self._html(200, web.ticket_page(data))
 
-    def handle_next(self) -> None:
-        data = self.service.preview(self.service.next_ready())
+    def handle_task(self, task_id: str) -> None:
+        self._preview(self.service.get_task(int(task_id)))
+
+    def handle_ticket(self, number: str) -> None:
+        """#NN is a convenience: resolve it, then show the canonical task URL."""
+        ticket = self.service.get(int(number))
         if self._wants_json():
-            self._json(200, data)
-        else:
-            self._html(200, web.ticket_page(data))
+            self._json(200, self.service.preview(ticket))
+            return
+        self.send_response(302)
+        self.send_header("Location", f"/task/{ticket.task_id}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def handle_next(self) -> None:
+        self._preview(self.service.next_ready())
+
+    def handle_task_launch_page(self, task_id: str) -> None:
+        """Landing page for the browser button: launches on load, same-origin.
+
+        The button navigates here cross-origin (always allowed); the POST that
+        actually launches is same-origin, so no CORS is involved.
+        """
+        ticket = self.service.get_task(int(task_id))
+        self._html(
+            200,
+            web.launch_page(
+                task_id=ticket.task_id,
+                reference=ticket.reference,
+                summary=ticket.summary,
+                vikunja_url=ticket.url(self.service.config.frontend_url),
+            ),
+        )
+
+    def handle_work_task(self, task_id: str) -> None:
+        self._json(202, self.service.work(self.service.get_task(int(task_id))))
 
     def handle_work_ticket(self, number: str) -> None:
         self._json(202, self.service.work(self.service.get(int(number))))

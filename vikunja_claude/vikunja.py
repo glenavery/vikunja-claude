@@ -39,7 +39,13 @@ class AmbiguousTicket(VikunjaError):
 
 @dataclass(frozen=True)
 class Ticket:
-    number: int
+    """A Vikunja task.
+
+    Identity is ``task_id`` — immutable, assigned by Vikunja. ``number`` is the
+    editable ``#NN`` prefix humans use; it may be absent, and it is only ever
+    used for display and for the commit reference.
+    """
+
     task_id: int
     title: str
     description_html: str
@@ -47,6 +53,7 @@ class Ticket:
     bucket_title: str | None
     done: bool
     created: str
+    number: int | None = None
     labels: list[str] = field(default_factory=list)
 
     @property
@@ -58,7 +65,21 @@ class Ticket:
         """Title with the #NN prefix stripped."""
         return TICKET_RE.sub("", self.title).strip()
 
+    @property
+    def reference(self) -> str:
+        """How a human refers to this ticket."""
+        return f"#{self.number}" if self.number is not None else f"task {self.task_id}"
+
+    @property
+    def commit_ref(self) -> str:
+        """What a commit message should carry to link back to the board."""
+        if self.number is not None:
+            return f"(#{self.number})"
+        return f"(vikunja task {self.task_id})"
+
     def url(self, frontend_url: str) -> str:
+        # /tasks/:id is Vikunja's task.detail route. /projects/:id/:viewId is a
+        # board view — never a task.
         return f"{frontend_url.rstrip('/')}/tasks/{self.task_id}"
 
 
@@ -159,12 +180,10 @@ class VikunjaClient:
         tickets: list[Ticket] = []
         for bucket in buckets:
             for task in bucket.get("tasks") or []:
-                number = ticket_number(task.get("title", ""))
-                if number is None:
-                    continue
+                # A missing #NN prefix is fine: identity is the task id.
                 tickets.append(
                     Ticket(
-                        number=number,
+                        number=ticket_number(task.get("title", "")),
                         task_id=int(task["id"]),
                         title=task.get("title", ""),
                         description_html=task.get("description") or "",
@@ -179,6 +198,17 @@ class VikunjaClient:
                     )
                 )
         return tickets
+
+    def find_by_task_id(self, task_id: int, project_id: int, view_id: int) -> Ticket:
+        """Canonical lookup: Vikunja's immutable task id."""
+        for ticket in self.list_tickets(project_id, view_id):
+            if ticket.task_id == task_id:
+                return ticket
+        raise TicketNotFound(
+            f"No task {task_id} in this project. (Vikunja task URLs look like "
+            f"/tasks/{task_id}; /projects/N/M is a board view, not a task.)",
+            status=404,
+        )
 
     def find_ticket(self, number: int, project_id: int, view_id: int) -> Ticket:
         matches = [

@@ -1,25 +1,26 @@
 // "Work with Claude" bookmarklet — readable source.
-// The minified one-liner served at http://127.0.0.1:3460/bookmarklet is this,
-// and that page is the easiest way to install it.
 //
-// Reads the #NN ticket number from the open Vikunja task and opens the local
-// launcher's preview page for it. It never launches anything by itself.
+// Install the *generated* one from http://<launcher>/bookmarklet instead of
+// pasting this: that version is built from the address you loaded the page
+// from, so it keeps working over Tailscale. This file is the same logic,
+// unminified, for review.
+//
+// One click on an open Vikunja task launches Claude Code for it.
 
 javascript: (function () {
   var service = 'http://127.0.0.1:3460';
 
-  // Vikunja renders the task title in an h1; document.title carries it too.
-  var heading = document.querySelector('h1, .task-heading, .task-title');
-  var haystack = [
-    (heading && heading.textContent) || '',
-    document.title,
-    window.getSelection ? String(window.getSelection()) : ''
-  ].join(' ');
-
-  var match = haystack.match(/#(\d+)/);
+  // Only /tasks/<id> identifies a task. Vikunja's other numeric route,
+  // /projects/<projectId>/<viewId>, is a *board view* — the number there is a
+  // view id (List/Gantt/Table/Kanban), not a task id. Reading it would launch
+  // the wrong ticket, so it is rejected rather than guessed at.
+  var match = location.pathname.match(/\/tasks\/(\d+)/);
   if (!match) {
-    alert('No #NN ticket number found on this page.');
+    alert('Open a Vikunja task first — its URL must look like /tasks/123. ' +
+          'A board view (/projects/2/11) is not a task.');
     return;
   }
-  window.open(service + '/ticket/' + match[1], '_blank');
+
+  // The launch page POSTs same-origin once it loads, so no CORS is involved.
+  window.open(service + '/task/' + match[1] + '/launch', '_blank');
 })();

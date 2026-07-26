@@ -68,7 +68,8 @@ class DuplicateLaunchPrevention(ServiceTestCase):
 
         with self.assertRaises(AlreadyRunning) as caught:
             self.service.work(self.service.get(33))
-        self.assertIn("already working ticket #33", str(caught.exception))
+        self.assertIn("already working #33", str(caught.exception))
+        self.assertIn("task 9", str(caught.exception))
 
     def test_refusal_does_not_spawn_a_second_process(self):
         self.service.work(self.service.get(33))
@@ -101,7 +102,7 @@ class DuplicateLaunchPrevention(ServiceTestCase):
             is_alive=lambda pid: pid in self.alive_pids,
             reap=False,
         )
-        self.assertIsNotNone(fresh.active_launch(33))
+        self.assertIsNotNone(fresh.active_launch(9))
         with self.assertRaises(AlreadyRunning):
             fresh.launch(self.service.get(33), "prompt")
 
@@ -113,7 +114,7 @@ class DuplicateLaunchPrevention(ServiceTestCase):
     def test_running_drops_and_clears_a_dead_launch(self):
         self.service.work(self.service.get(33))  # pid 4242 never marked alive
         self.assertEqual(self.launcher.running(), [])
-        self.assertFalse((self.config.lock_dir / "33.json").exists())
+        self.assertFalse((self.config.lock_dir / "task-9.json").exists())
 
 
 class LaunchFailure(ServiceTestCase):
@@ -121,7 +122,7 @@ class LaunchFailure(ServiceTestCase):
         self.spawn.error = FileNotFoundError("no such file: claude")
         with self.assertRaises(LaunchError):
             self.service.work(self.service.get(33))
-        self.assertIsNone(self.launcher.active_launch(33))
+        self.assertIsNone(self.launcher.active_launch(9))
 
     def test_failed_launch_is_logged(self):
         self.spawn.error = FileNotFoundError("no such file: claude")

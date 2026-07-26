@@ -34,7 +34,7 @@ class ClientErrorHandling(ServiceTestCase):
         with self.assertRaises(VikunjaError):
             self.service.work(ticket)
         self.assertEqual(self.spawn.calls, [])
-        self.assertIsNone(self.launcher.active_launch(33))
+        self.assertIsNone(self.launcher.active_launch(9))
 
     def test_missing_project_names_what_it_looked_for(self):
         client = VikunjaClient("http://x/api/v1", "t", transport=self.vikunja)
@@ -106,7 +106,7 @@ class HttpErrorMapping(ServiceTestCase):
         self.alive_pids.add(4242)
         status, body = self.get("/ticket/33/work", method="POST")
         self.assertEqual(status, 409)
-        self.assertIn("already working ticket #33", body["error"])
+        self.assertIn("already working #33", body["error"])
 
     def test_successful_launch_is_202(self):
         status, body = self.get("/ticket/33/work", method="POST")

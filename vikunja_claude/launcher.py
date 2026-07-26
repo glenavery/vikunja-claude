@@ -29,22 +29,25 @@ class LaunchError(RuntimeError):
 
 
 class AlreadyRunning(LaunchError):
-    """A Claude run for this ticket is already in flight."""
+    """A Claude run for this task is already in flight."""
 
-    def __init__(self, ticket_number: int, pid: int, started_at: str):
+    def __init__(self, task_id: int, reference: str, pid: int, started_at: str):
         super().__init__(
-            f"Claude is already working ticket #{ticket_number} "
-            f"(pid {pid}, started {started_at}). Refusing to launch a second run."
+            f"Claude is already working {reference} "
+            f"(task {task_id}, pid {pid}, started {started_at}). "
+            "Refusing to launch a second run."
         )
-        self.ticket_number = ticket_number
+        self.task_id = task_id
+        self.reference = reference
         self.pid = pid
         self.started_at = started_at
 
 
 @dataclass(frozen=True)
 class LaunchRecord:
-    ticket: int
     task_id: int
+    ticket: int | None
+    reference: str
     pid: int
     started_at: str
     log_file: str
@@ -81,51 +84,53 @@ class Launcher:
 
     # -- locks -------------------------------------------------------------
 
-    def _lock_path(self, ticket_number: int) -> Path:
-        return self.config.lock_dir / f"{ticket_number}.json"
+    def _lock_path(self, task_id: int) -> Path:
+        # Keyed by the immutable task id, never by the editable #NN prefix.
+        return self.config.lock_dir / f"task-{task_id}.json"
 
-    def _read_lock(self, ticket_number: int) -> dict | None:
-        path = self._lock_path(ticket_number)
+    def _read_lock(self, task_id: int) -> dict | None:
+        path = self._lock_path(task_id)
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError):
             return None
 
-    def active_launch(self, ticket_number: int) -> dict | None:
-        """The live lock for this ticket, clearing it if the PID is gone."""
-        lock = self._read_lock(ticket_number)
+    def active_launch(self, task_id: int) -> dict | None:
+        """The live lock for this task, clearing it if the PID is gone."""
+        lock = self._read_lock(task_id)
         if lock is None:
             return None
         if self._is_alive(int(lock.get("pid", -1))):
             return lock
-        self._release(ticket_number)
+        self._release(task_id)
         return None
 
-    def _acquire(self, ticket_number: int, payload: dict) -> None:
-        path = self._lock_path(ticket_number)
+    def _acquire(self, task_id: int, reference: str, payload: dict) -> None:
+        path = self._lock_path(task_id)
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
-            existing = self._read_lock(ticket_number) or {}
+            existing = self._read_lock(task_id) or {}
             raise AlreadyRunning(
-                ticket_number,
+                task_id,
+                reference,
                 int(existing.get("pid", -1)),
                 str(existing.get("started_at", "unknown")),
             ) from None
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(payload, handle)
 
-    def _release(self, ticket_number: int) -> None:
-        self._lock_path(ticket_number).unlink(missing_ok=True)
+    def _release(self, task_id: int) -> None:
+        self._lock_path(task_id).unlink(missing_ok=True)
 
     def running(self) -> list[dict]:
         live = []
-        for path in sorted(self.config.lock_dir.glob("*.json")):
+        for path in sorted(self.config.lock_dir.glob("task-*.json")):
             try:
-                number = int(path.stem)
+                task_id = int(path.stem.removeprefix("task-"))
             except ValueError:
                 continue
-            lock = self.active_launch(number)
+            lock = self.active_launch(task_id)
             if lock:
                 live.append(lock)
         return live
@@ -159,10 +164,11 @@ class Launcher:
 
     def launch(self, ticket: Ticket, prompt: str) -> LaunchRecord:
         with self._mutex:
-            existing = self.active_launch(ticket.number)
+            existing = self.active_launch(ticket.task_id)
             if existing is not None:
                 raise AlreadyRunning(
-                    ticket.number,
+                    ticket.task_id,
+                    ticket.reference,
                     int(existing.get("pid", -1)),
                     str(existing.get("started_at", "unknown")),
                 )
@@ -171,15 +177,17 @@ class Launcher:
                 "%Y-%m-%dT%H:%M:%S%z", time.localtime(self._clock())
             )
             stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self._clock()))
-            log_file = self.config.run_log_dir / f"ticket-{ticket.number}-{stamp}.log"
+            log_file = self.config.run_log_dir / f"task-{ticket.task_id}-{stamp}.log"
 
             # Placeholder lock: claims the slot before the process exists, so two
             # concurrent requests cannot both reach spawn.
             self._acquire(
-                ticket.number,
+                ticket.task_id,
+                ticket.reference,
                 {
-                    "ticket": ticket.number,
                     "task_id": ticket.task_id,
+                    "ticket": ticket.number,
+                    "reference": ticket.reference,
                     "pid": os.getpid(),
                     "started_at": started,
                     "log_file": str(log_file),
@@ -199,38 +207,40 @@ class Launcher:
                     start_new_session=True,
                 )
             except OSError as exc:
-                self._release(ticket.number)
+                self._release(ticket.task_id)
                 self._log(
-                    "launch_failed", ticket=ticket.number, error=str(exc)
+                    "launch_failed",
+                    task_id=ticket.task_id,
+                    ticket=ticket.number,
+                    error=str(exc),
                 )
                 raise LaunchError(
                     f"Could not start {self.config.claude_bin!r}: {exc}"
                 ) from exc
 
             record = LaunchRecord(
-                ticket=ticket.number,
                 task_id=ticket.task_id,
+                ticket=ticket.number,
+                reference=ticket.reference,
                 pid=process.pid,
                 started_at=started,
                 log_file=str(log_file),
                 workdir=str(self.config.workdir),
             )
-            self._acquire_overwrite(ticket.number, {**asdict(record), "state": "running"})
+            self._write_lock(ticket.task_id, {**asdict(record), "state": "running"})
             self._log("launched", **asdict(record))
 
         if self._reap:
             threading.Thread(
                 target=self._wait_and_log,
-                args=(ticket.number, process),
+                args=(ticket.task_id, process),
                 daemon=True,
-                name=f"reaper-{ticket.number}",
+                name=f"reaper-task-{ticket.task_id}",
             ).start()
         return record
 
-    def _acquire_overwrite(self, ticket_number: int, payload: dict) -> None:
-        self._lock_path(ticket_number).write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+    def _write_lock(self, task_id: int, payload: dict) -> None:
+        self._lock_path(task_id).write_text(json.dumps(payload), encoding="utf-8")
 
     def _child_env(self, ticket: Ticket) -> dict[str, str]:
         env = dict(os.environ)
@@ -239,13 +249,14 @@ class Launcher:
                 "VIKUNJA_API_URL": self.config.api_url,
                 "VIKUNJA_API_TOKEN": self.config.token,
                 "VIKUNJA_PROJECT": self.config.project_title,
-                "VIKUNJA_TICKET": str(ticket.number),
                 "VIKUNJA_TASK_ID": str(ticket.task_id),
             }
         )
+        if ticket.number is not None:
+            env["VIKUNJA_TICKET"] = str(ticket.number)
         return env
 
-    def _wait_and_log(self, ticket_number: int, process: subprocess.Popen) -> None:
+    def _wait_and_log(self, task_id: int, process: subprocess.Popen) -> None:
         try:
             exit_status = process.wait(timeout=self.config.launch_timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -253,15 +264,15 @@ class Launcher:
             exit_status = None
             self._log(
                 "timeout",
-                ticket=ticket_number,
+                task_id=task_id,
                 pid=process.pid,
                 after_seconds=self.config.launch_timeout_seconds,
             )
         finally:
-            self._release(ticket_number)
+            self._release(task_id)
         self._log(
             "finished",
-            ticket=ticket_number,
+            task_id=task_id,
             pid=process.pid,
             exit_status=exit_status,
         )

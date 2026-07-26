@@ -49,11 +49,11 @@ class PromptGeneration(ServiceTestCase):
 
     def test_blocked_path_moves_to_waiting_with_a_comment(self):
         self.assertIn("BLOCKED:", self.prompt)
-        self.assertIn("vkctl.py move 33 Waiting", self.prompt)
+        self.assertIn("vkctl.py move --task 9 Waiting", self.prompt)
 
     def test_success_path_moves_to_done_with_a_comment(self):
-        self.assertIn("vkctl.py comment 33", self.prompt)
-        self.assertIn("vkctl.py move 33 Done", self.prompt)
+        self.assertIn("vkctl.py comment --task 9", self.prompt)
+        self.assertIn("vkctl.py move --task 9 Done", self.prompt)
 
     def test_names_the_repository(self):
         self.assertIn("/home/glen/stacks/investment", self.prompt)
