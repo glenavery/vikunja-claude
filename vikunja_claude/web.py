@@ -335,12 +335,14 @@ the wrong ticket.</p>
 <pre>{escape(bookmarklet)}</pre>
 
 <h2>Option 2 — userscript (adds a real button)</h2>
-<p>With Tampermonkey installed, <a href="/userscript">install the userscript</a>
-to get a persistent 🤖 button on every task page instead of a bookmark click.</p>
+<p>With Tampermonkey installed,
+<a href="/userscript.user.js">install the userscript</a> to get a persistent 🤖
+button on every task page instead of a bookmark click.</p>
 <ol>
   <li>Install the Tampermonkey extension in Chrome.</li>
-  <li>Open <a href="/userscript"><code>{escape(service_url)}/userscript</code></a>
-      — Tampermonkey offers to install it.</li>
+  <li>Open <a href="/userscript.user.js"><code>{escape(service_url)}/userscript.user.js</code></a>
+      — Tampermonkey offers to install it. (It only recognises
+      <code>.user.js</code> URLs.)</li>
   <li>Open any Vikunja task; the button appears bottom-right.</li>
 </ol>
 

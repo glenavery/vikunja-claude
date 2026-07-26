@@ -79,7 +79,8 @@ class Handler(BaseHTTPRequestHandler):
         (re.compile(r"^/$"), "index"),
         (re.compile(r"^/health$"), "health"),
         (re.compile(r"^/bookmarklet$"), "bookmarklet"),
-        (re.compile(r"^/userscript$"), "userscript"),
+        # Tampermonkey only offers to install from a .user.js URL.
+        (re.compile(r"^/userscript(?:\.user\.js)?$"), "userscript"),
         (re.compile(r"^/launches$"), "launches"),
         (re.compile(r"^/next$"), "next"),
         (re.compile(r"^/task/(\d+)$"), "task"),
@@ -180,7 +181,9 @@ class Handler(BaseHTTPRequestHandler):
         without_port = re.sub(r":\d+$", "", origin)
         if without_port != origin:
             vikunja_origins.append(without_port)
-        self._send(200, web.userscript(origin, vikunja_origins), "text/plain")
+        self._send(
+            200, web.userscript(origin, vikunja_origins), "text/javascript"
+        )
 
     def handle_launches(self) -> None:
         self._json(200, {"launches": self.service.launcher.recent(50)})

@@ -134,11 +134,20 @@ class GeneratedButtons(HttpFlow):
         self.assertIn("https://aiserver.tail36601d.ts.net:3460", body)
         self.assertNotIn("javascript:(function(){var s='http://127.0.0.1:3460'", body)
 
-    def test_userscript_is_served_as_plain_text(self):
+    def test_userscript_is_served_as_javascript(self):
         status, body, headers = self.fetch("/userscript")
         self.assertEqual(status, 200)
-        self.assertTrue(headers["Content-Type"].startswith("text/plain"))
+        self.assertTrue(headers["Content-Type"].startswith("text/javascript"))
         self.assertIn("==UserScript==", body)
+
+    def test_user_js_alias_serves_the_same_script(self):
+        """Tampermonkey only offers to install from a .user.js URL."""
+        status, body, headers = self.fetch("/userscript.user.js")
+        self.assertEqual(status, 200)
+        self.assertTrue(headers["Content-Type"].startswith("text/javascript"))
+        self.assertIn("==UserScript==", body)
+        _, plain, _ = self.fetch("/userscript")
+        self.assertEqual(body, plain)
 
     def test_userscript_matches_the_vikunja_origin_not_the_launcher(self):
         _, body, _ = self.fetch("/userscript", host="aiserver.tail36601d.ts.net:3460")
