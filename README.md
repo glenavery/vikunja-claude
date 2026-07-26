@@ -149,10 +149,10 @@ and shows the outcome — launched, already running, or the error. Navigating
 there is cross-origin (always allowed) and the POST it makes is same-origin, so
 no CORS configuration is needed anywhere.
 
-> The userscript's inline placement next to Vikunja's own task actions is
-> best-effort — if that container isn't found it falls back to a floating
-> button, which is the guaranteed path. I could not drive a real browser in this
-> environment to confirm the inline selector.
+The userscript places its button inline in Vikunja's own task action column
+(`.task-view .action-buttons`, confirmed against Vikunja's compiled
+`TaskDetailView` chunk) and falls back to a floating button if that container
+isn't found.
 
 ## What Claude is told
 
@@ -237,6 +237,10 @@ browser/        bookmarklet source
 cd /home/glen/stacks/vikunja-claude
 python3 -m unittest discover -s tests -t .
 ```
+
+Optional browser tests that drive the real bookmarklet and userscript in
+Chromium live in `browser/tests/` — see the README there. They need Playwright
+and are deliberately not part of the stdlib-only default run.
 
 83 tests, no network and no live Vikunja: the API is faked through an
 injectable transport, and process spawning through an injectable `spawn`.
