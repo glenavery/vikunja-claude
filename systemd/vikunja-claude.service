@@ -1,0 +1,20 @@
+[Unit]
+Description=Vikunja → Claude Code ticket launcher (loopback only)
+Documentation=file:///home/glen/stacks/vikunja-claude/README.md
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/stacks/vikunja-claude
+EnvironmentFile=%h/stacks/vikunja-claude/.env
+# Claude Code is a host install, so this must run as a user service, not in a
+# container: the launcher starts `claude` as a child process of this unit.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -m vikunja_claude
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
