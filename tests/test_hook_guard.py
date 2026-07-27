@@ -23,6 +23,12 @@ BLOCKED = [
     """python3 -c 'call("POST", f"/tasks/{tid}", body)'""",
     """python3 -c 'call("POST", "/tasks/46", {"done": True})'""",
     """curl -X POST "$BASE/tasks/$ID" -d '{"done":true}'""",
+    # Stripping heredoc bodies must not become a way to smuggle the real call:
+    # what follows the heredoc is still a command.
+    """cat > body.html <<'HTML'
+<p>ordinary text</p>
+HTML
+curl -X POST http://127.0.0.1:3456/api/v1/tasks/46 -d '{"done":true}'""",
 ]
 
 ALLOWED = [
@@ -36,6 +42,17 @@ ALLOWED = [
     "python3 vkctl.py close --task 46",
     "git commit -m 'closes tasks/46'",
     "docker exec vikunja-db psql -c 'select * from tasks where id=46'",
+    # Writing ABOUT the hazard is not committing it. This exact command was the
+    # guard's first real false positive: a closing comment quoting the
+    # dangerous call, in a heredoc, blocked from being written.
+    """cat > c.html <<'HTML'
+<p>POST /tasks/{id} replaces the whole task.</p>
+<p>Never <code>curl -X POST .../tasks/46 -d '{"done":true}'</code>.</p>
+HTML
+python3 vkctl.py close --task 61 --comment-file c.html""",
+    # A heredoc that never terminates must not swallow a real command either way
+    # -- it is still data as far as the shell is concerned.
+    "cat > note.txt <<'EOF'\nsee POST /tasks/46\n",
 ]
 
 

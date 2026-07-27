@@ -50,7 +50,24 @@ VikunjaClient.update_task(), which reads the task first and checks afterwards.
 """
 
 
+def strip_heredocs(command: str) -> str:
+    """Remove heredoc bodies before matching.
+
+    A heredoc body is data, not an invocation. Writing *about* this hazard --
+    a closing comment, a README, a ticket description quoting
+    ``POST /tasks/<id>`` -- otherwise trips the guard, which is the fastest way
+    to get a guard switched off. Caught the first time this hook ran for real.
+    """
+    for match in re.finditer(r"<<-?\s*['\"]?(\w+)['\"]?", command):
+        delimiter = match.group(1)
+        end = re.search(rf"^\s*{re.escape(delimiter)}\s*$", command[match.end():], re.M)
+        stop = match.end() + (end.start() if end else len(command))
+        command = command[: match.end()] + command[stop:]
+    return command
+
+
 def is_dangerous(command: str) -> bool:
+    command = strip_heredocs(command)
     if not TASK_ENDPOINT.search(command):
         return False
     if INLINE_POST.search(command):
