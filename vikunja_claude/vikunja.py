@@ -29,6 +29,15 @@ class VikunjaError(RuntimeError):
         self.status = status
 
 
+class DescriptionLost(VikunjaError):
+    """A write shortened or emptied a description it was not meant to touch.
+
+    Raised after the fact -- the damage is already in the database when this
+    fires. It exists so the damage is never silent: an unnoticed wipe is only
+    recoverable until vacuum reclaims the dead TOAST chunks.
+    """
+
+
 class TicketNotFound(VikunjaError):
     pass
 
@@ -262,3 +271,87 @@ class VikunjaClient:
 
     def add_comment(self, task_id: int, text: str) -> None:
         self.call("PUT", f"/tasks/{task_id}/comments", {"comment": text})
+
+    # -- task mutation -----------------------------------------------------
+    #
+    # POST /tasks/{id} is a REPLACE, not a patch: every field absent from the
+    # body is set to its zero value. A body of {"done": true} therefore closes
+    # the ticket and blanks its description. That has destroyed three ticket
+    # descriptions (tasks 5 and 9 on 2026-07-26, task 46 on 2026-07-27), twice
+    # in sessions where the hazard was known and documented -- because the
+    # mistake is made while thinking about the ticket's content, not the API.
+    #
+    # So there is exactly one way to change a task here, it reads before it
+    # writes, and it checks afterwards. Do not add a second one, and do not
+    # call POST /tasks/{id} directly.
+
+    def update_task(
+        self,
+        task_id: int,
+        mutate: Callable[[dict[str, Any]], None],
+        *,
+        description_may_change: bool = False,
+    ) -> dict[str, Any]:
+        """Read the whole task, apply ``mutate``, write the whole task back.
+
+        ``mutate`` receives the full task dict and edits it in place. The
+        description length is compared before and after; unless the caller says
+        it is changing the description, a change means fields were dropped and
+        :class:`DescriptionLost` is raised.
+        """
+        task = self.call("GET", f"/tasks/{task_id}")
+        if not isinstance(task, dict):
+            raise VikunjaError(f"GET /tasks/{task_id} did not return a task")
+        before = len(task.get("description") or "")
+
+        mutate(task)
+
+        updated = self.call("POST", f"/tasks/{task_id}", task) or {}
+        after = len(updated.get("description") or "")
+
+        if not description_may_change and after != before:
+            raise DescriptionLost(
+                f"task {task_id}: description went from {before} to {after} chars "
+                f"during a write that must not have touched it. The old value is "
+                f"probably still recoverable from orphaned TOAST chunks -- see "
+                f"/home/glen/stacks/vikunja/recovery-tools/ and act before vacuum."
+            )
+        return updated
+
+    def close_task(self, task_id: int) -> dict[str, Any]:
+        """Mark a task done, leaving every other field as it was."""
+
+        def mutate(task: dict[str, Any]) -> None:
+            task["done"] = True
+
+        return self.update_task(task_id, mutate)
+
+    def set_description(self, task_id: int, html: str) -> dict[str, Any]:
+        """Replace a task's description, and verify the server stored it."""
+        if not html.strip():
+            raise VikunjaError("refusing to set an empty description")
+
+        def mutate(task: dict[str, Any]) -> None:
+            task["description"] = html
+
+        updated = self.update_task(task_id, mutate, description_may_change=True)
+        stored = updated.get("description") or ""
+        if stored.strip() != html.strip():
+            raise VikunjaError(
+                f"task {task_id}: the stored description differs from what was sent "
+                f"({len(stored)} vs {len(html)} chars). Vikunja may have rewritten "
+                f"the markup; inspect it before assuming the write was clean."
+            )
+        return updated
+
+    def create_task(
+        self, project_id: int, title: str, description: str = ""
+    ) -> dict[str, Any]:
+        """Create a task. PUT on the project is a create and replaces nothing."""
+        body: dict[str, Any] = {"title": title}
+        if description:
+            body["description"] = description
+        created = self.call("PUT", f"/projects/{project_id}/tasks", body) or {}
+        if not created.get("id"):
+            raise VikunjaError(f"create returned no task id: {created!r}")
+        return created

@@ -100,7 +100,53 @@ class FakeVikunja:
         if method == "PUT" and re.match(r"^/tasks/\d+/comments$", path):
             return {"id": 1, "comment": (body or {}).get("comment", "")}
 
+        single = re.match(r"^/tasks/(\d+)$", path)
+        if method == "GET" and single:
+            return deepcopy(self._find(int(single.group(1))))
+
+        # REPLACE semantics, modelled deliberately: the stored task becomes the
+        # body, so a field the caller omitted comes back as its zero value. This
+        # is the real Vikunja behaviour that wipes descriptions, and the tests
+        # are only worth anything if the fake reproduces it rather than being
+        # forgiving.
+        if method == "POST" and single:
+            return deepcopy(self._replace(int(single.group(1)), body or {}))
+
+        created = re.match(rf"^/projects/{PROJECT_ID}/tasks$", path)
+        if method == "PUT" and created:
+            return deepcopy(self._create(body or {}))
+
         raise VikunjaError(f"FakeVikunja has no route for {method} {path}", status=404)
+
+    def _find(self, task_id: int) -> dict:
+        for tasks in self.layout.values():
+            for item in tasks:
+                if item["id"] == task_id:
+                    return item
+        raise VikunjaError(f"no such task {task_id}", status=404)
+
+    def _replace(self, task_id: int, body: dict) -> dict:
+        stored = self._find(task_id)
+        for key in ("title", "description"):
+            stored[key] = body.get(key, "")
+        stored["done"] = bool(body.get("done", False))
+        for key, value in body.items():
+            if key not in ("id", "title", "description", "done"):
+                stored[key] = value
+        return stored
+
+    def _create(self, body: dict) -> dict:
+        new_id = max(
+            (t["id"] for tasks in self.layout.values() for t in tasks), default=0
+        ) + 1
+        item = task(
+            new_id,
+            body.get("title", ""),
+            "2026-07-27T00:00:00Z",
+            body.get("description", ""),
+        )
+        self.layout.setdefault("Backlog", []).append(item)
+        return item
 
     def _move(self, bucket_id: int, task_id: int) -> None:
         target = next(b["title"] for b in BUCKETS if b["id"] == bucket_id)

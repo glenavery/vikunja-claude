@@ -179,10 +179,36 @@ python3 /home/glen/stacks/vikunja-claude/vkctl.py show    --task 11
 python3 /home/glen/stacks/vikunja-claude/vkctl.py comment --task 11 "done: ..."
 python3 /home/glen/stacks/vikunja-claude/vkctl.py move    --task 11 Done
 python3 /home/glen/stacks/vikunja-claude/vkctl.py show    --ticket 35   # by #NN
+python3 /home/glen/stacks/vikunja-claude/vkctl.py close   --task 11 --comment-file c.html
+python3 /home/glen/stacks/vikunja-claude/vkctl.py create  "Title" --desc-file body.html
+python3 /home/glen/stacks/vikunja-claude/vkctl.py edit    --task 11 --desc-file body.html
 ```
 
 Moving to `Done` marks the task done — the Done bucket is the project's
 configured done bucket.
+
+## Never POST a partial task
+
+`POST /tasks/{id}` is a **replace**, not a patch: every field missing from the
+body is set to its zero value, so `-d '{"done":true}'` closes the ticket *and
+blanks its description*. That has destroyed three descriptions (tasks 5 and 9 on
+2026-07-26, task 46 on 2026-07-27), twice in sessions where the hazard was
+already documented — the mistake is made while thinking about the ticket's
+content, not about the API.
+
+So there is one write path, `VikunjaClient.update_task()`: it reads the whole
+task, applies your change, writes the whole task back, and raises
+`DescriptionLost` if the description shrank when it should not have. `close`,
+`edit` and `create` in `vkctl.py` all go through it. Do not add a second path.
+
+`hooks/block_raw_task_post.py` is a `PreToolUse` backstop that refuses a raw
+`POST /tasks/<id>` typed at a shell; it is wired into
+`/home/glen/stacks/investment/.claude/settings.json`. It matches on command
+text, so it is a second layer and never the primary defence.
+
+If a description is lost anyway, it is recoverable from orphaned TOAST chunks
+until vacuum reclaims them — tools and method in
+`/home/glen/stacks/vikunja/recovery-tools/`. Act immediately.
 
 ## Permissions
 
