@@ -239,23 +239,204 @@ Decide that consciously; the service will not decide it for you.
   `~/.local/state/vikunja-claude/launches.jsonl`; each run's full output goes to
   `~/.local/state/vikunja-claude/runs/ticket-NN-<timestamp>.log`.
 
+## The MCP boundary (ChatGPT)
+
+A second, separate service that lets ChatGPT **read a ticket** and **create a
+ticket** — so project context does not have to be pasted in by hand, and a
+ticket dictated in a conversation does not have to be retyped onto the board.
+
+It is a different unit on a different port with a different credential, and it
+shares nothing with the launcher but the Vikunja settings. Stopping it stops
+this integration and nothing else:
+
+```bash
+systemctl --user stop vikunja-claude-mcp     # ChatGPT is disconnected
+systemctl --user status vikunja-claude       # still running
+```
+
+### What it can do
+
+| Tool | Does |
+|---|---|
+| `get_task(task_id)` | Title, full description, status, bucket, labels, timestamps and comments for one task on the **AI Alpha Engine** board |
+| `create_task(project_id, title, description)` | Creates one task on that board and returns its id and URL |
+
+That is the entire surface. There are two tools, they are a fixed list in the
+code, and there is no generic passthrough — so "this connection cannot edit,
+close, delete, comment on or move a task" is a property of what exists, not a
+promise about what will be asked for. `tests/test_mcp_protocol.py` asserts the
+tool set as an *exact* set, which fails the day a third one appears.
+
+It also has no shell, no database connection and no filesystem access beyond
+its own ledger, because nothing in `mcp_service.py` has any of those.
+
+### Rules the write path holds
+
+- **One project, named not defaulted.** `project_id` is required, and a value
+  other than the configured project is refused outright. It is never silently
+  redirected — creating the ticket in the wrong place is the failure this
+  exists to prevent.
+- **A retry is not a second ticket.** Identity is the content: the same
+  project, title and description returns the first task and reports
+  `created: false`. The ledger is on disk, so a restart does not reopen the
+  door. Deliberately not caller-supplied — a client retrying a tool call
+  resends the same arguments, but nothing obliges it to resend the same id.
+- **Descriptions are text, and escaped.** Vikunja stores editor HTML; the tool
+  takes plain text with blank lines between paragraphs and escapes everything,
+  so the stored description reads back as the description that was approved
+  (`test_the_stored_description_is_the_one_that_was_asked_for`), and a
+  description containing `<script>` is content rather than markup.
+- **Failures are explicit.** An unresolvable project, an unreachable Vikunja, a
+  blank title, a rejected create — each comes back as a visible error saying
+  nothing was created. There is no partial or best-effort path.
+- **Every creation is recorded** in `~/.local/state/vikunja-claude/mcp_created_tasks.jsonl`
+  and in the journal. The audit record and the duplicate check are the same
+  file, so a creation cannot be deduplicated without also being logged.
+
+**What is not enforced here:** that the user explicitly asked for the ticket.
+No server can see the conversation. What the server does is require the exact
+title and description as arguments, and declare `create_task` as a non-read-only
+tool so the client asks for confirmation and shows those arguments first. The
+tool description states the requirement in the same words. Keep ChatGPT's
+confirmation prompt on for this connector.
+
+### Setup
+
+**1. Generate the credential.** It is the only thing between the public
+internet and a write path into the board.
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+Put it in `.env` as `VIKUNJA_MCP_TOKEN` (`chmod 600 .env`). The server refuses
+to start without it and refuses anything shorter than 32 characters — there is
+no unauthenticated mode, and no environment variable adds one.
+`tests/test_mcp_config.py` fails if one is ever added.
+
+**2. Start the unit.**
+
+```bash
+ln -sf /home/glen/stacks/vikunja-claude/systemd/vikunja-claude-mcp.service \
+       ~/.config/systemd/user/vikunja-claude-mcp.service
+systemctl --user daemon-reload
+systemctl --user enable --now vikunja-claude-mcp
+curl -s localhost:3461/health | jq
+```
+
+**3. Publish it.** ChatGPT reaches connectors from OpenAI's servers, so a
+tailnet-only address is not enough — it needs a public HTTPS URL. The server
+itself stays bound to loopback and *refuses* to bind anywhere else; Funnel
+terminates TLS in front of it.
+
+```bash
+tailscale funnel --bg --https 8443 http://127.0.0.1:3461
+tailscale funnel status
+```
+
+**This is the one step that puts something of yours on the public internet.**
+After it, the bearer token is the entire access control. Decide it consciously,
+and skip it if ChatGPT is not actually being connected — everything else above
+works over the tailnet without it.
+
+**4. Add the connector.** ChatGPT → Settings → Connectors → enable Developer
+mode → Create. URL is `https://<host>.ts.net:8443/mcp`, authentication is API
+key / bearer token, the value is `VIKUNJA_MCP_TOKEN`. If the dialog offers only
+OAuth and "no authentication", **do not choose no authentication** — leave the
+connector unconfigured and revisit; an open write path into the board is worse
+than pasting tickets by hand.
+
+Verify from the command line first, which is faster than debugging in a chat
+window:
+
+```bash
+curl -s localhost:3461/mcp -H "Authorization: Bearer $VIKUNJA_MCP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
+
+curl -s localhost:3461/mcp -H "Authorization: Bearer $VIKUNJA_MCP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_task","arguments":{"task_id":138}}}' \
+  | jq -r '.result.structuredContent.title'
+```
+
+### Rotating and revoking the credential
+
+Rotation is one value in one file — nothing else stores it, and no token is
+cached anywhere:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(32))'   # new value
+${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env            # replace VIKUNJA_MCP_TOKEN
+systemctl --user restart vikunja-claude-mcp
+```
+
+Then update the connector in ChatGPT. Between the restart and that update,
+ChatGPT gets `401` and can do nothing — rotation fails closed.
+
+Revoking, in increasing order of severity:
+
+```bash
+systemctl --user stop vikunja-claude-mcp     # disconnect now, keep the config
+tailscale funnel --https 8443 off            # off the public internet, keep the service
+systemctl --user disable --now vikunja-claude-mcp   # and do not come back after a reboot
+```
+
+Blanking `VIKUNJA_MCP_TOKEN` is *not* a revocation step — it stops the service
+from starting, which is a failure to boot rather than a closed door. Stop the
+unit instead.
+
+The Vikunja API token is separate and unaffected: the MCP server uses the same
+one as the launcher, so revoking *that* (Vikunja → Settings → API tokens) cuts
+off both services and every ticket the board has open.
+
+### Transport
+
+MCP Streamable HTTP: JSON-RPC over `POST /mcp`, answered as JSON or as a single
+SSE event depending on `Accept`. `GET /mcp` is a `405` because there is no
+server-initiated stream — a half-working channel would be worse than none.
+`GET /health` is the only unauthenticated route, and it says nothing about
+Vikunja, the board or the configuration, because it is reachable without the
+token.
+
+Requests carrying an `Origin` header are refused outright. An MCP client is
+server-to-server and sends none; a browser always does. That closes DNS
+rebinding as a class rather than maintaining a list of origins believed safe.
+
+### Deliberately not built yet
+
+Searching tasks, reading repository or pipeline state, labels and status on
+create. All are approved in principle (task 138) and none are here: this is the
+vertical slice, and every one of them widens either the read surface or the
+write surface. Add them one at a time, each with the test that says what it may
+not reach.
+
 ## Layout
 
 ```
 vikunja_claude/
-  config.py     env-driven settings, optional .env
-  vikunja.py    Vikunja client, Ticket, #NN lookup
-  html_text.py  description HTML → plain text
-  prompt.py     the prompt template
-  launcher.py   locks, spawn, logging, reaping
-  service.py    order of operations: move, then launch
-  web.py        HTML console
-  server.py     routes, status codes, loopback guard
-vkctl.py        board updates for the launched Claude
-tests/          lookup, prompt, duplicate launches, API errors
-systemd/        user unit
-browser/        bookmarklet source
+  config.py       env-driven settings for both services, optional .env
+  vikunja.py      Vikunja client, Ticket, #NN lookup
+  html_text.py    description HTML ↔ plain text
+  prompt.py       the prompt template
+  launcher.py     locks, spawn, logging, reaping
+  service.py      order of operations: move, then launch
+  web.py          HTML console
+  server.py       routes, status codes, loopback guard
+  mcp.py          MCP protocol: JSON-RPC, handshake, fixed tool list
+  mcp_service.py  the two tools, the project rule, the dedup ledger
+  mcp_server.py   MCP transport: bearer auth, one route, loopback guard
+vkctl.py          board updates for the launched Claude
+tests/            lookup, prompt, duplicate launches, API errors, MCP
+systemd/          two user units: launcher, MCP boundary
+browser/          bookmarklet source
 ```
+
+The two services are separate on purpose. The launcher starts host processes
+and must stay on the tailnet; the MCP boundary holds a write credential and is
+the only thing published to the internet. Neither can start, stop or break the
+other, and `tests/test_mcp_config.py` fails if the launcher ever comes to
+require the MCP token or vice versa.
 
 ## Tests
 
@@ -268,14 +449,25 @@ Optional browser tests that drive the real bookmarklet and userscript in
 Chromium live in `browser/tests/` — see the README there. They need Playwright
 and are deliberately not part of the stdlib-only default run.
 
-83 tests, no network and no live Vikunja: the API is faked through an
-injectable transport, and process spawning through an injectable `spawn`.
+171 tests, no network and no live Vikunja: the API is faked through an
+injectable transport, and process spawning through an injectable `spawn`. The
+MCP HTTP tests do bind a real socket, on loopback and an ephemeral port.
 
 Covered: task-id lookup (including that renumbering a title does not change
 which task resolves) and `#NN` lookup (missing, duplicate, unnumbered,
 next-Ready selection); prompt generation (every required clause, and that the
 token never appears); duplicate launch prevention (live, stale, cross-instance,
 per-task isolation); API error handling (401/500/unreachable/bad bucket and the
-HTTP status each maps to); and the browser flow (task routes, `#NN` redirect,
-the launch page's same-origin POST, and that neither generated button will read
-an id from a board-view URL).
+HTTP status each maps to); the browser flow (task routes, `#NN` redirect, the
+launch page's same-origin POST, and that neither generated button will read an
+id from a board-view URL); and the MCP boundary — the exact tool set, the
+project refusal, retry deduplication across a restart, description round-trip,
+bearer authentication, `Origin` rejection, and that a refused request reaches
+Vikunja not at all.
+
+Several MCP tests assert on **the calls the fake Vikunja saw**, not only on
+return values: a refusal that still issued the write would satisfy a return
+value and fail those. Each guard was also checked by deleting it and confirming
+a test goes red — the project restriction, the bearer check, the `Origin`
+refusal, the dedup ledger, the required-argument check and the token
+requirement all fail loudly when removed.

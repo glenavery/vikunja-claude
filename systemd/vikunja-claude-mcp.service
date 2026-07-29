@@ -1,0 +1,36 @@
+[Unit]
+Description=Vikunja MCP boundary for ChatGPT (loopback only, bearer auth)
+Documentation=file:///home/glen/stacks/vikunja-claude/README.md
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/stacks/vikunja-claude
+EnvironmentFile=%h/stacks/vikunja-claude/.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 -m vikunja_claude.mcp_server
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# This unit starts no host processes -- unlike the launcher, it only talks to
+# Vikunja over HTTP -- so it can be confined.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/vikunja-claude
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=default.target

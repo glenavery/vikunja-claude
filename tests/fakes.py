@@ -55,10 +55,16 @@ DEFAULT_LAYOUT = {
 class FakeVikunja:
     """Serves the handful of endpoints the client uses; records every call."""
 
-    def __init__(self, layout: dict[str, list[dict]] | None = None, fail: Any = None):
+    def __init__(
+        self,
+        layout: dict[str, list[dict]] | None = None,
+        fail: Any = None,
+        comments: dict[int, list[dict]] | None = None,
+    ):
         # Copied: moves mutate the layout, and DEFAULT_LAYOUT is module state.
         self.layout = deepcopy(layout if layout is not None else DEFAULT_LAYOUT)
         self.fail = fail
+        self.comments = deepcopy(comments or {})
         self.calls: list[tuple[str, str, dict | None]] = []
 
     def __call__(self, method: str, path: str, body: dict | None = None):
@@ -99,6 +105,10 @@ class FakeVikunja:
 
         if method == "PUT" and re.match(r"^/tasks/\d+/comments$", path):
             return {"id": 1, "comment": (body or {}).get("comment", "")}
+
+        listed = re.match(r"^/tasks/(\d+)/comments$", path)
+        if method == "GET" and listed:
+            return list(self.comments.get(int(listed.group(1)), []))
 
         single = re.match(r"^/tasks/(\d+)$", path)
         if method == "GET" and single:

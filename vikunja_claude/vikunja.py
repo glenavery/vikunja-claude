@@ -272,6 +272,13 @@ class VikunjaClient:
     def add_comment(self, task_id: int, text: str) -> None:
         self.call("PUT", f"/tasks/{task_id}/comments", {"comment": text})
 
+    def list_comments(self, task_id: int) -> list[dict[str, Any]]:
+        """A task's comments, oldest first. Read-only."""
+        comments = self.call("GET", f"/tasks/{task_id}/comments") or []
+        if not isinstance(comments, list):
+            raise VikunjaError(f"GET /tasks/{task_id}/comments did not return a list")
+        return comments
+
     # -- task mutation -----------------------------------------------------
     #
     # POST /tasks/{id} is a REPLACE, not a patch: every field absent from the
