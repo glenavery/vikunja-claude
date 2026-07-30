@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import re
 import tempfile
-import urllib.parse
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -20,7 +19,7 @@ from vikunja_claude.mcp import McpProtocol, ToolError
 from vikunja_claude.mcp_service import McpService, idempotency_key
 from vikunja_claude.vikunja import VikunjaClient, VikunjaError
 
-from .fakes import PROJECT_ID, VIEW_ID, FakeVikunja, task
+from .fakes import PROJECT_ID, VIEW_ID, FakeVikunja, FilterIgnoringVikunja, task
 from .support import McpTestCase, make_mcp_config
 
 OTHER_PROJECT_ID = 1
@@ -182,11 +181,12 @@ class TestListingIsNotOnePageOfEachBucket(McpTestCase):
         )
 
     def test_a_single_request_really_would_have_been_short(self):
-        """Guards the test above: without paging the fake stops at 50."""
-        one_page = self.client.list_tickets(PROJECT_ID, VIEW_ID)
-        backlog = [t for t in one_page if t.bucket_title == "Backlog"]
-        self.assertEqual(len(backlog), 50)
-        self.assertLess(len(backlog), self.BACKLOG)
+        """Guards the test above: one page of the Backlog bucket stops at 50."""
+        page = self.client._view_page(PROJECT_ID, VIEW_ID, 1, None)
+        backlog = next(b for b in page if b["title"] == "Backlog")
+        self.assertEqual(len(backlog["tasks"]), 50)
+        self.assertLess(len(backlog["tasks"]), self.BACKLOG)
+        self.assertEqual(backlog["count"], self.BACKLOG)
 
     def test_it_asked_for_more_than_one_page(self):
         self.service.list_open_tasks()
@@ -231,17 +231,9 @@ class TestAVikunjaThatIgnoresTheFilter(McpTestCase):
     filtering as evidence that the server served short.
     """
 
-    class Unfiltered(FakeVikunja):
-        def _view_tasks(self, path: str) -> list[dict]:
-            return super()._view_tasks(path.split("?")[0] + "?" + "&".join(
-                part
-                for part in urllib.parse.urlsplit(path).query.split("&")
-                if not part.startswith("filter=")
-            ))
-
     def setUp(self) -> None:
         super().setUp()
-        self.vikunja = self.Unfiltered()
+        self.vikunja = FilterIgnoringVikunja()
         self.client = VikunjaClient(
             self.config.api_url, self.config.token, transport=self.vikunja
         )
@@ -253,7 +245,7 @@ class TestAVikunjaThatIgnoresTheFilter(McpTestCase):
 
     def test_the_server_really_did_hand_over_the_done_task(self):
         """Guards the test above: without this the fake proves nothing."""
-        served = self.client.list_tickets(PROJECT_ID, VIEW_ID)
+        served = self.client.list_all_tickets(PROJECT_ID, VIEW_ID)
         self.assertIn(1, {t.task_id for t in served})
 
     def test_filtering_client_side_is_not_mistaken_for_a_short_read(self):
