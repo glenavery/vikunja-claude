@@ -502,6 +502,19 @@ class McpConfig:
         return self.state_dir / "mcp_created_tasks.jsonl"
 
     @property
+    def mutation_ledger_path(self) -> Path:
+        """Every change this boundary made to a task that already existed.
+
+        Separate from the creation ledger because it answers a different
+        question and carries a different payload: it records the value that was
+        *replaced*, which is the only copy of it left once Vikunja has taken the
+        write. Deduplication does not read this file — an update that changes
+        nothing is recognised from the board itself, so an edit cannot be
+        deduplicated without being recorded.
+        """
+        return self.state_dir / "mcp_task_mutations.jsonl"
+
+    @property
     def oauth_state_path(self) -> Path:
         """Registered clients, live codes and live tokens.
 

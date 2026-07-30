@@ -411,8 +411,14 @@ class VikunjaClient:
         )
         return bucket_id
 
-    def add_comment(self, task_id: int, text: str) -> None:
-        self.call("PUT", f"/tasks/{task_id}/comments", {"comment": text})
+    def add_comment(self, task_id: int, text: str) -> dict[str, Any]:
+        """Append a comment. Additive -- it replaces nothing on the task.
+
+        Returns what Vikunja stored, so a caller can report the comment's own
+        id rather than only that the call did not raise.
+        """
+        created = self.call("PUT", f"/tasks/{task_id}/comments", {"comment": text})
+        return created if isinstance(created, dict) else {}
 
     def list_comments(self, task_id: int) -> list[dict[str, Any]]:
         """A task's comments, oldest first. Read-only."""
@@ -490,6 +496,56 @@ class VikunjaClient:
                 f"task {task_id}: the stored description differs from what was sent "
                 f"({len(stored)} vs {len(html)} chars). Vikunja may have rewritten "
                 f"the markup; inspect it before assuming the write was clean."
+            )
+        return updated
+
+    def set_task_fields(
+        self,
+        task_id: int,
+        *,
+        title: str | None = None,
+        description_html: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace a task's title, description, or both, and verify the result.
+
+        Built on :meth:`update_task`, so it is the same read-modify-write and
+        not a second way to change a task: a field left as ``None`` is carried
+        across from what was read rather than sent as a zero value.
+
+        One call for both fields on purpose. Two writes would leave a window in
+        which the task carries the new title and the old description, and the
+        caller is approving one change, not two.
+        """
+        if title is None and description_html is None:
+            raise VikunjaError("set_task_fields was given nothing to change")
+        if title is not None and not title.strip():
+            raise VikunjaError("refusing to set an empty title")
+        if description_html is not None and not description_html.strip():
+            raise VikunjaError("refusing to set an empty description")
+
+        def mutate(task: dict[str, Any]) -> None:
+            if title is not None:
+                task["title"] = title
+            if description_html is not None:
+                task["description"] = description_html
+
+        updated = self.update_task(
+            task_id, mutate, description_may_change=description_html is not None
+        )
+
+        # Read back what the server kept. Vikunja sanitises the description
+        # markup, so a write that "succeeded" can still not hold what was sent.
+        if title is not None and (updated.get("title") or "") != title:
+            raise VikunjaError(
+                f"task {task_id}: the stored title differs from what was sent "
+                f"({(updated.get('title') or '')!r} vs {title!r})."
+            )
+        stored = updated.get("description") or ""
+        if description_html is not None and stored.strip() != description_html.strip():
+            raise VikunjaError(
+                f"task {task_id}: the stored description differs from what was sent "
+                f"({len(stored)} vs {len(description_html)} chars). Vikunja may have "
+                f"rewritten the markup; inspect it before assuming the write was clean."
             )
         return updated
 

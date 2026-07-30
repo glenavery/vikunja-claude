@@ -242,9 +242,10 @@ Decide that consciously; the service will not decide it for you.
 ## The MCP boundary (ChatGPT)
 
 A second, separate service that lets ChatGPT **read the board**, **create a
-ticket** and **read a few operational facts about the AI Server** — so project
-context does not have to be pasted in by hand, and a ticket dictated in a
-conversation does not have to be retyped onto the board.
+ticket**, **correct a ticket's wording**, **comment on one** and **read a few
+operational facts about the AI Server** — so project context does not have to be
+pasted in by hand, and a ticket dictated in a conversation does not have to be
+retyped onto the board.
 
 It is a different unit on a different port with a different credential, and it
 shares nothing with the launcher but the Vikunja settings. Stopping it stops
@@ -263,6 +264,8 @@ systemctl --user status vikunja-claude       # still running
 | `list_open_tasks(bucket?, label?)` | Every task that is not done on that board — id, title, bucket, priority, labels and timestamps, most urgent first. No descriptions, no comments |
 | `search_tasks(text, status?)` | Tasks whose title or description contains `text`. `status` is `open` (default), `done` or `any` — this is the one read that can see finished tasks, so it is what answers "is there already a ticket about this" |
 | `create_task(project_id, title, description)` | Creates one task on that board and returns its id and URL |
+| `update_task(task_id, title?, description?, approval_token?)` | Replaces one existing task's title, description or both. Two calls: the first returns the exact current and proposed values with an approval token and writes nothing; the second must carry that token |
+| `add_task_comment(task_id, comment, approval_token?)` | Appends one plain-text comment to an existing task, behind the same two-call approval |
 
 Plus three **operational reads**, present only when they are configured (see
 [Operational reads](#operational-reads-ai-server-status) below):
@@ -274,10 +277,15 @@ Plus three **operational reads**, present only when they are configured (see
 | `get_system_health()` | Backup age, disks, Docker, scheduled jobs, database and API, with one folded overall status |
 
 That is the entire surface. The tools are a fixed list in the code, and there is
-no generic passthrough — so "this connection cannot edit, close, delete, comment
-on or move a task" is a property of what exists, not a promise about what will
+no generic passthrough — so "this connection cannot close, delete, move, label
+or reassign a task" is a property of what exists, not a promise about what will
 be asked for. `tests/test_mcp_protocol.py` asserts the tool set as an *exact*
 set, which fails the day an unintended one appears.
+
+The two edits were added by task 196, which moved that boundary deliberately;
+the tests that used to say "nothing here can edit or comment" were re-anchored
+rather than deleted, so they now say which two tools may write and hold those
+two to a stricter rule than a name check could.
 
 `search_tasks` matches in Python over the walked board, not through Vikunja's
 filter language. A filter is an expression, and building one out of
@@ -355,6 +363,54 @@ title and description as arguments, and declare `create_task` as a non-read-only
 tool so the client asks for confirmation and shows those arguments first. The
 tool description states the requirement in the same words. Keep ChatGPT's
 confirmation prompt on for this connector.
+
+### Rules the two edits hold (task 196)
+
+`update_task` and `add_task_comment` are the only tools that can change
+something that already exists. Everything above still applies to them; these are
+the rules they add.
+
+- **Two calls, and the first one writes nothing.** A call without
+  `approval_token` reads the task and returns the exact current value beside the
+  exact proposed one — plus a token naming that one change. Only a second call
+  carrying that token writes. So the before-and-after text has to pass through
+  the conversation, where the user can see it, before anything can be written.
+- **An approval is for one exact change.** The token binds the task, the kind of
+  change, the submitted text *and* the value the task held when it was issued.
+  Different text, a different task, a second field added afterwards, or a task
+  somebody edited in between — each is refused with the reason, and nothing is
+  written. It is single use, and a mismatch spends it too: an approval that no
+  longer describes the change is not one to retry with.
+- **This is not proof that a human said yes, and is not sold as one.** No server
+  can see the conversation. What it proves is that no edit happens without a
+  prior round trip that put the before and after in front of the client, and
+  that what lands is byte-for-byte what that round trip described. The approval
+  table is in memory and dies with the process, because an approval describes a
+  task as it was moments ago.
+- **Whole values only.** There is no partial replacement and no find-and-replace:
+  the caller submits the complete new title or description, which is the same
+  text the user is shown, so what was approved and what is stored cannot drift.
+- **Two fields, in one write.** Title and description, and nothing else — no
+  status, bucket, label, assignee, priority, due date or deletion, and
+  `additionalProperties: false` means an unlisted field cannot be smuggled into
+  a whole-task replace. Both fields go in one `set_task_fields` call, built on
+  the client's single read-modify-write path, so the task never sits with a new
+  title and an old description.
+- **The task is found through this project's board view**, exactly as the reads
+  are, so a task on somebody else's board is not in the answer to begin with.
+  The refusal does not depend on comparing a project id the caller supplied, and
+  it cannot be bought with a valid approval for a different task.
+- **Idempotent, in the way each one can be.** An update to the value a task
+  already holds changes nothing and says so — which is also what a repeat of an
+  applied change lands on. A comment identical to one already on the task
+  returns that comment instead of writing a second copy; that is read from the
+  board rather than from a ledger, so it survives a restart and also catches a
+  comment somebody else left.
+- **Every change is recorded**, with the value it replaced, in
+  `~/.local/state/vikunja-claude/mcp_task_mutations.jsonl` and in the journal.
+  Once Vikunja has taken the write that record is the only copy of the old text
+  left, which is the point — this repo has lost three ticket descriptions to
+  `POST /tasks/{id}` already.
 
 ### Authentication: OAuth, and only OAuth
 

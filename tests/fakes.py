@@ -110,8 +110,11 @@ class FakeVikunja:
             self._move(int(moved.group(1)), int((body or {})["task_id"]))
             return None
 
-        if method == "PUT" and re.match(r"^/tasks/\d+/comments$", path):
-            return {"id": 1, "comment": (body or {}).get("comment", "")}
+        added = re.match(r"^/tasks/(\d+)/comments$", path)
+        if method == "PUT" and added:
+            return deepcopy(
+                self._comment(int(added.group(1)), (body or {}).get("comment", ""))
+            )
 
         listed = re.match(r"^/tasks/(\d+)/comments$", path)
         if method == "GET" and listed:
@@ -171,6 +174,25 @@ class FakeVikunja:
                 }
             )
         return served
+
+    def _comment(self, task_id: int, html: str) -> dict:
+        """Store a comment and hand back what was stored.
+
+        Comments are kept rather than acknowledged, because "the same comment
+        twice" is only recognisable to a caller that can read back what is
+        already on the task. A fake that answered every write with a canned id
+        would make duplicate suppression untestable.
+        """
+        stored = self.comments.setdefault(task_id, [])
+        existing = [c["id"] for tasks in self.comments.values() for c in tasks]
+        comment = {
+            "id": max(existing, default=0) + 1,
+            "comment": html,
+            "created": "2026-07-30T12:00:00Z",
+            "author": {"username": "mcp"},
+        }
+        stored.append(comment)
+        return comment
 
     def _find(self, task_id: int) -> dict:
         for tasks in self.layout.values():
