@@ -118,10 +118,16 @@ class InvestmentStatusClient:
                 "— this is not a statement about the system's health."
             )
         if code == 404:
+            # Two causes, and naming only the first is how a stale deployment gets
+            # misdiagnosed as a misconfiguration — which is what happened the
+            # first time these reads were switched on against a live admin
+            # instance that had not been restarted since they were merged.
             return (
-                f"The investment API has no {path} ({code}). The operational "
-                "endpoints exist only on the admin instance (INSTANCE_MODE="
-                "admin); INVESTMENT_API_URL is probably pointed at the public one."
+                f"The investment API has no {path} ({code}). Either "
+                "INVESTMENT_API_URL points at the public instance — these "
+                "endpoints are registered on the admin one only (INSTANCE_MODE="
+                "admin) — or the admin instance is running code from before they "
+                "existed and has not been restarted. Nothing was read."
             )
         return f"The investment API returned HTTP {code} for {path}."
 
