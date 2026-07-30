@@ -29,6 +29,7 @@ from .support import (
     CONNECTOR_REDIRECT_URI,
     PASSPHRASE,
     REDIRECT_URI,
+    VIKUNJA_TOOLS,
     HttpTestCase,
     make_mcp_config,
 )
@@ -821,10 +822,8 @@ class TestTheGrantedSurface(HttpTestCase):
         _, _, text = self.rpc("tools/list")
         return {tool["name"] for tool in json.loads(text)["result"]["tools"]}
 
-    def test_it_is_exactly_the_three_tools_the_boundary_defines(self):
-        self.assertEqual(
-            self.tool_names(), {"get_task", "list_open_tasks", "create_task"}
-        )
+    def test_it_is_exactly_the_tools_the_boundary_defines(self):
+        self.assertEqual(self.tool_names(), VIKUNJA_TOOLS)
 
     def test_a_valid_token_can_read_a_task(self):
         _, _, text = self.rpc(

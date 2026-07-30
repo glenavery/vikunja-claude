@@ -241,9 +241,10 @@ Decide that consciously; the service will not decide it for you.
 
 ## The MCP boundary (ChatGPT)
 
-A second, separate service that lets ChatGPT **read a ticket** and **create a
-ticket** — so project context does not have to be pasted in by hand, and a
-ticket dictated in a conversation does not have to be retyped onto the board.
+A second, separate service that lets ChatGPT **read the board**, **create a
+ticket** and **read a few operational facts about the AI Server** — so project
+context does not have to be pasted in by hand, and a ticket dictated in a
+conversation does not have to be retyped onto the board.
 
 It is a different unit on a different port with a different credential, and it
 shares nothing with the launcher but the Vikunja settings. Stopping it stops
@@ -260,13 +261,28 @@ systemctl --user status vikunja-claude       # still running
 |---|---|
 | `get_task(task_id)` | Title, full description, status, bucket, labels, timestamps and comments for one task on the **AI Alpha Engine** board |
 | `list_open_tasks(bucket?, label?)` | Every task that is not done on that board — id, title, bucket, priority, labels and timestamps, most urgent first. No descriptions, no comments |
+| `search_tasks(text, status?)` | Tasks whose title or description contains `text`. `status` is `open` (default), `done` or `any` — this is the one read that can see finished tasks, so it is what answers "is there already a ticket about this" |
 | `create_task(project_id, title, description)` | Creates one task on that board and returns its id and URL |
+
+Plus three **operational reads**, present only when they are configured (see
+[Operational reads](#operational-reads-ai-server-status) below):
+
+| Tool | Does |
+|---|---|
+| `get_repository_state()` | Branch, commit, commit subject and whether the investment checkout's working tree is clean |
+| `get_pipeline_status()` | The latest nightly-pipeline run: status, every stage's own outcome, what S7 did, whether each portfolio got a report |
+| `get_system_health()` | Backup age, disks, Docker, scheduled jobs, database and API, with one folded overall status |
 
 That is the entire surface. The tools are a fixed list in the code, and there is
 no generic passthrough — so "this connection cannot edit, close, delete, comment
 on or move a task" is a property of what exists, not a promise about what will
 be asked for. `tests/test_mcp_protocol.py` asserts the tool set as an *exact*
 set, which fails the day an unintended one appears.
+
+`search_tasks` matches in Python over the walked board, not through Vikunja's
+filter language. A filter is an expression, and building one out of
+model-supplied text to look for a *literal* is the wrong shape for the job; the
+only filter this boundary ever sends is the constant `done = false`.
 
 ### Rules the reads hold
 
@@ -537,6 +553,102 @@ The Vikunja API token is separate and unaffected: the MCP server uses the same
 one as the launcher, so revoking *that* (Vikunja → Settings → API tokens) cuts
 off both services and every ticket the board has open.
 
+### Operational reads (AI Server status)
+
+Three read-only facts about the AI Server itself: what code is deployed, what
+last night's pipeline did, and whether the machine is healthy. They exist so a
+conversation can start from the real state instead of from a paste.
+
+**This boundary computes none of them.** It runs no commands and touches no
+database. It issues `GET` to three fixed paths on the investment application,
+which owns all three facts already and decides *there* what an external
+integration may see (`api/operational_reads.py` in that repository). There is no
+path argument anywhere between a tool and the request, so the client cannot be
+aimed at any other endpoint of that API — `tests/test_mcp_operational.py` asserts
+the client's public surface is exactly those three methods and that it has no
+write method at all.
+
+What is deliberately **not** returned, even though the health check computes it:
+`journalctl` output, and raw crontab lines. Both can carry environment variables
+and secrets. The projection on the investment side is a named allow-list rather
+than a passthrough, so a field added to a health check upstream is not published
+here until somebody publishes it.
+
+Two other things it will not do. It will not report a state it failed to read as
+a healthy one — an unreachable API, a rejected key and a 404 each come back as an
+error saying *nothing was read*. And it repairs nothing: the admin System page
+fails a timed-out pipeline run as a side effect of being loaded, and this read
+reports `running_past_timeout` instead, because a read that mutates what it reads
+is a write path wearing a read's name.
+
+#### Enabling them
+
+Both settings or neither. Unset, the three tools are **not advertised at all** —
+a tool that can never succeed is read by a model as a capability, and its failure
+reported as a fact about the system rather than about the configuration.
+Half-configured is a refusal to start, so "off" has exactly one meaning.
+
+```bash
+${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env
+#   INVESTMENT_API_URL=http://100.105.117.8:8002      # the ADMIN instance
+#   INVESTMENT_API_KEY=<the investment API_KEY>
+systemctl --user restart vikunja-claude-mcp
+systemctl --user status vikunja-claude-mcp | grep operational
+#   … operational reads via http://100.105.117.8:8002
+```
+
+The URL must be the **admin** instance (`INSTANCE_MODE=admin`, Tailscale
+`:8002`). These paths do not exist on the public instance at all — no route is
+registered, so they `404` there rather than `401`, with or without a valid key.
+Pointing at `:8001` gets a 404 whose message says so.
+
+Plain `http` is accepted only to loopback or a Tailscale address, because the
+tailnet is the encryption; anywhere else it would put `INVESTMENT_API_KEY` on the
+wire in clear text and configuration refuses to load.
+
+#### Turning them off
+
+```bash
+${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env   # remove BOTH settings
+systemctl --user restart vikunja-claude-mcp            # the three tools disappear
+```
+
+Nothing else changes: the Vikunja tools, the board, the ledger and the OAuth
+grants are untouched, and the investment application is not modified or
+restarted. `tests/test_mcp_operational.py` asserts that switching them off
+removes exactly those three names and nothing more.
+
+#### The investment credential: rotation and revocation
+
+`INVESTMENT_API_KEY` is the investment application's own `API_KEY` — the same
+value its scripts use. It is a **read-only** capability *here* (this boundary
+issues GET to three paths and has no method that could do otherwise), but the key
+itself is not read-only elsewhere, so treat it as a live credential.
+
+**Revoke this integration's use of it** without touching the key at all — remove
+the two settings and restart, as above. That is the cheapest and usually the
+right move.
+
+**Rotate the key** (affects every consumer of the investment API, not just this
+one):
+
+```bash
+python3 -c 'import secrets; print(secrets.token_hex(32))'      # new value
+${EDITOR:-vim} /home/glen/stacks/investment/.env               # replace API_KEY
+sudo systemctl restart investment-api-public investment-api-admin
+${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env           # replace INVESTMENT_API_KEY
+systemctl --user restart vikunja-claude-mcp
+```
+
+Rotate in that order. The API refuses the old key the moment it restarts, so a
+boundary still holding it reports "the configured INVESTMENT_API_KEY is not
+accepted" — a named configuration failure rather than a silent gap or a false
+clean bill of health.
+
+The two credentials are independent: revoking the Vikunja API token cuts the
+board off and leaves the operational reads working, and removing
+`INVESTMENT_API_KEY` does the reverse.
+
 ### Transport
 
 MCP Streamable HTTP: JSON-RPC over `POST /mcp`, answered as JSON or as a single
@@ -574,6 +686,7 @@ vikunja_claude/
   server.py       routes, status codes, loopback guard
   mcp.py          MCP protocol: JSON-RPC, handshake, fixed tool list
   mcp_service.py  the tools, the project rule, the dedup ledger
+  investment.py   read-only client for the three AI Server operational reads
   mcp_server.py   HTTP routing: the OAuth routes, one MCP route, loopback guard
   oauth.py        the OAuth 2.1 authorization server: metadata, PKCE, consent
   oauth_store.py  clients, codes and tokens as one 0600 JSON file
