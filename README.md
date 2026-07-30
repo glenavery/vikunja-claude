@@ -268,20 +268,34 @@ on or move a task" is a property of what exists, not a promise about what will
 be asked for. `tests/test_mcp_protocol.py` asserts the tool set as an *exact*
 set, which fails the day an unintended one appears.
 
-### Rules the listing holds
+### Rules the reads hold
 
 `get_task` needs an id you already have. `list_open_tasks` is what answers
-"what is open" — and the only failure that matters for a listing is a quiet one,
-so:
+"what is open". Both read the board through the same paging, and the only
+failure that matters for either is a quiet one, so:
 
 - **No limit argument, and no default page size.** An answer that stopped at
   fifty would be indistinguishable from a board with fifty things left.
 - **Paging is walked, then checked.** Vikunja pages tasks *inside* each kanban
   column, caps a page at 50 and **ignores `per_page`** — the live board answers
   a request for 250 with 50 and reports `count: 170`. So one request is the
-  first page of each column, not a listing. `list_open_tickets` walks the pages
-  and compares what arrived against the totals Vikunja reports; a short read
-  raises instead of returning a shorter board.
+  first page of each column, not a listing. `_walk_view` walks the pages and
+  compares what arrived against the totals Vikunja reports; a short read raises
+  instead of returning a shorter board. **There is deliberately no "first page"
+  read left in the client** — that one was what made `get_task` deny task 35,
+  which exists, while blaming the caller for confusing a task id with a view id.
+- **A lookup by id asks for that id, and a miss is not an absence.**
+  `find_by_task_id` filters the view to the one id, which is constant cost and
+  keeps the project boundary structural — it is *this project's* view, so
+  another project's task is not in the answer to begin with. (`GET /tasks/{id}`
+  would be one request too, but it serves any task in any project and reports
+  `bucket_id: 0`, so it can answer neither "is this mine" nor "which column".)
+  If the filter yields nothing, the complete walk runs before "no such task" is
+  said. Note which failure that guards: a filter the server *ignores* is
+  harmless, because the walk then covers the whole board anyway — the harmful
+  one is a filter that is applied and matches nothing, whose reply is
+  well-formed and consistent and says nothing about the difference between
+  "missing" and "unmatched". Both modes have a fake and a test.
 - **`done = false` is sent to save a walk, never to decide the answer.** Every
   row is checked again client-side, so a Vikunja that ignored the filter would
   be slower and not wronger.

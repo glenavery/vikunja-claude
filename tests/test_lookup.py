@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 
+from vikunja_claude.service import TicketService
 from vikunja_claude.vikunja import (
     AmbiguousTicket,
     TicketNotFound,
+    VikunjaClient,
     ticket_number,
 )
 
-from .fakes import task
+from .fakes import FilterIgnoringVikunja, FilterMatchingNothingVikunja, task
 from .support import ServiceTestCase
 
 
@@ -108,6 +111,179 @@ class TaskIdLookup(ServiceTestCase):
         )
         self.assertEqual(self.service.get_task(9).task_id, 9)
         self.assertEqual(self.service.get_task(77).task_id, 77)
+
+
+#: Bigger than one Vikunja page (50), so the tasks below live on page 3 and are
+#: unreachable to anything that reads a single page of the bucket.
+DEEP_DONE = [
+    task(2000 + i, f"#{2000 + i} Closed long ago", "2026-07-20T00:00:00Z", done=True)
+    for i in range(120)
+]
+
+
+class ADeepBucketIsStillReachable(ServiceTestCase):
+    """Task 185: `get_task` denied task 35, which exists.
+
+    Vikunja pages tasks *inside* a bucket at 50 and ignores `per_page`, so the
+    Done column on the live board (170 tasks) hid everything past the first
+    page. The failure was the bad kind: a task that exists reported as absent,
+    with a message blaming the caller for confusing a task id with a view id.
+    """
+
+    layout = {
+        "Backlog": [task(5, "#29 Admin", "2026-07-26T05:01:00Z")],
+        "Ready": [task(9, "#33 Back up Vikunja database", "2026-07-26T05:05:50Z")],
+        "In Progress": [],
+        "Waiting": [],
+        "Done": DEEP_DONE,
+    }
+
+    DEEP = 2119  # the last task in Done: page 3 of that bucket
+
+    def test_the_bucket_really_is_deeper_than_one_page(self):
+        """Guards every test below: with a 50-task Done none of them mean anything."""
+        page = self.client._view_page(2, 12, 1, None)
+        done = next(b for b in page if b["title"] == "Done")
+        self.assertEqual(len(done["tasks"]), 50)
+        self.assertEqual(done["count"], len(DEEP_DONE))
+        self.assertNotIn(self.DEEP, {t["id"] for t in done["tasks"]})
+
+    def test_a_task_on_the_third_page_resolves(self):
+        ticket = self.service.get_task(self.DEEP)
+        self.assertEqual(ticket.task_id, self.DEEP)
+        self.assertEqual(ticket.bucket_title, "Done")
+        self.assertTrue(ticket.done)
+
+    def test_every_task_in_the_deep_bucket_resolves(self):
+        for item in DEEP_DONE:
+            self.assertEqual(self.service.get_task(item["id"]).task_id, item["id"])
+
+    def test_the_hash_prefix_lookup_reaches_it_too(self):
+        ticket = self.service.get(2119)
+        self.assertEqual(ticket.task_id, self.DEEP)
+
+    def test_a_genuinely_absent_task_is_still_not_found(self):
+        """"Not found" has to keep meaning not present."""
+        with self.assertRaises(TicketNotFound):
+            self.service.get_task(4242)
+
+    def test_a_shallow_task_still_resolves(self):
+        self.assertEqual(self.service.get_task(9).number, 33)
+
+
+class ALookupWhenTheFilterDoesNothing(ServiceTestCase):
+    """The id filter is an optimisation; correctness may not depend on it.
+
+    This is the harmless mode, and it is worth pinning as harmless: a filter
+    the server ignores turns the single-id request back into a walk of the
+    whole board, which is slower and still complete. Compare
+    :class:`ALookupWhenTheFilterMatchesNothing`, which is the mode that bites.
+    """
+
+    layout = ADeepBucketIsStillReachable.layout
+    DEEP = ADeepBucketIsStillReachable.DEEP
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.vikunja = FilterIgnoringVikunja(layout=self.layout)
+        self.client = VikunjaClient(
+            self.config.api_url, self.config.token, transport=self.vikunja
+        )
+        self.service = TicketService(self.config, self.client, self.launcher)
+
+    def test_the_filter_really_is_being_ignored(self):
+        """Guards the test below: otherwise the fallback is never exercised."""
+        served = self.client._view_page(2, 12, 1, "id = %d" % self.DEEP)
+        self.assertGreater(sum(len(b.get("tasks") or []) for b in served), 1)
+
+    def test_the_deep_task_still_resolves(self):
+        self.assertEqual(self.service.get_task(self.DEEP).task_id, self.DEEP)
+
+    def test_an_absent_task_is_still_not_found(self):
+        with self.assertRaises(TicketNotFound):
+            self.service.get_task(4242)
+
+
+class ALookupWhenTheFilterMatchesNothing(ServiceTestCase):
+    """A filtered miss is not an absence, and this is why.
+
+    An ignored filter is the harmless mode: the server answers with the whole
+    board and the walk over it stays complete. A filter that is *applied* and
+    matches nothing is the harmful one — the answer is well-formed, `count`
+    agrees with what was served, and nothing in it says the task is missing
+    rather than unmatched.
+    """
+
+    layout = ADeepBucketIsStillReachable.layout
+    DEEP = ADeepBucketIsStillReachable.DEEP
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.vikunja = FilterMatchingNothingVikunja(layout=self.layout)
+        self.client = VikunjaClient(
+            self.config.api_url, self.config.token, transport=self.vikunja
+        )
+        self.service = TicketService(self.config, self.client, self.launcher)
+
+    def test_the_filter_really_does_match_nothing(self):
+        """Guards the tests below: otherwise the fallback is never reached."""
+        served = self.client._view_page(2, 12, 1, f"id = {self.DEEP}")
+        self.assertEqual(sum(len(b.get("tasks") or []) for b in served), 0)
+        self.assertEqual({b.get("count") for b in served}, {0})
+
+    def test_a_shallow_task_still_resolves(self):
+        self.assertEqual(self.service.get_task(9).number, 33)
+
+    def test_the_deep_task_still_resolves(self):
+        self.assertEqual(self.service.get_task(self.DEEP).task_id, self.DEEP)
+
+    def test_an_absent_task_is_still_not_found(self):
+        with self.assertRaises(TicketNotFound):
+            self.service.get_task(4242)
+
+
+class TheLookupStaysInsideItsProject(ServiceTestCase):
+    """A task id that belongs to another project is refused, not served."""
+
+    #: On somebody else's board. It is a real task with a real id.
+    FOREIGN = 4242
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.vikunja.foreign = {
+            self.FOREIGN: task(self.FOREIGN, "#1 Someone else's ticket", "2026-07-01T00:00:00Z")
+        }
+
+    def test_the_foreign_task_really_is_fetchable_by_bare_id(self):
+        """Guards the test below: otherwise 'refused' is just 'does not exist'."""
+        fetched = self.client.call("GET", f"/tasks/{self.FOREIGN}")
+        self.assertEqual(fetched["id"], self.FOREIGN)
+
+    def test_it_is_still_not_found_on_this_board(self):
+        with self.assertRaises(TicketNotFound):
+            self.service.get_task(self.FOREIGN)
+
+    def test_every_request_it_makes_names_this_project(self):
+        with self.assertRaises(TicketNotFound):
+            self.service.get_task(self.FOREIGN)
+        viewed = [p for _, p, _ in self.vikunja.calls if p.startswith("/projects/")]
+        self.assertTrue(viewed)
+        for path in viewed:
+            self.assertTrue(
+                path.startswith("/projects/2"),
+                f"the lookup read {path!r}, outside the allowed project",
+            )
+
+    def test_it_never_fetches_a_task_by_bare_id(self):
+        """GET /tasks/{id} serves any task in any project, so the lookup does
+        not use it — that is what keeps the project boundary structural."""
+        with self.assertRaises(TicketNotFound):
+            self.service.get_task(self.FOREIGN)
+        for method, path, _ in self.vikunja.calls:
+            self.assertIsNone(
+                re.match(r"^/tasks/\d+$", path),
+                f"the lookup issued {method} {path}, which is not project-scoped",
+            )
 
 
 class NextReadyTicket(ServiceTestCase):

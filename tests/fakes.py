@@ -63,11 +63,18 @@ class FakeVikunja:
         layout: dict[str, list[dict]] | None = None,
         fail: Any = None,
         comments: dict[int, list[dict]] | None = None,
+        foreign: list[dict] | None = None,
     ):
         # Copied: moves mutate the layout, and DEFAULT_LAYOUT is module state.
         self.layout = deepcopy(layout if layout is not None else DEFAULT_LAYOUT)
         self.fail = fail
         self.comments = deepcopy(comments or {})
+        # Tasks that exist in Vikunja but on somebody else's board. `GET
+        # /tasks/{id}` serves them -- the API has no notion of "my project" --
+        # and they never appear in this project's view. That difference is what
+        # makes "the boundary refuses another project's task" testable rather
+        # than incidentally true because the id was unused.
+        self.foreign = {int(item["id"]): deepcopy(item) for item in (foreign or [])}
         self.calls: list[tuple[str, str, dict | None]] = []
 
     def __call__(self, method: str, path: str, body: dict | None = None):
@@ -151,6 +158,8 @@ class FakeVikunja:
             tasks = list(self.layout.get(bucket["title"], []))
             if wanted == "done=false":
                 tasks = [t for t in tasks if not t.get("done")]
+            elif wanted.startswith("id="):
+                tasks = [t for t in tasks if t["id"] == int(wanted[3:])]
             elif wanted:
                 raise VikunjaError(f"FakeVikunja cannot apply filter {wanted!r}")
             start = (page - 1) * KANBAN_BUCKET_PAGE_SIZE
@@ -168,6 +177,8 @@ class FakeVikunja:
             for item in tasks:
                 if item["id"] == task_id:
                     return item
+        if task_id in self.foreign:
+            return self.foreign[task_id]
         raise VikunjaError(f"no such task {task_id}", status=404)
 
     def _replace(self, task_id: int, body: dict) -> dict:
@@ -208,6 +219,40 @@ class FakeVikunja:
             if any(t["id"] == task_id for t in tasks):
                 return title
         return None
+
+
+class FilterIgnoringVikunja(FakeVikunja):
+    """A Vikunja that accepts ``filter`` and does nothing with it.
+
+    Sending a filter is an optimisation -- it saves walking a long Done column,
+    and it turns a lookup by id into one request. Every caller has to stay
+    correct when it does nothing, so that is a fake rather than an assumption.
+    """
+
+    def _view_tasks(self, path: str) -> list[dict]:
+        head, _, query = path.partition("?")
+        kept = "&".join(
+            part for part in query.split("&") if part and not part.startswith("filter=")
+        )
+        return super()._view_tasks(head + (f"?{kept}" if kept else ""))
+
+
+class FilterMatchingNothingVikunja(FakeVikunja):
+    """A Vikunja whose filter is applied and matches nothing, ever.
+
+    The dangerous failure mode, and the reason a filtered miss is not an
+    absence: an ignored filter still answers with the whole board, so a walk
+    over it stays complete. A filter that silently matches nothing answers with
+    a well-formed, internally consistent, empty board — `count` agrees with what
+    was served — and concluding "no such task" from that is exactly the bug this
+    lookup exists to not have.
+    """
+
+    def _view_tasks(self, path: str) -> list[dict]:
+        served = super()._view_tasks(path)
+        if "filter=" not in path:
+            return served
+        return [{**bucket, "count": 0, "tasks": []} for bucket in served]
 
 
 class FakeProcess:

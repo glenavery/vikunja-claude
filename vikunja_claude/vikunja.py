@@ -235,39 +235,27 @@ class VikunjaClient:
             raise VikunjaError(f"GET {path} did not return a list of buckets")
         return buckets
 
-    def list_tickets(self, project_id: int, view_id: int) -> list[Ticket]:
-        """The first page of every bucket in the kanban view.
-
-        Not the whole board: see :data:`KANBAN_BUCKET_PAGE_SIZE`. Enough for the
-        lookups that follow it, which resolve a task the operator just named.
-        :meth:`list_open_tickets` is the one that has to be complete.
-        """
-        return [
-            self._ticket(bucket, task)
-            for bucket in self._view_page(project_id, view_id, 1, None)
-            for task in bucket.get("tasks") or []
-        ]
-
-    def list_open_tickets(self, project_id: int, view_id: int) -> list[Ticket]:
-        """Every task in the project that is not done -- all of them, or an error.
+    def _walk_view(
+        self, project_id: int, view_id: int, task_filter: str | None
+    ) -> list[Ticket]:
+        """Every task the view returns for ``task_filter`` -- all of them, or an error.
 
         Paging is walked to exhaustion and then *checked*: Vikunja reports each
         bucket's true total alongside the page it served, so a short read is
-        detectable, and a listing that quietly dropped a ticket is the one
-        failure this call must never have. It raises instead.
+        detectable, and a read that quietly dropped a ticket is the one failure
+        these lookups must never have. It raises instead.
 
-        The check counts every task a page carried, before `done` is considered,
-        because the totals are counts of what the filter matched -- comparing
-        them against the open tasks left after a second, client-side filter
-        would report a shortfall whenever the server ignored the filter.
+        The check counts every task a page carried, before any caller-side
+        filtering, because the totals are counts of what the *server* matched --
+        comparing them against what a second, client-side filter left would
+        report a shortfall whenever the server ignored the filter.
         """
-        open_tickets: dict[int, Ticket] = {}
-        seen: set[int] = set()
+        tickets: dict[int, Ticket] = {}
         delivered: dict[int, int] = {}
         totals: dict[int, tuple[str | None, int]] = {}
 
         for page in range(1, MAX_VIEW_PAGES + 1):
-            buckets = self._view_page(project_id, view_id, page, OPEN_TASKS_FILTER)
+            buckets = self._view_page(project_id, view_id, page, task_filter)
             arrived = 0
             for bucket in buckets:
                 bucket_id = int(bucket["id"])
@@ -279,12 +267,10 @@ class VikunjaClient:
                 delivered[bucket_id] = delivered.get(bucket_id, 0) + len(tasks)
                 for task in tasks:
                     ticket = self._ticket(bucket, task)
-                    if ticket.task_id in seen:
+                    if ticket.task_id in tickets:
                         continue
-                    seen.add(ticket.task_id)
+                    tickets[ticket.task_id] = ticket
                     arrived += 1
-                    if not ticket.done:
-                        open_tickets[ticket.task_id] = ticket
             # Pages are consecutive slices, so one that carries nothing new is
             # the end of every bucket at once.
             if arrived == 0:
@@ -303,14 +289,55 @@ class VikunjaClient:
         if short:
             raise VikunjaError(
                 "Vikunja served fewer tasks than it says the board holds, so "
-                "this listing would silently omit open tickets: "
-                + "; ".join(short)
+                "this read would silently omit tickets: " + "; ".join(short)
             )
-        return list(open_tickets.values())
+        return list(tickets.values())
+
+    def list_all_tickets(self, project_id: int, view_id: int) -> list[Ticket]:
+        """Every task on the board, open and done. Complete or an error.
+
+        There is deliberately no "first page" variant of this. A partial board
+        is what made :meth:`find_by_task_id` deny task 35, which exists.
+        """
+        return self._walk_view(project_id, view_id, None)
+
+    def list_open_tickets(self, project_id: int, view_id: int) -> list[Ticket]:
+        """Every task in the project that is not done. Complete or an error.
+
+        ``done = false`` goes to the server so a long Done column is not walked
+        only to be discarded, and the result is filtered again here -- so a
+        Vikunja that ignored the filter would be slower and not wronger.
+        """
+        return [
+            ticket
+            for ticket in self._walk_view(project_id, view_id, OPEN_TASKS_FILTER)
+            if not ticket.done
+        ]
 
     def find_by_task_id(self, task_id: int, project_id: int, view_id: int) -> Ticket:
-        """Canonical lookup: Vikunja's immutable task id."""
-        for ticket in self.list_tickets(project_id, view_id):
+        """Canonical lookup: Vikunja's immutable task id.
+
+        Asks the view for that one id, which is a constant-cost request and
+        keeps the project boundary structural -- it is *this project's* view, so
+        a task belonging to another project is not in the answer to begin with.
+        Fetching `GET /tasks/{id}` instead would be one request too, but it
+        serves any task in any project and reports `bucket_id: 0`, so it can
+        answer neither "is this mine" nor "which column".
+
+        A filtered miss is not an absence, so it falls back to the complete walk
+        before saying "no such task". Note which failure that guards: a filter
+        the server *ignores* is harmless, because the walk then covers the whole
+        board anyway. The harmful one is a filter that is applied and matches
+        nothing -- the reply is well-formed and internally consistent, and
+        nothing in it distinguishes "missing" from "unmatched". Paying for a
+        second read on the not-found path is worth it; the bug this replaced
+        reported a task that exists as absent, and blamed the caller for
+        confusing a task id with a view id.
+        """
+        for ticket in self._walk_view(project_id, view_id, f"id = {int(task_id)}"):
+            if ticket.task_id == task_id:
+                return ticket
+        for ticket in self.list_all_tickets(project_id, view_id):
             if ticket.task_id == task_id:
                 return ticket
         raise TicketNotFound(
@@ -320,8 +347,11 @@ class VikunjaClient:
         )
 
     def find_ticket(self, number: int, project_id: int, view_id: int) -> Ticket:
+        # The whole board, not a filtered slice: #NN is a title prefix rather
+        # than a field, and detecting that two tasks claim the same one means
+        # seeing all of them.
         matches = [
-            t for t in self.list_tickets(project_id, view_id) if t.number == number
+            t for t in self.list_all_tickets(project_id, view_id) if t.number == number
         ]
         if not matches:
             raise TicketNotFound(f"No ticket #{number} in this project", status=404)
@@ -339,8 +369,8 @@ class VikunjaClient:
     ) -> Ticket:
         ready = [
             t
-            for t in self.list_tickets(project_id, view_id)
-            if t.bucket_title == bucket_title and not t.done
+            for t in self.list_open_tickets(project_id, view_id)
+            if t.bucket_title == bucket_title
         ]
         if not ready:
             raise TicketNotFound(f"No tickets in the {bucket_title} bucket", status=404)
