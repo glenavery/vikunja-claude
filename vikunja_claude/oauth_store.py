@@ -1,0 +1,168 @@
+"""On-disk state for the OAuth boundary: clients, codes and tokens.
+
+One JSON file in the existing state directory, and nothing else — no database,
+no cache server, no second daemon. This is a single-user integration with one
+client and one live session, so the whole store is small enough to read and
+rewrite on every write, and being a plain file is what makes revocation a thing
+you can do with ``rm`` rather than an endpoint that has to be reachable.
+
+Secrets are stored as SHA-256 digests. A token is a random string the client
+holds; the file holds only enough to recognise it, so a leaked copy of the state
+file does not hand anyone a working credential.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import secrets
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+# A registered client is cheap but not free: registration is reachable from the
+# internet, so the file must not be able to grow without bound.
+MAX_CLIENTS = 20
+
+
+def new_secret() -> str:
+    """A credential value: 32 bytes of urandom, URL-safe."""
+    return secrets.token_urlsafe(32)
+
+
+def digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class OAuthStore:
+    """Clients, authorization codes and tokens, persisted as one JSON object."""
+
+    def __init__(self, path: Path, now=time.time):
+        self.path = path
+        self._now = now
+        self._lock = threading.Lock()
+
+    # -- file ---------------------------------------------------------------
+
+    def _read(self) -> dict[str, dict[str, Any]]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            raw = {}
+        for section in ("clients", "codes", "tokens"):
+            raw.setdefault(section, {})
+        return raw
+
+    def _write(self, state: dict[str, dict[str, Any]]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        # 0600 from the moment it exists: it holds the shape of every live
+        # grant, and the state directory is not otherwise protected.
+        handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(state, stream, indent=1, sort_keys=True)
+        os.replace(tmp, self.path)
+
+    def _expire(self, state: dict[str, dict[str, Any]]) -> None:
+        now = self._now()
+        for section in ("codes", "tokens"):
+            state[section] = {
+                key: record
+                for key, record in state[section].items()
+                if record.get("expires_at", 0) > now
+            }
+
+    # -- clients ------------------------------------------------------------
+
+    def register_client(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            state = self._read()
+            self._expire(state)
+            clients = state["clients"]
+            if len(clients) >= MAX_CLIENTS:
+                # Oldest first. A client that is still in use re-registers
+                # itself; one that has not been seen since it was created is
+                # the one nobody misses.
+                for stale, _ in sorted(
+                    clients.items(), key=lambda item: item[1].get("issued_at", 0)
+                )[: len(clients) - MAX_CLIENTS + 1]:
+                    clients.pop(stale)
+            clients[record["client_id"]] = record
+            self._write(state)
+        return record
+
+    def get_client(self, client_id: str) -> dict[str, Any] | None:
+        return self._read()["clients"].get(client_id)
+
+    # -- authorization codes ------------------------------------------------
+
+    def put_code(self, code: str, record: dict[str, Any]) -> None:
+        with self._lock:
+            state = self._read()
+            self._expire(state)
+            state["codes"][digest(code)] = record
+            self._write(state)
+
+    def take_code(self, code: str) -> dict[str, Any] | None:
+        """Redeem a code once.
+
+        A second redemption returns ``None`` *and* revokes everything the first
+        one issued: a replayed code means the code leaked, and the tokens it
+        produced are the thing the leak was after.
+        """
+        key = digest(code)
+        with self._lock:
+            state = self._read()
+            self._expire(state)
+            record = state["codes"].get(key)
+            if record is None:
+                self._write(state)
+                return None
+            if record.get("redeemed"):
+                grant = record.get("grant_id")
+                state["tokens"] = {
+                    token_key: token
+                    for token_key, token in state["tokens"].items()
+                    if token.get("grant_id") != grant
+                }
+                self._write(state)
+                return None
+            record["redeemed"] = True
+            self._write(state)
+        return record
+
+    # -- tokens -------------------------------------------------------------
+
+    def put_token(self, token: str, record: dict[str, Any]) -> None:
+        with self._lock:
+            state = self._read()
+            self._expire(state)
+            state["tokens"][digest(token)] = record
+            self._write(state)
+
+    def get_token(self, token: str) -> dict[str, Any] | None:
+        record = self._read()["tokens"].get(digest(token))
+        if record is None or record.get("expires_at", 0) <= self._now():
+            return None
+        return record
+
+    def drop_token(self, token: str) -> None:
+        with self._lock:
+            state = self._read()
+            self._expire(state)
+            state["tokens"].pop(digest(token), None)
+            self._write(state)
+
+    def revoke_grant(self, grant_id: str) -> None:
+        """Withdraw every token issued from one authorization."""
+        with self._lock:
+            state = self._read()
+            self._expire(state)
+            state["tokens"] = {
+                key: record
+                for key, record in state["tokens"].items()
+                if record.get("grant_id") != grant_id
+            }
+            self._write(state)

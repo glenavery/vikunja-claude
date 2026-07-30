@@ -1,5 +1,5 @@
 [Unit]
-Description=Vikunja MCP boundary for ChatGPT (loopback only, bearer auth)
+Description=Vikunja MCP boundary for ChatGPT (loopback only, OAuth)
 Documentation=file:///home/glen/stacks/vikunja-claude/README.md
 After=network-online.target
 
@@ -16,14 +16,21 @@ StandardError=journal
 
 # This unit starts no host processes -- unlike the launcher, it only talks to
 # Vikunja over HTTP -- so it can be confined.
+#
+# PrivateDevices and ProtectKernelModules are deliberately absent: this is a
+# *user* unit, and setting up either needs privileges the user manager does not
+# have, so the service dies with 218/CAPABILITIES before Python starts. That is
+# a total outage in exchange for a mount namespace, which is the wrong trade for
+# a process whose only capabilities are an outbound socket and one state file.
+# Everything below was verified to apply under `systemctl --user` on this host;
+# check with `systemd-run --user -p <Directive> --wait /bin/true` before adding
+# more, because a rejected directive fails the unit rather than being ignored.
 NoNewPrivileges=true
 PrivateTmp=true
-PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=%h/.local/state/vikunja-claude
 ProtectKernelTunables=true
-ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=true

@@ -10,80 +10,14 @@ from __future__ import annotations
 
 import json
 import tempfile
-import threading
 import unittest
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from vikunja_claude.config import ConfigError
 from vikunja_claude.mcp_server import build_mcp_server
-from vikunja_claude.vikunja import VikunjaClient
 
-from .fakes import PROJECT_ID, FakeVikunja
-from .support import MCP_TOKEN, make_mcp_config
-
-
-class HttpTestCase(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        self.config = make_mcp_config(Path(self._tmp.name))
-        self.vikunja = FakeVikunja()
-        client = VikunjaClient(
-            self.config.api_url, self.config.token, transport=self.vikunja
-        )
-        self.server = build_mcp_server(self.config, client=client)
-        self.addCleanup(self.server.server_close)
-        # A short poll interval only so shutdown() is prompt: the default 0.5s
-        # is per test, not per request, and dominates the run.
-        thread = threading.Thread(
-            target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
-        )
-        thread.start()
-        self.addCleanup(thread.join, 5)
-        self.addCleanup(self.server.shutdown)
-        self.origin = "http://127.0.0.1:%d" % self.server.server_address[1]
-
-    # -- helpers -----------------------------------------------------------
-
-    def open(
-        self,
-        path: str = "/mcp",
-        body: dict | str | None = None,
-        method: str | None = None,
-        token: str | None = MCP_TOKEN,
-        accept: str = "application/json",
-        headers: dict | None = None,
-    ):
-        """Returns (status, headers, body-text). Never raises on 4xx/5xx."""
-        payload = None
-        if body is not None:
-            payload = (body if isinstance(body, str) else json.dumps(body)).encode()
-        request = urllib.request.Request(
-            self.origin + path,
-            data=payload,
-            method=method or ("POST" if payload is not None else "GET"),
-        )
-        request.add_header("Accept", accept)
-        if payload is not None:
-            request.add_header("Content-Type", "application/json")
-        if token is not None:
-            request.add_header("Authorization", f"Bearer {token}")
-        for name, value in (headers or {}).items():
-            request.add_header(name, value)
-        try:
-            with urllib.request.urlopen(request, timeout=5) as response:
-                return response.status, dict(response.headers), response.read().decode()
-        except urllib.error.HTTPError as exc:
-            return exc.code, dict(exc.headers), exc.read().decode()
-
-    def rpc(self, method: str, params: dict | None = None, **kwargs):
-        message = {"jsonrpc": "2.0", "id": 1, "method": method}
-        if params is not None:
-            message["params"] = params
-        status, headers, text = self.open(body=message, **kwargs)
-        return status, headers, text
+from .fakes import PROJECT_ID
+from .support import HttpTestCase, make_mcp_config
 
 
 class TestAuthentication(HttpTestCase):
@@ -92,20 +26,38 @@ class TestAuthentication(HttpTestCase):
         self.assertEqual(status, 401)
         self.assertIn("Bearer", headers.get("WWW-Authenticate", ""))
 
-    def test_a_wrong_token_is_refused(self):
-        status, _, _ = self.rpc("tools/list", token="not-the-token")
+    def test_the_refusal_points_at_the_flow_that_would_work(self):
+        """RFC 9728: the 401 is how a client discovers where to get a token."""
+        _, headers, _ = self.rpc("tools/list", token=None)
+        challenge = headers["WWW-Authenticate"]
+        self.assertIn(
+            f'resource_metadata="{self.config.oauth.protected_resource_metadata_url}"',
+            challenge,
+        )
+        self.assertIn('scope="vikunja:tickets"', challenge)
+
+    def test_an_invalid_token_is_refused(self):
+        status, _, _ = self.rpc("tools/list", token="not-a-token-this-server-issued")
         self.assertEqual(status, 401)
 
-    def test_a_prefix_of_the_token_is_refused(self):
-        status, _, _ = self.rpc("tools/list", token=MCP_TOKEN[:-1])
+    def test_a_prefix_of_a_valid_token_is_refused(self):
+        status, _, _ = self.rpc("tools/list", token=self.access_token()[:-1])
+        self.assertEqual(status, 401)
+
+    def test_a_refresh_token_is_not_an_access_token(self):
+        status, _, _ = self.rpc(
+            "tools/list", token=self.issue_tokens()["refresh_token"]
+        )
         self.assertEqual(status, 401)
 
     def test_a_refused_request_never_reaches_vikunja(self):
         """The refusal is not a narrower version of the same surface."""
-        self.rpc("tools/call", {"name": "get_task", "arguments": {"task_id": 9}}, token=None)
+        self.rpc(
+            "tools/call", {"name": "get_task", "arguments": {"task_id": 9}}, token=None
+        )
         self.assertEqual(self.vikunja.calls, [])
 
-    def test_the_right_token_is_accepted(self):
+    def test_an_oauth_token_is_accepted(self):
         status, _, text = self.rpc("tools/list")
         self.assertEqual(status, 200)
         names = {tool["name"] for tool in json.loads(text)["result"]["tools"]}
@@ -113,7 +65,7 @@ class TestAuthentication(HttpTestCase):
 
 
 class TestBrowserOriginsAreRefused(HttpTestCase):
-    def test_a_request_carrying_an_origin_is_refused_even_with_the_token(self):
+    def test_a_request_carrying_an_origin_is_refused_even_with_a_token(self):
         status, _, _ = self.rpc("tools/list", headers={"Origin": "https://evil.example"})
         self.assertEqual(status, 403)
 
@@ -140,19 +92,19 @@ class TestRoutes(HttpTestCase):
         self.assertNotIn("AI Alpha Engine", text)
 
     def test_there_is_no_server_initiated_stream(self):
-        status, headers, _ = self.open("/mcp", method="GET")
+        status, headers, _ = self.open("/mcp", method="GET", token=None)
         self.assertEqual(status, 405)
         self.assertEqual(headers.get("Allow"), "POST")
 
     def test_delete_is_refused(self):
-        status, _, _ = self.open("/mcp", method="DELETE")
+        status, _, _ = self.open("/mcp", method="DELETE", token=None)
         self.assertEqual(status, 405)
 
     def test_an_unknown_path_is_a_404(self):
-        self.assertEqual(self.open("/tasks/9")[0], 404)
+        self.assertEqual(self.open("/tasks/9", token=None)[0], 404)
 
     def test_posting_anywhere_else_is_a_404(self):
-        status, _, _ = self.open("/tasks/9", body={"done": True})
+        status, _, _ = self.open("/tasks/9", body={"done": True}, token=None)
         self.assertEqual(status, 404)
 
 
@@ -181,17 +133,13 @@ class TestFraming(HttpTestCase):
     def test_a_full_handshake_and_call_works_over_http(self):
         status, _, text = self.rpc("initialize", {"protocolVersion": "2025-06-18"})
         self.assertEqual(status, 200)
-        self.assertEqual(
-            json.loads(text)["result"]["protocolVersion"], "2025-06-18"
-        )
+        self.assertEqual(json.loads(text)["result"]["protocolVersion"], "2025-06-18")
 
         status, _, text = self.rpc(
             "tools/call", {"name": "get_task", "arguments": {"task_id": 9}}
         )
         self.assertEqual(status, 200)
-        self.assertEqual(
-            json.loads(text)["result"]["structuredContent"]["task_id"], 9
-        )
+        self.assertEqual(json.loads(text)["result"]["structuredContent"]["task_id"], 9)
 
 
 class TestMalformedRequests(HttpTestCase):

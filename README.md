@@ -300,19 +300,72 @@ tool so the client asks for confirmation and shows those arguments first. The
 tool description states the requirement in the same words. Keep ChatGPT's
 confirmation prompt on for this connector.
 
+### Authentication: OAuth, and only OAuth
+
+ChatGPT's connector dialog authenticates with OAuth, so this service is its own
+OAuth 2.1 authorization server as well as the MCP resource server. It implements
+the subset the MCP authorization specification requires and nothing more.
+
+| Endpoint | Is |
+|---|---|
+| `/.well-known/oauth-protected-resource` | RFC 9728 — names the resource and who issues tokens for it. Also served at `…/mcp` |
+| `/.well-known/oauth-authorization-server` | RFC 8414 — the endpoints and grants that exist. Also served at `…/mcp` |
+| `/oauth/register` | RFC 7591 dynamic client registration, restricted to the configured redirect URIs |
+| `/oauth/authorize` | The consent screen. States the two grants, asks for the operator passphrase |
+| `/oauth/token` | Authorization code (PKCE `S256` required) and refresh. No other grant exists |
+
+What holds:
+
+- **PKCE is required**, `S256` only. No `code_challenge`, no code.
+- **Redirect URIs match exactly.** Not a prefix, not a longer path, not the same
+  host over `http`. A client cannot register one that is not on the configured
+  list, so there is nowhere a code can be sent that was not named in advance.
+- **A code is single use**, lives 60 seconds, and is bound to the client, the
+  redirect URI, the challenge and the resource. Redeeming one twice fails *and*
+  revokes every token the first redemption issued — a replayed code means it
+  leaked, and the tokens are what it leaked for.
+- **Access tokens live an hour** and are bound to this server as their audience;
+  refresh tokens rotate on every use, so a stolen one is good for one call.
+- **There is no password grant, no client-credentials grant and no implicit
+  flow.** Nothing may skip the consent screen: approval is a person.
+- **No fallback.** A request to `/mcp` without a valid access token gets `401`
+  and nothing else — not a narrower surface, not an anonymous one, and not the
+  static bearer token this replaced, which no code here can accept any more.
+  Incomplete configuration is a service that refuses to start.
+
+The authorization is still one operator and one grant. There are no accounts, no
+roles, no sign-up, and one scope (`vikunja:tickets`) that means the same two
+tools. Approving cannot widen it, because there is nothing wider to grant.
+
 ### Setup
 
-**1. Generate the credential.** It is the only thing between the public
-internet and a write path into the board.
+**1. Generate the credential.** The passphrase is what proves an authorization
+request is yours; it is the thing between the public internet and a write path
+into the board.
 
 ```bash
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
-Put it in `.env` as `VIKUNJA_MCP_TOKEN` (`chmod 600 .env`). The server refuses
-to start without it and refuses anything shorter than 32 characters — there is
-no unauthenticated mode, and no environment variable adds one.
-`tests/test_mcp_config.py` fails if one is ever added.
+Put it in `.env` (`chmod 600 .env`), along with the public URL the server is
+published on:
+
+```env
+VIKUNJA_MCP_OAUTH_ISSUER=https://aiserver.tail36601d.ts.net:8443
+VIKUNJA_MCP_OAUTH_PASSPHRASE=<the value generated above>
+```
+
+| Variable | Meaning |
+|---|---|
+| `VIKUNJA_MCP_OAUTH_ISSUER` | **Required.** Public HTTPS base URL. Every metadata document is published under it and tokens are bound to `<issuer>/mcp`. Must be `https` unless it is loopback |
+| `VIKUNJA_MCP_OAUTH_PASSPHRASE` | **Required.** At least 32 characters. Typed at the consent screen; five wrong answers lock it for five minutes |
+| `VIKUNJA_MCP_OAUTH_REDIRECT_URIS` | Optional. Space- or comma-separated exact URIs. Defaults to `https://chatgpt.com/connector_platform_oauth_redirect` |
+| `VIKUNJA_MCP_OAUTH_CLIENT_ID` / `_SECRET` | Optional. A pre-registered client, for a ChatGPT dialog that insists on a client id instead of registering one itself |
+
+The server refuses to start if the issuer or the passphrase is missing, blank,
+short, or not a publishable URL. There is no unauthenticated mode and no
+environment variable that adds one; `tests/test_mcp_config.py` fails if one is
+ever introduced.
 
 **2. Start the unit.**
 
@@ -321,8 +374,16 @@ ln -sf /home/glen/stacks/vikunja-claude/systemd/vikunja-claude-mcp.service \
        ~/.config/systemd/user/vikunja-claude-mcp.service
 systemctl --user daemon-reload
 systemctl --user enable --now vikunja-claude-mcp
+systemctl --user status vikunja-claude-mcp
 curl -s localhost:3461/health | jq
 ```
+
+The unit is hardened, but it is a *user* unit: `PrivateDevices` and
+`ProtectKernelModules` need privileges the user manager does not have and fail
+the service with `218/CAPABILITIES` before Python starts, so they are absent by
+decision. Check any addition with
+`systemd-run --user -p <Directive>=true --wait /bin/true` first — a rejected
+directive kills the unit rather than being ignored.
 
 **3. Publish it.** ChatGPT reaches connectors from OpenAI's servers, so a
 tailnet-only address is not enough — it needs a public HTTPS URL. The server
@@ -335,46 +396,77 @@ tailscale funnel status
 ```
 
 **This is the one step that puts something of yours on the public internet.**
-After it, the bearer token is the entire access control. Decide it consciously,
-and skip it if ChatGPT is not actually being connected — everything else above
-works over the tailnet without it.
+The Funnel hostname and port must match `VIKUNJA_MCP_OAUTH_ISSUER` exactly, or
+the metadata documents will advertise endpoints that are not there. Skip this
+step entirely if ChatGPT is not actually being connected — everything else works
+over the tailnet without it.
 
-**4. Add the connector.** ChatGPT → Settings → Connectors → enable Developer
-mode → Create. URL is `https://<host>.ts.net:8443/mcp`, authentication is API
-key / bearer token, the value is `VIKUNJA_MCP_TOKEN`. If the dialog offers only
-OAuth and "no authentication", **do not choose no authentication** — leave the
-connector unconfigured and revisit; an open write path into the board is worse
-than pasting tickets by hand.
-
-Verify from the command line first, which is faster than debugging in a chat
-window:
+Confirm the two documents ChatGPT reads first are reachable from outside:
 
 ```bash
-curl -s localhost:3461/mcp -H "Authorization: Bearer $VIKUNJA_MCP_TOKEN" \
+curl -s https://aiserver.tail36601d.ts.net:8443/.well-known/oauth-protected-resource | jq
+curl -s https://aiserver.tail36601d.ts.net:8443/.well-known/oauth-authorization-server | jq
+```
+
+**4. Add the connector.** ChatGPT → Settings → Connectors → enable Developer
+mode → Create. URL is `https://<host>.ts.net:8443/mcp`, authentication is
+**OAuth**. Leave the client id and secret blank unless the dialog insists — the
+server registers ChatGPT dynamically. If it does insist, generate a client id,
+put it in `VIKUNJA_MCP_OAUTH_CLIENT_ID`, restart, and paste the same value.
+
+ChatGPT opens the consent screen in a browser. It names the two operations and
+asks for the passphrase; approving returns a code and the connector finishes.
+**Never choose "no authentication"** — an open write path into the board is
+worse than pasting tickets by hand.
+
+Verify the boundary from the command line first, which is faster than debugging
+in a chat window. An unauthenticated call must be refused, and must say where a
+token comes from:
+
+```bash
+curl -si localhost:3461/mcp -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -3
+# HTTP/1.0 401 Unauthorized
+# WWW-Authenticate: Bearer realm="vikunja-claude-mcp", resource_metadata="…", scope="vikunja:tickets"
+```
+
+Then, with an access token from a completed flow (ChatGPT's, or one obtained by
+hand through the same endpoints):
+
+```bash
+curl -s localhost:3461/mcp -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | jq '.result.tools[].name'
 
-curl -s localhost:3461/mcp -H "Authorization: Bearer $VIKUNJA_MCP_TOKEN" \
+curl -s localhost:3461/mcp -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_task","arguments":{"task_id":138}}}' \
   | jq -r '.result.structuredContent.title'
 ```
 
-### Rotating and revoking the credential
+### Rotating and revoking
 
-Rotation is one value in one file — nothing else stores it, and no token is
-cached anywhere:
+Live grants — registered clients, unredeemed codes, access and refresh tokens —
+are one JSON file, `~/.local/state/vikunja-claude/mcp_oauth.json`, mode `0600`.
+It holds SHA-256 digests, not tokens, so a copy of it is not a way in.
+
+**Revoke everything, now.** Deleting the file invalidates every live token
+immediately; no restart is needed, and the next request is a `401`:
+
+```bash
+rm ~/.local/state/vikunja-claude/mcp_oauth.json
+```
+
+**Rotate the passphrase** (stops new authorizations; existing tokens keep
+working until they expire, so pair it with the delete above):
 
 ```bash
 python3 -c 'import secrets; print(secrets.token_urlsafe(32))'   # new value
-${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env            # replace VIKUNJA_MCP_TOKEN
+${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env            # replace VIKUNJA_MCP_OAUTH_PASSPHRASE
 systemctl --user restart vikunja-claude-mcp
 ```
 
-Then update the connector in ChatGPT. Between the restart and that update,
-ChatGPT gets `401` and can do nothing — rotation fails closed.
-
-Revoking, in increasing order of severity:
+Revoking the connection itself, in increasing order of severity:
 
 ```bash
 systemctl --user stop vikunja-claude-mcp     # disconnect now, keep the config
@@ -382,9 +474,9 @@ tailscale funnel --https 8443 off            # off the public internet, keep the
 systemctl --user disable --now vikunja-claude-mcp   # and do not come back after a reboot
 ```
 
-Blanking `VIKUNJA_MCP_TOKEN` is *not* a revocation step — it stops the service
-from starting, which is a failure to boot rather than a closed door. Stop the
-unit instead.
+Blanking `VIKUNJA_MCP_OAUTH_PASSPHRASE` is *not* a revocation step — it stops
+the service from starting, which is a failure to boot rather than a closed door,
+and it leaves issued tokens alone. Delete the state file instead.
 
 The Vikunja API token is separate and unaffected: the MCP server uses the same
 one as the launcher, so revoking *that* (Vikunja → Settings → API tokens) cuts
@@ -395,13 +487,15 @@ off both services and every ticket the board has open.
 MCP Streamable HTTP: JSON-RPC over `POST /mcp`, answered as JSON or as a single
 SSE event depending on `Accept`. `GET /mcp` is a `405` because there is no
 server-initiated stream — a half-working channel would be worse than none.
-`GET /health` is the only unauthenticated route, and it says nothing about
-Vikunja, the board or the configuration, because it is reachable without the
-token.
+`GET /health` says nothing about Vikunja, the board or the configuration,
+because it is reachable without a token — as are the two metadata documents,
+which are public by specification and name only endpoints and one scope.
 
-Requests carrying an `Origin` header are refused outright. An MCP client is
-server-to-server and sends none; a browser always does. That closes DNS
-rebinding as a class rather than maintaining a list of origins believed safe.
+Requests to `/mcp` carrying an `Origin` header are refused outright. An MCP
+client is server-to-server and sends none; a browser always does. That closes
+DNS rebinding as a class rather than maintaining a list of origins believed
+safe. The rule stops at `/mcp`: the consent screen *is* a browser page, and what
+guards the OAuth endpoints is PKCE and the passphrase.
 
 ### Deliberately not built yet
 
@@ -425,9 +519,11 @@ vikunja_claude/
   server.py       routes, status codes, loopback guard
   mcp.py          MCP protocol: JSON-RPC, handshake, fixed tool list
   mcp_service.py  the two tools, the project rule, the dedup ledger
-  mcp_server.py   MCP transport: bearer auth, one route, loopback guard
+  mcp_server.py   HTTP routing: the OAuth routes, one MCP route, loopback guard
+  oauth.py        the OAuth 2.1 authorization server: metadata, PKCE, consent
+  oauth_store.py  clients, codes and tokens as one 0600 JSON file
 vkctl.py          board updates for the launched Claude
-tests/            lookup, prompt, duplicate launches, API errors, MCP
+tests/            lookup, prompt, duplicate launches, API errors, MCP, OAuth
 systemd/          two user units: launcher, MCP boundary
 browser/          bookmarklet source
 ```
@@ -436,7 +532,12 @@ The two services are separate on purpose. The launcher starts host processes
 and must stay on the tailnet; the MCP boundary holds a write credential and is
 the only thing published to the internet. Neither can start, stop or break the
 other, and `tests/test_mcp_config.py` fails if the launcher ever comes to
-require the MCP token or vice versa.
+require the MCP boundary's OAuth configuration or vice versa.
+
+Within the boundary, `mcp_server.py` decides *routing* and `oauth.py` decides
+whether a credential is good. That split is deliberate: "is this token valid"
+is produced in one place, so it cannot be one early `return` away from not
+happening on a route someone adds later.
 
 ## Tests
 
@@ -449,9 +550,10 @@ Optional browser tests that drive the real bookmarklet and userscript in
 Chromium live in `browser/tests/` — see the README there. They need Playwright
 and are deliberately not part of the stdlib-only default run.
 
-171 tests, no network and no live Vikunja: the API is faked through an
+267 tests, no network and no live Vikunja: the API is faked through an
 injectable transport, and process spawning through an injectable `spawn`. The
-MCP HTTP tests do bind a real socket, on loopback and an ephemeral port.
+MCP and OAuth HTTP tests do bind a real socket, on loopback and an ephemeral
+port, and drive the whole authorization flow through it.
 
 Covered: task-id lookup (including that renumbering a title does not change
 which task resolves) and `#NN` lookup (missing, duplicate, unnumbered,
@@ -462,12 +564,28 @@ HTTP status each maps to); the browser flow (task routes, `#NN` redirect, the
 launch page's same-origin POST, and that neither generated button will read an
 id from a board-view URL); and the MCP boundary — the exact tool set, the
 project refusal, retry deduplication across a restart, description round-trip,
-bearer authentication, `Origin` rejection, and that a refused request reaches
-Vikunja not at all.
+`Origin` rejection, and that a refused request reaches Vikunja not at all.
+
+The OAuth boundary is tested as one claim: **the only way to reach `/mcp` is an
+access token this server issued through the authorization code flow, with PKCE,
+approved by the operator.** So `tests/test_oauth_flow.py` covers the metadata
+documents, registration with an unlisted redirect URI, a missing or `plain`
+`code_challenge`, a mismatched verifier, a replayed code and the tokens it
+revokes, refresh rotation, a token for another audience, a token that has
+expired where it sat, the state file being deleted, and the absence of the
+password, client-credentials and implicit paths — each ending in the same `401`
+or `invalid_grant`.
 
 Several MCP tests assert on **the calls the fake Vikunja saw**, not only on
 return values: a refusal that still issued the write would satisfy a return
 value and fail those. Each guard was also checked by deleting it and confirming
-a test goes red — the project restriction, the bearer check, the `Origin`
-refusal, the dedup ledger, the required-argument check and the token
-requirement all fail loudly when removed.
+a test goes red — the project restriction, the `Origin` refusal, the dedup
+ledger, the required-argument check, and every OAuth guard: PKCE verification,
+`S256`-only, single-use codes, the passphrase, its lockout, redirect exact
+match at both registration and authorization, refresh rotation, audience
+binding, token expiry, and the access-token requirement on `/mcp` itself.
+
+That last one matters more than the count: expiry initially passed with its
+check deleted, because the store prunes expired records whenever it is written
+and no test let time pass without a write. The test that pins it now advances a
+clock the test owns, and fails when the check is removed.
