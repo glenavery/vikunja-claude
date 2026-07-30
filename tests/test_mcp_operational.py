@@ -308,11 +308,19 @@ class TestFailuresAreNotAnswers(OperationalTestCase):
         self.assertIn("INVESTMENT_API_KEY", message)
         self.assertIn("not a statement about the system's health", message)
 
-    def test_a_404_points_at_the_public_instance_mistake(self):
+    def test_a_404_names_both_of_its_causes(self):
+        """The wrong instance, *and* the right instance running older code.
+
+        Naming only the first is how a stale deployment gets misdiagnosed as a
+        misconfiguration — which is what happened the first time these reads were
+        pointed at a live admin instance that predated them.
+        """
         client = InvestmentStatusClient("http://127.0.0.1:8001", "k")
         message = client._explain_status(404, PATH_PIPELINE)
-        self.assertIn("admin instance", message)
         self.assertIn("INVESTMENT_API_URL", message)
+        self.assertIn("admin", message)
+        self.assertIn("restarted", message)
+        self.assertIn("Nothing was read", message)
 
     def test_the_api_error_body_is_not_repeated_to_the_model(self):
         """It is the other application's error text and may name internals."""
