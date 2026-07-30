@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import urllib.parse
 from dataclasses import dataclass, field
@@ -29,6 +30,53 @@ DEFAULT_PROJECT = "AI Alpha Engine"
 # not of this deployment — but it is still matched exactly, and anything else
 # has to be named here on purpose.
 DEFAULT_REDIRECT_URIS = ("https://chatgpt.com/connector_platform_oauth_redirect",)
+
+# ChatGPT now mints a callback per connector, so the address is not knowable
+# until the connector exists: the live dialog registered
+# https://chatgpt.com/connector/oauth/jFpZaNIKITJA and was refused, because a
+# configured list can only name the fixed path above.
+#
+# That shape is therefore admitted by its form rather than by name — at dynamic
+# client registration, and nowhere else. What is stored on the client is the
+# complete URI that was submitted; every check after registration is exact
+# equality against that string, so this predicate never runs on the path that
+# decides where an authorization code is sent.
+CHATGPT_CONNECTOR_HOST = "chatgpt.com"
+CHATGPT_CONNECTOR_PATH = "/connector/oauth"
+
+# Unreserved characters only (RFC 3986 §2.3). It is deliberately narrower than
+# "one path segment": a segment may legally hold percent-escapes and sub-delims,
+# and `%2F` is a path separator to whatever normalises it later even though it
+# is one segment here. An opaque identifier ChatGPT generated needs none of them.
+_CONNECTOR_IDENTIFIER = re.compile(r"[A-Za-z0-9._~-]+")
+
+
+def is_chatgpt_connector_redirect_uri(value: str) -> bool:
+    """Is this ChatGPT's current per-connector OAuth callback?
+
+    Every clause is a refusal in its own right, and the last one is the backstop
+    that makes the set total: the value must be **identical** to the canonical
+    URI rebuilt from the parts that were checked. Anything the checks did not
+    look at — userinfo, a port, a stray ``?`` or ``#``, an uppercase host — is a
+    difference from that reconstruction, so it is refused without having to be
+    anticipated.
+    """
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme != "https" or parsed.netloc != CHATGPT_CONNECTOR_HOST:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+    prefix, _, identifier = parsed.path.rpartition("/")
+    if prefix != CHATGPT_CONNECTOR_PATH:
+        return False
+    if not _CONNECTOR_IDENTIFIER.fullmatch(identifier):
+        return False
+    if not identifier.strip("."):
+        # "." and ".." are unreserved characters that are not an identifier.
+        return False
+    return value == (
+        f"https://{CHATGPT_CONNECTOR_HOST}{CHATGPT_CONNECTOR_PATH}/{identifier}"
+    )
 
 # Short enough that a leaked access token is a small window, long enough that a
 # conversation does not stop mid-way. Refresh covers the rest.
@@ -201,6 +249,33 @@ class OAuthConfig:
     @property
     def protected_resource_metadata_url(self) -> str:
         return f"{self.issuer}/.well-known/oauth-protected-resource"
+
+    def registerable_redirect_uri(self, value: str) -> bool:
+        """May a client register this redirect URI?
+
+        Two ways in, and the difference between them is the point. A URI named
+        in configuration is matched exactly, because the operator wrote it down.
+        ChatGPT's per-connector callback cannot be written down in advance — the
+        identifier does not exist until the connector is created — so it is
+        recognised by shape instead, once, here.
+
+        This is the only gate that is not exact equality, and it guards the only
+        moment at which a redirect URI can enter the system. After it, the
+        submitted string is stored verbatim and every later check compares
+        against that.
+        """
+        return value in self.redirect_uris or is_chatgpt_connector_redirect_uri(value)
+
+    @property
+    def registerable_redirect_uri_summary(self) -> str:
+        """What to tell a client that just tried to register something else."""
+        return ", ".join(
+            (
+                *self.redirect_uris,
+                f"https://{CHATGPT_CONNECTOR_HOST}{CHATGPT_CONNECTOR_PATH}/"
+                "<connector-id>",
+            )
+        )
 
     def static_client(self, client_id: str) -> dict[str, Any] | None:
         """The pre-registered client, if one is configured and this is it."""

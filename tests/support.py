@@ -28,6 +28,10 @@ TOKEN = "test-token-never-in-prompts"
 PASSPHRASE = "test-operator-passphrase-long-enough-to-be-plausible"
 ISSUER = "http://127.0.0.1:8443"
 REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect"
+#: The per-connector callback ChatGPT actually submits now. The identifier is
+#: the one from the live failure, because a made-up one would not show that the
+#: value is opaque and unknown until the connector exists.
+CONNECTOR_REDIRECT_URI = "https://chatgpt.com/connector/oauth/jFpZaNIKITJA"
 
 
 def make_oauth_config(**overrides) -> OAuthConfig:

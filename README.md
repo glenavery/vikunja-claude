@@ -310,16 +310,30 @@ the subset the MCP authorization specification requires and nothing more.
 |---|---|
 | `/.well-known/oauth-protected-resource` | RFC 9728 — names the resource and who issues tokens for it. Also served at `…/mcp` |
 | `/.well-known/oauth-authorization-server` | RFC 8414 — the endpoints and grants that exist. Also served at `…/mcp` |
-| `/oauth/register` | RFC 7591 dynamic client registration, restricted to the configured redirect URIs |
+| `/oauth/register` | RFC 7591 dynamic client registration, restricted to the redirect URIs this deployment admits |
 | `/oauth/authorize` | The consent screen. States the two grants, asks for the operator passphrase |
 | `/oauth/token` | Authorization code (PKCE `S256` required) and refresh. No other grant exists |
 
 What holds:
 
 - **PKCE is required**, `S256` only. No `code_challenge`, no code.
-- **Redirect URIs match exactly.** Not a prefix, not a longer path, not the same
-  host over `http`. A client cannot register one that is not on the configured
-  list, so there is nowhere a code can be sent that was not named in advance.
+- **Redirect URIs match exactly, everywhere it matters.** From `/oauth/authorize`
+  onward the only question ever asked is whether the URI *is* one this client
+  registered — never a prefix, a pattern or the shape that admitted it.
+- **Registration is the one gate that is not exact equality**, and it allows one
+  extra shape. ChatGPT now mints a callback per connector —
+  `https://chatgpt.com/connector/oauth/<connector-id>` — so the address does not
+  exist until the connector does and cannot be named in configuration ahead of
+  time. `/oauth/register` recognises that form: `https` only, host exactly
+  `chatgpt.com`, no userinfo, no port, exactly one more path segment of
+  unreserved characters, no query and no fragment, and the value must equal the
+  canonical URI rebuilt from those parts — so a stray `?`, an uppercase host or
+  a `%2F` is a difference from the reconstruction and is refused without having
+  to be enumerated. Subdomains, lookalike hosts, `http`, other `chatgpt.com`
+  paths, empty identifiers and dot segments are all refused. The **complete
+  submitted URI** is then stored on the client, and a second connector's
+  callback — a perfectly valid shape in its own right — is refused for the first
+  connector's client. The configured list (below) is still matched exactly.
 - **A code is single use**, lives 60 seconds, and is bound to the client, the
   redirect URI, the challenge and the resource. Redeeming one twice fails *and*
   revokes every token the first redemption issued — a replayed code means it
@@ -360,7 +374,7 @@ VIKUNJA_MCP_OAUTH_PASSPHRASE=<the value generated above>
 |---|---|
 | `VIKUNJA_MCP_OAUTH_ISSUER` | **Required.** Public HTTPS base URL. Every metadata document is published under it and tokens are bound to `<issuer>/mcp`. Must be `https` unless it is loopback |
 | `VIKUNJA_MCP_OAUTH_PASSPHRASE` | **Required.** At least 32 characters. Typed at the consent screen; five wrong answers lock it for five minutes |
-| `VIKUNJA_MCP_OAUTH_REDIRECT_URIS` | Optional. Space- or comma-separated exact URIs. Defaults to `https://chatgpt.com/connector_platform_oauth_redirect` |
+| `VIKUNJA_MCP_OAUTH_REDIRECT_URIS` | Optional. Space- or comma-separated exact URIs. Defaults to `https://chatgpt.com/connector_platform_oauth_redirect`. ChatGPT's per-connector callback is admitted by shape as well and needs no entry here |
 | `VIKUNJA_MCP_OAUTH_CLIENT_ID` / `_SECRET` | Optional. A pre-registered client, for a ChatGPT dialog that insists on a client id instead of registering one itself |
 
 The server refuses to start if the issuer or the passphrase is missing, blank,
@@ -576,6 +590,16 @@ revokes, refresh rotation, a token for another audience, a token that has
 expired where it sat, the state file being deleted, and the absence of the
 password, client-credentials and implicit paths — each ending in the same `401`
 or `invalid_grant`.
+
+`TestTheChatGptConnectorCallback` holds the per-connector callback to the same
+claim from both sides: that the current form registers and completes a real
+authorization, and that the shape which admitted it stops at registration —
+every rejected variant (subdomain, lookalike host, `http`, userinfo, a port,
+extra segments, an empty identifier, a dot segment, a query, a fragment, a
+percent-encoded separator), plus the decisive one, a **second connector's
+callback refused for the first connector's client**. That last test fails if
+`/oauth/authorize` is ever changed to re-apply the registration rule instead of
+comparing against the stored value.
 
 Several MCP tests assert on **the calls the fake Vikunja saw**, not only on
 return values: a refusal that still issued the write would satisfy a return

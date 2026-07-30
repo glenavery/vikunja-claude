@@ -221,9 +221,15 @@ class AuthorizationServer:
         Registration is open in the sense that anyone who can reach the endpoint
         can obtain a ``client_id``. That grants nothing: a client id is not a
         credential here, every authorization still has to be approved by the
-        operator at the consent screen, and a client whose redirect URI is not
-        on the allow list cannot be registered at all — so there is nowhere for
-        a code to be sent that the operator has not already named.
+        operator at the consent screen, and a client whose redirect URI this
+        deployment does not admit cannot be registered at all — so there is
+        nowhere for a code to be sent that was not admitted here first.
+
+        This is the **only** place a redirect URI is judged by anything other
+        than exact equality, and the whole allowance is one shape:
+        :meth:`OAuthConfig.registerable_redirect_uri`. The complete submitted
+        string is what gets stored, so from here on "the registered redirect
+        URI" is a value, not a pattern.
         """
         try:
             payload = json.loads(body or "{}")
@@ -254,7 +260,10 @@ class AuthorizationServer:
                 },
             )
         unknown = [
-            uri for uri in redirect_uris if uri not in self.oauth.redirect_uris
+            uri
+            for uri in redirect_uris
+            if not isinstance(uri, str)
+            or not self.oauth.registerable_redirect_uri(uri)
         ]
         if unknown:
             return Response.json(
@@ -264,7 +273,7 @@ class AuthorizationServer:
                     "error_description": (
                         f"{unknown[0]!r} is not a permitted redirect URI for this "
                         "server. Permitted: "
-                        + ", ".join(self.oauth.redirect_uris)
+                        + self.oauth.registerable_redirect_uri_summary
                     ),
                 },
             )
@@ -333,11 +342,15 @@ class AuthorizationServer:
                 "on the server.",
             )
 
+        # Exact equality against what this client registered, and nothing else.
+        # Not a prefix, not the shape that admitted it: re-deriving the
+        # registration rule here would quietly make it the rule that decides
+        # where a code is sent, which is the one place it must never be.
         redirect_uri = (params.get("redirect_uri") or "").strip()
         allowed = client["redirect_uris"]
         if not redirect_uri and len(allowed) == 1:
             redirect_uri = allowed[0]
-        if redirect_uri not in allowed or redirect_uri not in self.oauth.redirect_uris:
+        if redirect_uri not in allowed:
             raise AuthorizationError(
                 "invalid_request",
                 "redirect_uri does not exactly match a registered redirect URI.",
@@ -428,10 +441,7 @@ class AuthorizationServer:
         redirect_uri = (params.get("redirect_uri") or "").strip()
         if not redirect_uri and len(client["redirect_uris"]) == 1:
             redirect_uri = client["redirect_uris"][0]
-        if (
-            redirect_uri in client["redirect_uris"]
-            and redirect_uri in self.oauth.redirect_uris
-        ):
+        if redirect_uri in client["redirect_uris"]:
             return redirect_uri
         return None
 

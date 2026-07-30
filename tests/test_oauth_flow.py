@@ -25,7 +25,13 @@ from vikunja_claude.oauth import MAX_FAILED_ATTEMPTS, SCOPE, AuthorizationServer
 from vikunja_claude.oauth_store import OAuthStore
 
 from .fakes import PROJECT_ID
-from .support import PASSPHRASE, REDIRECT_URI, HttpTestCase, make_mcp_config
+from .support import (
+    CONNECTOR_REDIRECT_URI,
+    PASSPHRASE,
+    REDIRECT_URI,
+    HttpTestCase,
+    make_mcp_config,
+)
 
 
 class TestMetadata(HttpTestCase):
@@ -113,6 +119,246 @@ class TestClientRegistration(HttpTestCase):
 
     def test_registration_without_redirect_uris_is_refused(self):
         self.assertEqual(self.register_client(redirect_uris=[])["status"], 400)
+
+
+class TestTheChatGptConnectorCallback(HttpTestCase):
+    """ChatGPT's per-connector callback: admitted by shape, then pinned by value.
+
+    The connector's identifier is minted when the connector is created, so the
+    address cannot be named in configuration ahead of time — which is exactly
+    how the live dialog failed. Registration therefore recognises the *shape*.
+
+    The whole point of these tests is that the allowance stops there. What the
+    client registered is stored complete, and from that moment the only question
+    ever asked about a redirect URI is whether it is that string — so a second
+    connector's callback, which has an identically valid shape, is refused for
+    the first connector's client.
+    """
+
+    def register_with(self, uri: str) -> dict:
+        return self.register_client(redirect_uris=[uri])
+
+    def assertRegisters(self, uri: str) -> str:
+        client = self.register_with(uri)
+        self.assertEqual(client["status"], 201, client)
+        self.assertEqual(client["redirect_uris"], [uri])
+        return client["client_id"]
+
+    def assertRefused(self, uri: str) -> None:
+        client = self.register_with(uri)
+        self.assertEqual(client["status"], 400, client)
+        self.assertEqual(client["error"], "invalid_redirect_uri")
+
+    # -- what registers ----------------------------------------------------
+
+    def test_the_current_per_connector_callback_registers(self):
+        self.assertRegisters(CONNECTOR_REDIRECT_URI)
+
+    def test_the_complete_submitted_uri_is_what_is_stored(self):
+        """Not a prefix and not a normalised form: the string, as submitted."""
+        uri = "https://chatgpt.com/connector/oauth/A-different_one.~2"
+        client = self.register_with(uri)
+        self.assertEqual(client["redirect_uris"], [uri])
+
+    def test_the_legacy_fixed_callback_still_registers(self):
+        """Compatibility is retained: the old dialog is not broken by the new one."""
+        self.assertRegisters(REDIRECT_URI)
+
+    def test_both_forms_register_together_and_one_bad_one_refuses_all(self):
+        both = [REDIRECT_URI, CONNECTOR_REDIRECT_URI]
+        client = self.register_client(redirect_uris=both)
+        self.assertEqual(client["status"], 201, client)
+        self.assertEqual(client["redirect_uris"], both)
+        # And the list is judged whole: an admitted URI does not carry a
+        # refused one in beside it.
+        self.assertEqual(
+            self.register_client(
+                redirect_uris=[CONNECTOR_REDIRECT_URI, "https://evil.example/cb"]
+            )["status"],
+            400,
+        )
+
+    # -- and completes a real authorization ---------------------------------
+
+    def test_the_registered_connector_uri_completes_authorization(self):
+        client_id = self.assertRegisters(CONNECTOR_REDIRECT_URI)
+        verifier, challenge = self.pkce()
+        params = self.authorize_params(
+            client_id, challenge, redirect_uri=CONNECTOR_REDIRECT_URI
+        )
+        status, headers, _ = self.approve(params)
+        self.assertEqual(status, 302)
+        self.assertTrue(headers["Location"].startswith(CONNECTOR_REDIRECT_URI + "?"))
+
+        code = self.redirect_query(headers)["code"]
+        status, payload = self.exchange(
+            code, verifier, client_id, redirect_uri=CONNECTOR_REDIRECT_URI
+        )
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(self.rpc("tools/list", token=payload["access_token"])[0], 200)
+
+    # -- the shape does not survive registration ----------------------------
+
+    def test_another_connectors_callback_is_refused_after_registration(self):
+        """The decisive one: same shape, registerable in its own right, not this client's.
+
+        If the registration rule were re-applied at ``/oauth/authorize`` this
+        would be accepted, and a code for this client would be sent to an
+        address it never registered.
+        """
+        client_id = self.assertRegisters(CONNECTOR_REDIRECT_URI)
+        other = "https://chatgpt.com/connector/oauth/someOtherConnector"
+        self.assertRegisters(other)  # so it is not the shape that is refusing
+
+        _, challenge = self.pkce()
+        status, headers, page = self.open(
+            "/oauth/authorize?"
+            + urllib.parse.urlencode(
+                self.authorize_params(client_id, challenge, redirect_uri=other)
+            ),
+            token=None,
+        )
+        self.assertEqual(status, 400)
+        self.assertNotIn("Location", headers)
+        self.assertIn("redirect_uri", page)
+
+    def test_the_legacy_client_cannot_authorize_to_a_connector_callback(self):
+        client_id = self.assertRegisters(REDIRECT_URI)
+        _, challenge = self.pkce()
+        status, headers, _ = self.open(
+            "/oauth/authorize?"
+            + urllib.parse.urlencode(
+                self.authorize_params(
+                    client_id, challenge, redirect_uri=CONNECTOR_REDIRECT_URI
+                )
+            ),
+            token=None,
+        )
+        self.assertEqual(status, 400)
+        self.assertNotIn("Location", headers)
+
+    def test_the_token_endpoint_still_pins_the_authorized_uri(self):
+        client_id = self.assertRegisters(CONNECTOR_REDIRECT_URI)
+        verifier, challenge = self.pkce()
+        params = self.authorize_params(
+            client_id, challenge, redirect_uri=CONNECTOR_REDIRECT_URI
+        )
+        _, headers, _ = self.approve(params)
+        code = self.redirect_query(headers)["code"]
+        status, payload = self.exchange(
+            code,
+            verifier,
+            client_id,
+            redirect_uri="https://chatgpt.com/connector/oauth/somethingElse",
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_grant")
+
+    # -- what the shape does not admit --------------------------------------
+
+    def test_an_empty_identifier_is_refused(self):
+        for uri in (
+            "https://chatgpt.com/connector/oauth/",
+            "https://chatgpt.com/connector/oauth",
+            "https://chatgpt.com/connector/oauth//",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_extra_path_segments_are_refused(self):
+        for uri in (
+            CONNECTOR_REDIRECT_URI + "/",
+            CONNECTOR_REDIRECT_URI + "/more",
+            CONNECTOR_REDIRECT_URI + "/../evil",
+            "https://chatgpt.com/connector/oauth/a/b",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_a_dot_segment_is_not_an_identifier(self):
+        """Unreserved characters, but they normalise to a different path."""
+        for uri in (
+            "https://chatgpt.com/connector/oauth/.",
+            "https://chatgpt.com/connector/oauth/..",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_a_query_string_or_fragment_is_refused(self):
+        for uri in (
+            CONNECTOR_REDIRECT_URI + "?x=1",
+            CONNECTOR_REDIRECT_URI + "?",
+            CONNECTOR_REDIRECT_URI + "#frag",
+            CONNECTOR_REDIRECT_URI + "#",
+            CONNECTOR_REDIRECT_URI + "?next=https://evil.example",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_percent_encoded_path_separators_are_refused(self):
+        """`%2F` is one segment here and a separator to whatever decodes it next."""
+        for uri in (
+            "https://chatgpt.com/connector/oauth/a%2Fb",
+            "https://chatgpt.com/connector/oauth/..%2F..%2Fevil",
+            "https://chatgpt.com/connector/oauth/a%252Fb",
+            "https://chatgpt.com/connector%2Foauth/abc",
+            "https://chatgpt.com%2Fconnector/oauth/abc",
+            "https://chatgpt.com/connector/oauth/%2E%2E",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_another_host_is_refused(self):
+        for uri in (
+            "https://evil.chatgpt.com/connector/oauth/abc",
+            "https://chatgpt.com.evil.example/connector/oauth/abc",
+            "https://chatgpt.co/connector/oauth/abc",
+            "https://chatgpt.example/connector/oauth/abc",
+            "https://xn--chatgpt-1234.com/connector/oauth/abc",
+            "https://evil.example/connector/oauth/abc",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_userinfo_cannot_smuggle_another_host_past_the_check(self):
+        for uri in (
+            "https://chatgpt.com@evil.example/connector/oauth/abc",
+            "https://user@chatgpt.com/connector/oauth/abc",
+            "https://user:pass@chatgpt.com/connector/oauth/abc",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_a_port_is_refused(self):
+        for uri in (
+            "https://chatgpt.com:8443/connector/oauth/abc",
+            "https://chatgpt.com:443/connector/oauth/abc",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_plain_http_is_refused(self):
+        self.assertRefused("http://chatgpt.com/connector/oauth/abc")
+
+    def test_an_arbitrary_chatgpt_path_is_refused(self):
+        """The allowance is one path, not the host."""
+        for uri in (
+            "https://chatgpt.com/",
+            "https://chatgpt.com/connector/oauth2/abc",
+            "https://chatgpt.com/connector/oauthx/abc",
+            "https://chatgpt.com/oauth/abc",
+            "https://chatgpt.com/backend-api/abc",
+            "https://chatgpt.com/CONNECTOR/OAUTH/abc",
+        ):
+            with self.subTest(uri=uri):
+                self.assertRefused(uri)
+
+    def test_a_registration_body_that_is_not_a_list_of_strings_is_refused(self):
+        for value in ([None], [{"uri": CONNECTOR_REDIRECT_URI}], [123]):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.register_client(redirect_uris=value)["status"], 400
+                )
 
 
 class TestTheAuthorizationRequest(HttpTestCase):
