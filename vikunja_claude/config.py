@@ -97,6 +97,12 @@ MIN_PASSPHRASE_CHARS = 32
 INVESTMENT_API_URL_ENV = "INVESTMENT_API_URL"
 INVESTMENT_API_KEY_ENV = "INVESTMENT_API_KEY"
 
+# The public website (task 204), fetched as an anonymous visitor. A separate
+# setting from the two above rather than a field on them: it names a different
+# instance, it is used without any credential, and either capability must be
+# switchable on without the other.
+INVESTMENT_PUBLIC_URL_ENV = "INVESTMENT_PUBLIC_URL"
+
 
 def load_env_file(path: Path) -> None:
     """Populate ``os.environ`` from a simple KEY=VALUE file, without overriding."""
@@ -167,6 +173,26 @@ def _is_private_host(hostname: str | None) -> bool:
     return address in _TAILNET_V4 or address in _TAILNET_V6
 
 
+def _bare_base_url(name: str, value: str) -> urllib.parse.SplitResult:
+    """A bare ``scheme://host:port`` a path may be appended to, or a refusal.
+
+    Shared by the two base URLs this service holds, because both are used the
+    same way: a path is appended to them. A base carrying a path, a query or a
+    fragment of its own would silently produce a different URL than the one the
+    calling module names.
+    """
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in ("https", "http") or not parsed.netloc:
+        raise ConfigError(f"{name} must be an absolute http(s) URL, not {value!r}.")
+    if parsed.query or parsed.fragment:
+        raise ConfigError(f"{name} must have no query string or fragment: {value!r}")
+    if parsed.path.rstrip("/"):
+        raise ConfigError(
+            f"{name} must be a bare scheme://host:port with no path: {value!r}"
+        )
+    return parsed
+
+
 def _private_api_url(name: str, value: str) -> str:
     """An http(s) URL that an API key may be sent to, or an explicit refusal.
 
@@ -176,18 +202,7 @@ def _private_api_url(name: str, value: str) -> str:
     put ``INVESTMENT_API_KEY`` on the wire in clear text, and a typo in a hostname
     is exactly how that happens.
     """
-    parsed = urllib.parse.urlsplit(value)
-    if parsed.scheme not in ("https", "http") or not parsed.netloc:
-        raise ConfigError(f"{name} must be an absolute http(s) URL, not {value!r}.")
-    if parsed.query or parsed.fragment:
-        raise ConfigError(f"{name} must have no query string or fragment: {value!r}")
-    if parsed.path.rstrip("/"):
-        # The three read paths are appended to this base. A base carrying a path
-        # of its own would silently produce a different URL than the one named in
-        # `vikunja_claude.investment`.
-        raise ConfigError(
-            f"{name} must be a bare scheme://host:port with no path: {value!r}"
-        )
+    parsed = _bare_base_url(name, value)
     if parsed.scheme == "http" and not _is_private_host(parsed.hostname):
         raise ConfigError(
             f"{name} is plain http to {parsed.hostname!r}, which is neither "
@@ -236,6 +251,33 @@ class InvestmentConfig:
             )
         _private_api_url(INVESTMENT_API_URL_ENV, url)
         return cls(api_url=url, api_key=key)
+
+
+def _public_site_url(investment: "InvestmentConfig | None") -> str | None:
+    """The public website the page fetch reads, or None when it is switched off.
+
+    One setting, and no key: the fetch is made as an anonymous visitor, so there
+    is nothing here to keep secret and plain http to any host is permitted — the
+    pages it reads are the ones the internet is already served.
+
+    It must not be the admin instance. Anonymity already means an admin page
+    answers this the way it answers a stranger, but pointing the *public* page
+    tool at the instance that carries the admin surface is a configuration
+    mistake worth refusing at startup rather than discovering from a page of
+    login redirects.
+    """
+    url = os.environ.get(INVESTMENT_PUBLIC_URL_ENV, "").strip().rstrip("/")
+    if not url:
+        return None
+    _bare_base_url(INVESTMENT_PUBLIC_URL_ENV, url)
+    if investment is not None and url == investment.api_url:
+        raise ConfigError(
+            f"{INVESTMENT_PUBLIC_URL_ENV} is the same instance as "
+            f"{INVESTMENT_API_URL_ENV} ({url}), which is the admin one. Point it "
+            "at the public instance — the page fetch exists to read what a "
+            "visitor is served."
+        )
+    return url
 
 
 @dataclass(frozen=True)
@@ -491,10 +533,18 @@ class McpConfig:
     #: None means the operational reads are switched off, and their tools are not
     #: advertised. See :meth:`InvestmentConfig.from_env`.
     investment: InvestmentConfig | None = None
+    #: None means the public page fetch is switched off, and its tool is not
+    #: advertised. Independent of ``investment``: reading the website needs no
+    #: credential, and either capability can be switched on without the other.
+    public_site_url: str | None = None
 
     @property
     def operational_reads_enabled(self) -> bool:
         return self.investment is not None
+
+    @property
+    def page_fetch_enabled(self) -> bool:
+        return self.public_site_url is not None
 
     @property
     def ledger_path(self) -> Path:
@@ -529,6 +579,7 @@ class McpConfig:
         if env_file is not None:
             load_env_file(env_file)
 
+        investment = InvestmentConfig.from_env()
         return cls(
             api_url=os.environ.get("VIKUNJA_API_URL", DEFAULT_API_URL).rstrip("/"),
             token=_vikunja_token(),
@@ -541,5 +592,6 @@ class McpConfig:
             host=os.environ.get("VIKUNJA_MCP_HOST", "127.0.0.1"),
             port=int(os.environ.get("VIKUNJA_MCP_PORT", "3461")),
             state_dir=_state_dir(),
-            investment=InvestmentConfig.from_env(),
+            investment=investment,
+            public_site_url=_public_site_url(investment),
         )

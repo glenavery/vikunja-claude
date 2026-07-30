@@ -300,18 +300,23 @@ def main() -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
-    # The operational reads are the one part of the surface that can be absent,
-    # so which way they were resolved is said at startup rather than discovered
-    # from a tool that is missing.
+    # The two AI Server capabilities are the parts of the surface that can be
+    # absent, so which way each was resolved is said at startup rather than
+    # discovered from a tool that is missing.
     operational = (
         f"operational reads via {config.investment.api_url}"
         if config.investment is not None
         else "operational reads OFF (INVESTMENT_API_URL/INVESTMENT_API_KEY unset)"
     )
+    page_fetch = (
+        f"public page fetch via {config.public_site_url}"
+        if config.public_site_url is not None
+        else "public page fetch OFF (INVESTMENT_PUBLIC_URL unset)"
+    )
     print(
         f"vikunja-claude-mcp listening on http://{config.host}:{config.port}/mcp "
         f"— project {config.project_title!r}, OAuth issuer {config.oauth.issuer}, "
-        f"{operational}",
+        f"{operational}, {page_fetch}",
         flush=True,
     )
     try:
