@@ -70,8 +70,15 @@ OPERATIONAL_TOOLS = {
     "get_system_health",
 }
 
+#: The public website half (task 204). Advertised only when the public site URL
+#: is configured, and separately from the operational reads — the two settings
+#: are independent, so the default surface is ``VIKUNJA_TOOLS`` alone.
+WEBSITE_TOOLS = {"fetch_public_page"}
+
 INVESTMENT_API_URL = "http://127.0.0.1:8002"
 INVESTMENT_API_KEY = "test-investment-key-never-in-prompts"
+#: The public instance, which is a different port from the admin one above.
+PUBLIC_SITE_URL = "http://127.0.0.1:8001"
 
 
 def make_oauth_config(**overrides) -> OAuthConfig:

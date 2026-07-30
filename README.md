@@ -242,10 +242,10 @@ Decide that consciously; the service will not decide it for you.
 ## The MCP boundary (ChatGPT)
 
 A second, separate service that lets ChatGPT **read the board**, **create a
-ticket**, **correct a ticket's wording**, **comment on one** and **read a few
-operational facts about the AI Server** — so project context does not have to be
-pasted in by hand, and a ticket dictated in a conversation does not have to be
-retyped onto the board.
+ticket**, **correct a ticket's wording**, **comment on one**, **read a few
+operational facts about the AI Server** and **read a public page of its
+website** — so project context does not have to be pasted in by hand, and a
+ticket dictated in a conversation does not have to be retyped onto the board.
 
 It is a different unit on a different port with a different credential, and it
 shares nothing with the launcher but the Vikunja settings. Stopping it stops
@@ -275,6 +275,13 @@ Plus three **operational reads**, present only when they are configured (see
 | `get_repository_state()` | Branch, commit, commit subject and whether the investment checkout's working tree is clean |
 | `get_pipeline_status()` | The latest nightly-pipeline run: status, every stage's own outcome, what S7 did, whether each portfolio got a report |
 | `get_system_health()` | Backup age, disks, Docker, scheduled jobs, database and API, with one folded overall status |
+
+Plus one **public page fetch**, present only when it is configured (see
+[Public page fetch](#public-page-fetch-website-review) below):
+
+| Tool | Does |
+|---|---|
+| `fetch_public_page(path)` | The HTML, HTTP status and response headers of one page of the public website — `/`, `/about`, `/terms?lang=sv` — fetched as an anonymous visitor |
 
 That is the entire surface. The tools are a fixed list in the code, and there is
 no generic passthrough — so "this connection cannot close, delete, move, label
@@ -705,6 +712,72 @@ The two credentials are independent: revoking the Vikunja API token cuts the
 board off and leaves the operational reads working, and removing
 `INVESTMENT_API_KEY` does the reverse.
 
+### Public page fetch (website review)
+
+One read-only tool, `fetch_public_page(path)`, that returns the HTML the public
+site actually served for one path, with its HTTP status code and response
+headers. It exists so the site can be reviewed from the conversation — "does
+`/terms?lang=sv` still carry the Swedish anchors", "what does `/` send as its
+canonical link" — without depending on web browsing, which Cloudflare and bot
+protection sit in front of. The request is made here, from the host the
+application runs on, against the origin.
+
+**It carries no credential.** Not a withheld one — an absent one. The client
+takes a base URL and nothing else: there is no parameter through which a key, a
+cookie or an `Authorization` header could reach the request, and no cookie jar,
+so two fetches are two visitors rather than one session. That is what makes
+"public routes only" arithmetic rather than a list kept in step with the
+application by hand. A page that needs a login answers this the way it answers a
+stranger, and **that answer is what comes back** — the `303` to `/login`, with
+its `Location`, not the page behind it. The application decides what is public,
+in the one place it already decides it.
+
+**Redirects are reported, not followed.** Following the hop would replace the
+evidence of a refusal with a page that looks like a successful fetch of the path
+that was asked for. Fetch the `Location` yourself if you want the next page.
+
+**It cannot be aimed.** The site comes from configuration; the argument is a
+*path*. A value that carries a scheme, an authority (`//example.com/x`), a
+backslash or a fragment is refused, so no argument can point this at another
+host, at the admin instance, or at a link found on a page.
+
+Three smaller rules. `Set-Cookie` **values** are never returned — an anonymous
+fetch can still be handed a session cookie, and a session cookie is a credential
+regardless of who it was minted for; the cookie *names* are listed, because "this
+page sets a session cookie" is worth reviewing. A body over 400000 bytes is cut
+and `truncated: true` says so. A response that is not text (an image, a PDF) has
+its body omitted with a reason, and its status and headers returned anyway.
+
+#### Enabling it
+
+```bash
+${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env
+#   INVESTMENT_PUBLIC_URL=http://127.0.0.1:8001      # the PUBLIC instance
+systemctl --user restart vikunja-claude-mcp
+systemctl --user status vikunja-claude-mcp | grep 'page fetch'
+#   … public page fetch via http://127.0.0.1:8001
+```
+
+One setting, and no key — there is nothing here to keep secret, so plain `http`
+to any host is accepted. It is **independent of the operational reads**: either
+capability can be switched on without the other, and unset, the tool is not
+advertised at all — the same rule, for the same reason, as the three reads
+above.
+
+Point it at the **public** instance (`:8001`), the reverse proxy in front of it,
+or the public hostname. Setting it to the same URL as `INVESTMENT_API_URL` — the
+admin instance — is a refusal to start: anonymity already means an admin page
+answers this like it answers a stranger, but a *public page* tool aimed at the
+admin surface is a configuration mistake worth catching at startup rather than
+discovering from a page of login redirects.
+
+#### Turning it off
+
+```bash
+${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env   # remove the setting
+systemctl --user restart vikunja-claude-mcp            # the tool disappears
+```
+
 ### Transport
 
 MCP Streamable HTTP: JSON-RPC over `POST /mcp`, answered as JSON or as a single
@@ -743,6 +816,7 @@ vikunja_claude/
   mcp.py          MCP protocol: JSON-RPC, handshake, fixed tool list
   mcp_service.py  the tools, the project rule, the dedup ledger
   investment.py   read-only client for the three AI Server operational reads
+  website.py      anonymous, credential-free fetch of one public page
   mcp_server.py   HTTP routing: the OAuth routes, one MCP route, loopback guard
   oauth.py        the OAuth 2.1 authorization server: metadata, PKCE, consent
   oauth_store.py  clients, codes and tokens as one 0600 JSON file
@@ -789,6 +863,14 @@ launch page's same-origin POST, and that neither generated button will read an
 id from a board-view URL); and the MCP boundary — the exact tool set, the
 project refusal, retry deduplication across a restart, description round-trip,
 `Origin` rejection, and that a refused request reaches Vikunja not at all.
+
+The page fetch is tested against a real local `http.server` rather than a mocked
+`urlopen`, because the two properties most worth proving are behaviours of
+urllib's opener: that no redirect is followed, and that a `Set-Cookie` handed
+back by one fetch is not presented by the next. The rest of
+`tests/test_mcp_website.py` holds the wire itself — no `Cookie`, no
+`Authorization`, no `X-API-Key` on any request — every path shape that would
+name another host, and that the tool is absent when unconfigured.
 
 The OAuth boundary is tested as one claim: **the only way to reach `/mcp` is an
 access token this server issued through the authorization code flow, with PKCE,

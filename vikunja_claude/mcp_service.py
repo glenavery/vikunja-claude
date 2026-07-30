@@ -28,6 +28,12 @@ that can never succeed is read by a model as a capability, and its failure
 reported as a fact about the system rather than about the configuration. They
 reach nothing directly — no shell, no database — only three fixed GETs handled by
 :mod:`vikunja_claude.investment`.
+
+The public page fetch (task 204) is absent in the same way and for the same
+reason, from its own setting. It is the one tool here that takes a path, so it
+is worth saying where the safety of that lives: not here. It is handled by
+:mod:`vikunja_claude.website`, which holds no credential at all, so a protected
+page answers it as it answers a stranger and the refusal is what comes back.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ from .html_text import html_to_text, text_to_html
 from .investment import InvestmentStatusClient, InvestmentStatusError
 from .mcp import Tool, ToolError
 from .vikunja import TicketNotFound, VikunjaClient, VikunjaError
+from .website import PublicPageError, PublicSiteClient
 
 MAX_TITLE_CHARS = 250
 MAX_DESCRIPTION_CHARS = 20000
@@ -105,6 +112,7 @@ class McpService:
         config: McpConfig,
         client: VikunjaClient,
         investment: InvestmentStatusClient | None = None,
+        site: PublicSiteClient | None = None,
     ):
         self.config = config
         self.client = client
@@ -128,10 +136,22 @@ class McpService:
             )
         else:
             self.investment = None
+        # Same rule, its own setting: built from configuration unless injected,
+        # and None in either place means the page tool is not advertised.
+        if site is not None:
+            self.site: PublicSiteClient | None = site
+        elif config.public_site_url is not None:
+            self.site = PublicSiteClient(config.public_site_url)
+        else:
+            self.site = None
 
     @property
     def operational_reads_enabled(self) -> bool:
         return self.investment is not None
+
+    @property
+    def page_fetch_enabled(self) -> bool:
+        return self.site is not None
 
     # -- resolution --------------------------------------------------------
 
@@ -399,6 +419,25 @@ class McpService:
         try:
             return self._investment().system_health()
         except InvestmentStatusError as exc:
+            raise ToolError(str(exc)) from exc
+
+    # -- the public website (task 204) --------------------------------------
+
+    def _site(self) -> PublicSiteClient:
+        """The configured site client, or a refusal that names the setting."""
+        if self.site is None:
+            raise ToolError(
+                "The public page fetch is not configured on this boundary. Set "
+                "INVESTMENT_PUBLIC_URL to enable it. Nothing was fetched, so "
+                "nothing is known about what that page returns."
+            )
+        return self.site
+
+    def fetch_public_page(self, path: Any) -> dict[str, Any]:
+        """One page of the public site, exactly as a visitor is served it."""
+        try:
+            return self._site().fetch_page(path)
+        except PublicPageError as exc:
             raise ToolError(str(exc)) from exc
 
     # -- create ------------------------------------------------------------
@@ -924,7 +963,63 @@ class McpService:
         operational tools are included or omitted once, from configuration read
         at startup, and never appear and disappear underneath a live session.
         """
-        return [*self._vikunja_tools(), *self._operational_tools()]
+        return [
+            *self._vikunja_tools(),
+            *self._operational_tools(),
+            *self._website_tools(),
+        ]
+
+    def _website_tools(self) -> list[Tool]:
+        """The public page fetch, or nothing at all when unconfigured."""
+        if not self.page_fetch_enabled:
+            return []
+        return [
+            Tool(
+                name="fetch_public_page",
+                title="Fetch a public page of the AI Server website",
+                description=(
+                    "Fetch one page of the public AI Server website by path — "
+                    '"/", "/about", "/how-it-works", "/terms?lang=sv" — and read '
+                    "the HTML the server actually returned, with its HTTP status "
+                    "code and response headers. Use this to review the live site "
+                    "without depending on web browsing, which Cloudflare and bot "
+                    "protection sit in front of. The request is made as an "
+                    "anonymous visitor carrying no cookie, no API key and no "
+                    "session, so a page that requires a login answers with its "
+                    "redirect to the login page and that redirect is what you "
+                    "get: this cannot read a page a stranger cannot read. "
+                    "Redirects are reported, not followed — fetch the Location "
+                    "yourself if you want the next page. Cookie values are "
+                    "withheld (their names are listed). A body over "
+                    "400000 bytes is cut, and says so. Read-only; it changes "
+                    "nothing on the site."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                'A path on the site, starting with "/" and '
+                                "optionally carrying a query string. Not a full "
+                                "URL: the site is fixed by configuration and "
+                                "cannot be changed from here."
+                            ),
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    # One host, fixed by configuration, with no argument that
+                    # could aim it anywhere else — a closed world of one site.
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.fetch_public_page(arguments.get("path")),
+            ),
+        ]
 
     def _operational_tools(self) -> list[Tool]:
         """The three AI Server reads, or nothing at all when unconfigured."""
