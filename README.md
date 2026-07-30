@@ -323,7 +323,8 @@ What holds:
 - **A code is single use**, lives 60 seconds, and is bound to the client, the
   redirect URI, the challenge and the resource. Redeeming one twice fails *and*
   revokes every token the first redemption issued — a replayed code means it
-  leaked, and the tokens are what it leaked for.
+  leaked, and the tokens are what it leaked for. A *wrong* verifier spends the
+  code too: whoever holds a stolen one gets a single attempt.
 - **Access tokens live an hour** and are bound to this server as their audience;
   refresh tokens rotate on every use, so a stolen one is good for one call.
 - **There is no password grant, no client-credentials grant and no implicit

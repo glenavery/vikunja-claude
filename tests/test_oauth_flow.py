@@ -242,6 +242,15 @@ class TestTheTokenEndpoint(HttpTestCase):
         self.assertEqual(status, 400)
         self.assertEqual(payload["error"], "invalid_grant")
 
+    def test_a_failed_verifier_spends_the_code(self):
+        """One attempt, not a guessing game: the code is claimed before it is checked."""
+        code, verifier, client_id = self.obtain_code()
+        other_verifier, _ = self.pkce()
+        self.exchange(code, other_verifier, client_id)
+        status, payload = self.exchange(code, verifier, client_id)
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "invalid_grant")
+
     def test_a_missing_verifier_is_refused(self):
         code, _, client_id = self.obtain_code()
         status, payload = self.exchange(code, "", client_id, code_verifier=None)

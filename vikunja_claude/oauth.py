@@ -576,6 +576,10 @@ class AuthorizationServer:
             )
         verifier = params.get("code_verifier") or ""
         if not verifier or not _pkce_matches(verifier, record["code_challenge"]):
+            # The code was claimed before this check, so a wrong verifier spends
+            # it: whoever holds a stolen code gets one attempt, not a guessing
+            # game. A client that fumbles its own verifier re-authorizes, which
+            # is the cheaper half of that trade.
             raise AuthorizationError(
                 "invalid_grant", "The PKCE code_verifier does not match the challenge"
             )
