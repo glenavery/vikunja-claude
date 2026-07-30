@@ -20,7 +20,13 @@ from vikunja_claude.mcp_service import McpService, idempotency_key
 from vikunja_claude.vikunja import VikunjaClient, VikunjaError
 
 from .fakes import PROJECT_ID, VIEW_ID, FakeVikunja, FilterIgnoringVikunja, task
-from .support import VIKUNJA_TOOLS, McpTestCase, make_mcp_config
+from .support import (
+    READ_TOOLS,
+    VIKUNJA_TOOLS,
+    WRITE_TOOLS,
+    McpTestCase,
+    make_mcp_config,
+)
 
 OTHER_PROJECT_ID = 1
 
@@ -622,12 +628,20 @@ class TestTheWholeSurface(McpTestCase):
             VIKUNJA_TOOLS,
         )
 
-    def test_driving_every_tool_never_touches_an_existing_task(self):
-        """Exercise the whole surface, then check nothing existing moved."""
+    def test_driving_every_read_and_the_create_never_touches_an_existing_task(self):
+        """Exercise everything but the two edits, then check nothing moved.
+
+        Narrowed by task 196, which added `update_task` and `add_task_comment`
+        — driving those *is* touching an existing task, which is the point of
+        them. Everything else on the surface is still held to this, and the two
+        that are not are held to `TestTheEditsAreTheOnlyThingThatWrites` below,
+        which is stricter about them than a blanket sweep could be.
+        """
         protocol = McpProtocol(self.service.tools())
         self.call_tool("get_task", task_id=9)
         self.call_tool("list_open_tasks")
         self.call_tool("list_open_tasks", bucket="Ready", label="Operations")
+        self.call_tool("search_tasks", text="backup", status="any")
         self.call_tool(
             "create_task", project_id=PROJECT_ID, title="A ticket", description="A body."
         )
@@ -641,6 +655,58 @@ class TestTheWholeSurface(McpTestCase):
                     pattern.match(signature),
                     f"the boundary issued {signature!r}, which would {what}",
                 )
+
+
+class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
+    """Which tools may change an existing task, asserted as an exact set.
+
+    A subset check would still pass the day `close_task` appears. This is the
+    assertion task 196 has to leave behind: the write boundary moved, so it is
+    pinned at where it moved to rather than deleted.
+    """
+
+    def annotations(self) -> dict[str, dict]:
+        return {tool.name: tool.annotations for tool in self.service.tools()}
+
+    def test_exactly_two_tools_can_change_an_existing_task(self):
+        self.assertEqual(WRITE_TOOLS, {"update_task", "add_task_comment"})
+        self.assertEqual(VIKUNJA_TOOLS - WRITE_TOOLS - {"create_task"}, READ_TOOLS)
+
+    def test_every_other_tool_declares_itself_read_only(self):
+        for name, annotations in self.annotations().items():
+            with self.subTest(tool=name):
+                self.assertEqual(
+                    annotations["readOnlyHint"],
+                    name in READ_TOOLS,
+                    f"{name} declares readOnlyHint={annotations['readOnlyHint']}",
+                )
+
+    def test_only_the_edit_declares_itself_destructive(self):
+        """A comment adds; an edit replaces text that was there."""
+        destructive = {
+            name
+            for name, annotations in self.annotations().items()
+            if annotations.get("destructiveHint")
+        }
+        self.assertEqual(destructive, {"update_task"})
+
+    def test_no_write_tool_takes_an_argument_that_closes_moves_or_labels(self):
+        """The writes name the two fields they may change and nothing else.
+
+        `list_open_tasks` takes `bucket` and `label` as *filters*, which is why
+        this is asked of the writes rather than of the whole surface — and why
+        `additionalProperties: false` matters here: an unlisted field is what
+        would let one of these carry `done` through to a whole-task replace.
+        """
+        forbidden = {"done", "status", "bucket", "bucket_id", "labels", "label_ids",
+                     "assignees", "priority", "due_date", "position", "project_id"}
+        writes = [t for t in self.service.tools() if t.name in WRITE_TOOLS]
+        self.assertEqual({t.name for t in writes}, WRITE_TOOLS)
+        for tool in writes:
+            with self.subTest(tool=tool.name):
+                named = set(tool.input_schema.get("properties") or {})
+                self.assertEqual(named & forbidden, set())
+                self.assertFalse(tool.input_schema["additionalProperties"])
 
 
 if __name__ == "__main__":

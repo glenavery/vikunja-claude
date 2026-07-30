@@ -884,12 +884,85 @@ class TestTheGrantedSurface(HttpTestCase):
         self.assertEqual(second_result["task_id"], first_result["task_id"])
 
     def test_the_unsupported_write_operations_are_still_unavailable(self):
-        for name in ("edit_task", "close_task", "delete_task", "move_task", "comment"):
+        """Narrowed by task 196: editing and commenting were added deliberately.
+
+        `edit_task` and `comment` came off this list because tools doing those
+        things now exist under their own names — but closing, deleting, moving
+        and reassigning are still nothing this token can buy, and that is what
+        an authorization is now checked against.
+        """
+        for name in ("close_task", "delete_task", "move_task", "assign_task"):
             with self.subTest(name=name):
                 _, _, text = self.rpc(
                     "tools/call", {"name": name, "arguments": {"task_id": 9}}
                 )
                 self.assertIn("error", json.loads(text))
+
+    def call(self, name: str, **arguments) -> dict:
+        _, _, text = self.rpc("tools/call", {"name": name, "arguments": arguments})
+        return json.loads(text)["result"]
+
+    def stored(self, task_id: int) -> dict:
+        return self.vikunja._find(task_id)
+
+    def test_a_valid_token_can_update_a_task_after_approving_the_change(self):
+        """The whole two-step flow, over the socket, on a real authorization."""
+        before = self.stored(9)["title"]
+        new_title = "#33 Back up the Vikunja database nightly"
+
+        previewed = self.call("update_task", task_id=9, title=new_title)[
+            "structuredContent"
+        ]
+        self.assertFalse(previewed["applied"])
+        self.assertEqual(previewed["current"]["title"], before)
+        self.assertEqual(previewed["proposed"]["title"], new_title)
+        self.assertEqual(self.stored(9)["title"], before, "the preview wrote")
+
+        applied = self.call(
+            "update_task",
+            task_id=9,
+            title=new_title,
+            approval_token=previewed["approval_token"],
+        )["structuredContent"]
+        self.assertTrue(applied["applied"])
+        self.assertEqual(applied["changed_fields"], ["title"])
+        self.assertEqual(self.stored(9)["title"], new_title)
+
+    def test_a_valid_token_alone_does_not_buy_an_update(self):
+        """Authorization is not approval: a token is not a token."""
+        before = self.stored(9)["title"]
+        result = self.call("update_task", task_id=9, title="#33 Renamed",
+                           approval_token="a-token-nobody-issued")
+        self.assertTrue(result["isError"])
+        self.assertEqual(self.stored(9)["title"], before)
+
+    def test_a_valid_token_can_comment_after_approving_the_comment(self):
+        text = "Verified through the deployed endpoint."
+        previewed = self.call("add_task_comment", task_id=9, comment=text)[
+            "structuredContent"
+        ]
+        self.assertFalse(previewed["added"])
+        self.assertEqual(previewed["comment"], text)
+        self.assertEqual(self.vikunja.comments.get(9, []), [])
+
+        added = self.call(
+            "add_task_comment",
+            task_id=9,
+            comment=text,
+            approval_token=previewed["approval_token"],
+        )["structuredContent"]
+        self.assertTrue(added["added"])
+        self.assertIsNotNone(added["comment_id"])
+        self.assertEqual(len(self.vikunja.comments[9]), 1)
+
+        # And the read tools see it, which is what a user checking would do.
+        read = self.call("get_task", task_id=9)["structuredContent"]
+        self.assertEqual([c["text"] for c in read["comments"]], [text])
+
+    def test_editing_a_task_outside_the_one_project_is_refused(self):
+        result = self.call("update_task", task_id=4242, title="Somewhere else")
+        self.assertTrue(result["isError"])
+        self.assertIn("Nothing was changed", result["content"][0]["text"])
 
 
 if __name__ == "__main__":

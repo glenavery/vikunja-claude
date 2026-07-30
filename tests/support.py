@@ -41,9 +41,26 @@ REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect"
 CONNECTOR_REDIRECT_URI = "https://chatgpt.com/connector/oauth/jFpZaNIKITJA"
 
 #: The Vikunja half of the tool surface. Always advertised, and exhaustive — the
-#: assertions that use this are the ones proving the boundary cannot edit, close,
-#: delete or comment, so a name added here without a reason weakens them.
-VIKUNJA_TOOLS = {"get_task", "list_open_tasks", "search_tasks", "create_task"}
+#: assertions that use this are the ones proving the boundary cannot close,
+#: delete, move, label or reassign a task, so a name added here without a reason
+#: weakens them. Editing a title/description and commenting were added
+#: deliberately by task 196, each behind a two-step approval.
+VIKUNJA_TOOLS = {
+    "get_task",
+    "list_open_tasks",
+    "search_tasks",
+    "create_task",
+    "update_task",
+    "add_task_comment",
+}
+
+#: The subset that can change something that already exists. Named separately
+#: because most of the suite's guarantees are about the tools that cannot.
+WRITE_TOOLS = {"update_task", "add_task_comment"}
+
+#: The subset that changes nothing at all. `create_task` is in neither set: it
+#: writes, but it can only ever add a task that did not exist.
+READ_TOOLS = {"get_task", "list_open_tasks", "search_tasks"}
 
 #: The operational half (task 138). Advertised only when the investment reads are
 #: configured, so the default surface is ``VIKUNJA_TOOLS`` alone.

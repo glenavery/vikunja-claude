@@ -71,11 +71,46 @@ class TestAdvertisedSurface(McpTestCase):
         tools = self.protocol.handle(request("tools/list"))["result"]["tools"]
         self.assertEqual({tool["name"] for tool in tools}, EXPOSED_TOOLS)
 
-    def test_no_tool_advertises_a_way_to_change_an_existing_task(self):
-        forbidden = ("update", "edit", "close", "delete", "comment", "move", "assign")
+    def test_no_tool_advertises_a_way_to_close_delete_or_move_a_task(self):
+        """Narrowed by task 196, which added an edit and a comment on purpose.
+
+        `update` and `comment` came off this list because the tools that carry
+        those verbs now exist and are approved; the rest are still the ones this
+        boundary must never grow, and the two that were added are held to the
+        stricter test below rather than to a name check.
+        """
+        forbidden = ("close", "delete", "remove", "move", "assign", "label")
         for name in self.protocol.tool_names:
             for verb in forbidden:
                 self.assertNotIn(verb, name)
+
+    def test_the_two_tools_that_can_change_a_task_are_the_two_that_were_approved(self):
+        tools = {
+            tool["name"]: tool
+            for tool in self.protocol.handle(request("tools/list"))["result"]["tools"]
+        }
+        writes = {
+            name
+            for name, tool in tools.items()
+            if not tool["annotations"]["readOnlyHint"]
+        }
+        self.assertEqual(writes, {"create_task", "update_task", "add_task_comment"})
+
+    def test_each_edit_advertises_its_approval_step(self):
+        """A model reading the list must see that one call cannot be enough."""
+        tools = {
+            tool["name"]: tool
+            for tool in self.protocol.handle(request("tools/list"))["result"]["tools"]
+        }
+        for name in ("update_task", "add_task_comment"):
+            with self.subTest(tool=name):
+                description = tools[name]["description"].lower()
+                self.assertIn("approval_token", description)
+                self.assertIn("without approval_token", description)
+                self.assertIn("approval_token", tools[name]["inputSchema"]["properties"])
+                self.assertNotIn(
+                    "approval_token", tools[name]["inputSchema"]["required"]
+                )
 
     def test_every_tool_declares_a_closed_schema(self):
         """additionalProperties: False — a client cannot smuggle an extra field."""

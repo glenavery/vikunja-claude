@@ -113,6 +113,57 @@ def test_set_description_notices_a_server_side_rewrite():
     assert "differs from what was sent" in str(exc.value)
 
 
+def test_set_task_fields_replaces_the_title_and_keeps_the_description():
+    fake = FakeVikunja()
+    client(fake).set_task_fields(TASK_WITH_DESCRIPTION, title="#33 Renamed")
+
+    assert stored(fake, TASK_WITH_DESCRIPTION)["title"] == "#33 Renamed"
+    assert stored(fake, TASK_WITH_DESCRIPTION)["description"] == LONG_DESCRIPTION
+
+
+def test_set_task_fields_replaces_both_in_one_write():
+    """One write, so the task never holds the new title and the old body."""
+    fake = FakeVikunja()
+    client(fake).set_task_fields(
+        TASK_WITH_DESCRIPTION, title="#33 Renamed", description_html="<p>New.</p>"
+    )
+
+    posts = [c for c in fake.calls if c[0] == "POST" and c[1].startswith("/tasks/")]
+    assert len(posts) == 1
+    assert stored(fake, TASK_WITH_DESCRIPTION)["title"] == "#33 Renamed"
+    assert stored(fake, TASK_WITH_DESCRIPTION)["description"] == "<p>New.</p>"
+
+
+def test_set_task_fields_refuses_to_blank_either_field():
+    fake = FakeVikunja()
+    for kwargs in ({"title": "  "}, {"description_html": " \n "}, {}):
+        with pytest.raises(VikunjaError):
+            client(fake).set_task_fields(TASK_WITH_DESCRIPTION, **kwargs)
+    assert stored(fake, TASK_WITH_DESCRIPTION)["description"] == LONG_DESCRIPTION
+    assert stored(fake, TASK_WITH_DESCRIPTION)["title"].startswith("#33")
+
+
+def test_a_title_only_change_still_trips_the_description_guard():
+    """The one field it is not touching is the one that has been lost before."""
+
+    class Dropping(FakeVikunja):
+        def _replace(self, task_id, body):
+            return super()._replace(task_id, dict(body, description=""))
+
+    with pytest.raises(DescriptionLost):
+        client(Dropping()).set_task_fields(TASK_WITH_DESCRIPTION, title="#33 Renamed")
+
+
+def test_set_task_fields_notices_a_server_side_rewrite():
+    class Rewriting(FakeVikunja):
+        def _replace(self, task_id, body):
+            return super()._replace(task_id, dict(body, title=body["title"] + " (sic)"))
+
+    with pytest.raises(VikunjaError) as exc:
+        client(Rewriting()).set_task_fields(TASK_WITH_DESCRIPTION, title="#33 Renamed")
+    assert "stored title differs" in str(exc.value)
+
+
 def test_create_task_returns_a_task_with_an_id():
     fake = FakeVikunja()
     created = client(fake).create_task(PROJECT_ID, "New ticket", "<p>Body.</p>")

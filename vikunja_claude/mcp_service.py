@@ -1,9 +1,25 @@
 """The operations the MCP boundary exposes, and the rules around them.
 
-The whole surface is here: reads, and one create. Nothing in this module can
-edit, close, delete, comment on or move an existing task, and it reaches Vikunja
-only through :class:`~vikunja_claude.vikunja.VikunjaClient` methods that cannot
-do those things either.
+The whole surface is here: reads, one create, and — since task 196 — two ways to
+change a task that already exists: its title/description, and a new comment.
+Nothing in this module can close, delete, move, label, assign or reprioritise a
+task, and it reaches Vikunja only through
+:class:`~vikunja_claude.vikunja.VikunjaClient` methods that cannot do those
+things either.
+
+The two edits are **two-step**. A call with no ``approval_token`` writes
+nothing: it reads the task and returns the exact current value beside the exact
+proposed one, with a token naming that one change. Only a second call carrying
+that token writes, and it writes only if the submitted text and the task's
+current value are both still the ones the token was issued for.
+
+What that does and does not buy is worth being exact about, because the
+difference is where this kind of guard usually gets oversold. No server can see
+the conversation, so this cannot prove a human said yes. What it does prove is
+that no edit happens without a prior round trip that put the before and after
+text in front of the client, and that the write is byte-for-byte the change that
+round trip described — an approval cannot be carried over to different text, to
+a different task, or to a task that has moved underneath it.
 
 The operational reads (repository, pipeline, system health — task 138) are the
 one part of this surface that can be **absent**: they are advertised only when
@@ -18,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 import sys
 import threading
 from datetime import datetime, timezone
@@ -27,10 +44,24 @@ from .config import McpConfig
 from .html_text import html_to_text, text_to_html
 from .investment import InvestmentStatusClient, InvestmentStatusError
 from .mcp import Tool, ToolError
-from .vikunja import VikunjaClient, VikunjaError
+from .vikunja import TicketNotFound, VikunjaClient, VikunjaError
 
 MAX_TITLE_CHARS = 250
 MAX_DESCRIPTION_CHARS = 20000
+MAX_COMMENT_CHARS = 20000
+
+#: The two changes a token can be issued for. They are kept apart so an
+#: approval for a comment can never be redeemed as an approval for an edit.
+CHANGE_UPDATE = "update"
+CHANGE_COMMENT = "comment"
+
+#: How many previewed-but-uncommitted changes are remembered at once. A preview
+#: costs nothing and a client is free to abandon one, so the table is bounded
+#: rather than left to grow; the oldest is dropped, and losing one costs a fresh
+#: preview and nothing else. Deliberately not persisted: an approval describes a
+#: task as it was moments ago, and one that outlived a restart would be
+#: describing a board nobody has looked at since.
+MAX_PENDING_APPROVALS = 64
 
 #: The statuses ``search_tasks`` accepts. A closed set, so a typo is a refusal
 #: rather than a silently narrower search.
@@ -78,8 +109,14 @@ class McpService:
         self.config = config
         self.client = client
         # One process, one port, one unit — so a lock is enough to make
-        # check-then-create atomic against a concurrent retry.
-        self._create_lock = threading.Lock()
+        # check-then-write atomic against a concurrent retry. One lock for all
+        # three writes, not one each: the checks that make a retry harmless
+        # (the ledger, a no-op edit, a duplicate comment) all read state a
+        # concurrent write is about to change.
+        self._write_lock = threading.Lock()
+        # Changes that have been previewed and not yet committed, keyed by the
+        # token that was handed out for each. See `_issue_approval`.
+        self._pending: dict[str, dict[str, Any]] = {}
         # Built from configuration unless one is injected. None here and None in
         # the config mean the same thing, and it is checked in one place
         # (`operational_reads_enabled`) rather than at each call site.
@@ -427,7 +464,7 @@ class McpService:
             )
 
         key = idempotency_key(allowed, title, description)
-        with self._create_lock:
+        with self._write_lock:
             existing = self._ledger().get(key)
             if existing is not None:
                 return {
@@ -467,6 +504,414 @@ class McpService:
             "project": self.config.project_title,
             "project_id": allowed,
             "url": url,
+        }
+
+    # -- approval (task 196) -----------------------------------------------
+
+    def _issue_approval(
+        self,
+        kind: str,
+        task_id: int,
+        before: tuple[str, ...],
+        after: tuple[str, ...],
+    ) -> str:
+        """A token naming one exact change to one task.
+
+        Re-previewing the same change returns the token already issued for it
+        rather than a second one, so a client that asks twice before showing the
+        user has one approval outstanding and not two.
+        """
+        with self._write_lock:
+            for token, record in self._pending.items():
+                if (record["kind"], record["task_id"], record["before"], record["after"]) == (
+                    kind,
+                    task_id,
+                    before,
+                    after,
+                ):
+                    return token
+            while len(self._pending) >= MAX_PENDING_APPROVALS:
+                self._pending.pop(next(iter(self._pending)))
+            token = secrets.token_urlsafe(24)
+            self._pending[token] = {
+                "kind": kind,
+                "task_id": task_id,
+                "before": before,
+                "after": after,
+                "issued_at": _now(),
+            }
+            return token
+
+    def _redeem_approval(
+        self,
+        token: str,
+        kind: str,
+        task_id: int,
+        before: tuple[str, ...],
+        after: tuple[str, ...],
+    ) -> None:
+        """Spend an approval, or refuse and say which half stopped matching.
+
+        Single use, and a mismatch spends it too: an approval describes one
+        change, so a token that no longer describes it is not a token to retry
+        with. The caller must already hold the write lock — the check and the
+        write it authorises are one step, or a concurrent call could redeem the
+        same token against a board that moved in between.
+        """
+        record = self._pending.get(token)
+        if (
+            record is None
+            or record["kind"] != kind
+            or record["task_id"] != task_id
+        ):
+            raise ToolError(
+                f"That approval_token was not issued for this change to task "
+                f"{task_id}. It may already have been used, it may belong to "
+                "another task, or the service may have restarted since it was "
+                "issued. Nothing was changed. Call again without approval_token "
+                "to read the current value and get a fresh approval to show the "
+                "user."
+            )
+        self._pending.pop(token, None)
+        if record["after"] != after:
+            raise ToolError(
+                f"This is not the change that was approved for task {task_id}: "
+                "the text submitted differs from the text the approval was "
+                "issued for. Nothing was changed. Call again without "
+                "approval_token, show the user the new text, and get a fresh "
+                "approval for it."
+            )
+        if record["before"] != before:
+            raise ToolError(
+                f"Task {task_id} has changed since that approval was issued, so "
+                "the value the user was shown is no longer the value on the "
+                "board. Nothing was changed. Call again without approval_token "
+                "to see what it holds now."
+            )
+
+    def _record_mutation(self, record: dict[str, Any], summary: str) -> None:
+        path = self.config.mutation_ledger_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
+        print(f"mcp: {summary}", file=sys.stderr, flush=True)
+
+    def _own_ticket(self, task_id: int, verb: str):
+        """The task, if it is on this board. The project boundary, structurally.
+
+        Looked up through *this project's* view, so a task belonging to another
+        project is not in the answer to begin with — the refusal does not depend
+        on comparing a project id the caller supplied.
+        """
+        project_id, view_id = self._ids()
+        try:
+            return project_id, self.client.find_by_task_id(task_id, project_id, view_id)
+        except TicketNotFound as exc:
+            raise ToolError(
+                f"Refusing to {verb} task {task_id}: it is not on the "
+                f"{self.config.project_title} board. {exc} Nothing was changed."
+            ) from exc
+        except VikunjaError as exc:
+            raise ToolError(f"{exc} Nothing was changed.") from exc
+
+    # -- update (task 196) --------------------------------------------------
+
+    def update_task(
+        self,
+        task_id: int,
+        title: str | None = None,
+        description: str | None = None,
+        approval_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace one task's title, description or both, after approval.
+
+        Whole values only. There is no partial or inferred replacement — the
+        caller submits the complete new text, which is the same thing the user
+        is shown, so what was approved and what is stored cannot drift apart.
+        """
+        title = None if title is None else title.strip()
+        description = None if description is None else description.strip()
+
+        if title is None and description is None:
+            raise ToolError(
+                "update_task needs a complete replacement title, a complete "
+                "replacement description, or both. It does not do partial "
+                "replacements, and it cannot change status, bucket, labels, "
+                "assignees, priority or due dates. Nothing was changed."
+            )
+        if title is not None and not title:
+            raise ToolError("a blank title is refused: nothing was changed")
+        if description is not None and not description:
+            raise ToolError(
+                "a blank description is refused: a ticket with no description is "
+                "not a ticket anyone can work. Nothing was changed."
+            )
+        if title is not None and len(title) > MAX_TITLE_CHARS:
+            raise ToolError(
+                f"title is longer than {MAX_TITLE_CHARS} characters. Nothing was "
+                "changed."
+            )
+        if description is not None and len(description) > MAX_DESCRIPTION_CHARS:
+            raise ToolError(
+                f"description is longer than {MAX_DESCRIPTION_CHARS} characters. "
+                "Nothing was changed."
+            )
+
+        project_id, ticket = self._own_ticket(task_id, "update")
+        proposal = self._proposed_update(ticket, title, description)
+
+        if not proposal["changed_fields"]:
+            # Idempotent: the board already says what was asked for. Reported as
+            # a no-op rather than refused, because "make it say X" and "it says
+            # X" are the same outcome, and a repeat of an applied change lands
+            # here rather than needing a second approval.
+            return {
+                "applied": False,
+                "reason": "the task already holds these values, so there was "
+                "nothing to change",
+                "task_id": ticket.task_id,
+                "title": ticket.title,
+                "changed_fields": [],
+                "project": self.config.project_title,
+                "project_id": project_id,
+                "url": ticket.url(self.config.frontend_url),
+            }
+
+        if approval_token is None:
+            return {
+                "applied": False,
+                "approval_required": True,
+                "task_id": ticket.task_id,
+                "title": ticket.title,
+                "changed_fields": proposal["changed_fields"],
+                "current": proposal["current"],
+                "proposed": proposal["proposed"],
+                "approval_token": self._issue_approval(
+                    CHANGE_UPDATE, ticket.task_id, proposal["before"], proposal["after"]
+                ),
+                "project": self.config.project_title,
+                "project_id": project_id,
+                "url": ticket.url(self.config.frontend_url),
+                "next_step": (
+                    "Nothing has been changed. Show the user the exact current "
+                    "and proposed values above. If they approve that exact "
+                    "change, call update_task again with identical arguments "
+                    "plus this approval_token."
+                ),
+            }
+
+        with self._write_lock:
+            # Re-read inside the lock. The preview's read is not the
+            # precondition: the board can move between the two calls, and the
+            # value the user approved replacing is the one that must still be
+            # there.
+            _, current = self._own_ticket(task_id, "update")
+            proposal = self._proposed_update(current, title, description)
+            if not proposal["changed_fields"]:
+                return {
+                    "applied": False,
+                    "reason": "the task already holds these values, so there was "
+                    "nothing to change",
+                    "task_id": current.task_id,
+                    "title": current.title,
+                    "changed_fields": [],
+                    "project": self.config.project_title,
+                    "project_id": project_id,
+                    "url": current.url(self.config.frontend_url),
+                }
+
+            self._redeem_approval(
+                approval_token,
+                CHANGE_UPDATE,
+                current.task_id,
+                proposal["before"],
+                proposal["after"],
+            )
+
+            changed = proposal["changed_fields"]
+            new_title = proposal["proposed"]["title"]
+            new_description = proposal["proposed"]["description"]
+            try:
+                self.client.set_task_fields(
+                    current.task_id,
+                    title=new_title if "title" in changed else None,
+                    description_html=(
+                        text_to_html(new_description)
+                        if "description" in changed
+                        else None
+                    ),
+                )
+            except VikunjaError as exc:
+                raise ToolError(f"Vikunja refused the update: {exc}") from exc
+
+            self._record_mutation(
+                {
+                    "at": _now(),
+                    "kind": CHANGE_UPDATE,
+                    "project_id": project_id,
+                    "task_id": current.task_id,
+                    "changed_fields": changed,
+                    "replaced": proposal["current"],
+                    "stored": proposal["proposed"],
+                },
+                f"updated task {current.task_id} in project {project_id} "
+                f"({', '.join(changed)}) — {new_title!r}",
+            )
+
+        return {
+            "applied": True,
+            "task_id": current.task_id,
+            "title": new_title,
+            "changed_fields": changed,
+            "project": self.config.project_title,
+            "project_id": project_id,
+            "url": current.url(self.config.frontend_url),
+        }
+
+    @staticmethod
+    def _proposed_update(ticket, title: str | None, description: str | None) -> dict:
+        """What this task holds, what it would hold, and which fields differ.
+
+        Comparison is on the text a human reads, not on the stored markup: the
+        caller submits plain text and Vikunja stores editor HTML, so comparing
+        the two representations would call every no-op a change.
+        """
+        current = {"title": ticket.title, "description": ticket.description}
+        proposed = {
+            "title": current["title"] if title is None else title,
+            "description": (
+                current["description"] if description is None else description
+            ),
+        }
+        changed = [
+            field for field in ("title", "description")
+            if proposed[field] != current[field]
+        ]
+        return {
+            "current": current,
+            "proposed": proposed,
+            "changed_fields": changed,
+            "before": (current["title"], current["description"]),
+            "after": (proposed["title"], proposed["description"]),
+        }
+
+    # -- comment (task 196) -------------------------------------------------
+
+    def add_task_comment(
+        self, task_id: int, comment: str, approval_token: str | None = None
+    ) -> dict[str, Any]:
+        """Append one plain-text comment to a task on this board, after approval.
+
+        Append-only: this cannot edit or delete a comment that is already there,
+        and the tool that would do so does not exist.
+        """
+        text = (comment or "").strip()
+        if not text:
+            raise ToolError(
+                "comment is required and cannot be blank. Nothing was written."
+            )
+        if len(text) > MAX_COMMENT_CHARS:
+            raise ToolError(
+                f"comment is longer than {MAX_COMMENT_CHARS} characters. Nothing "
+                "was written."
+            )
+
+        project_id, ticket = self._own_ticket(task_id, "comment on")
+        duplicate = self._existing_comment(ticket.task_id, text)
+        if duplicate is not None:
+            return self._duplicate_comment(project_id, ticket, duplicate)
+
+        if approval_token is None:
+            return {
+                "added": False,
+                "approval_required": True,
+                "task_id": ticket.task_id,
+                "title": ticket.title,
+                "comment": text,
+                "approval_token": self._issue_approval(
+                    CHANGE_COMMENT, ticket.task_id, (), (text,)
+                ),
+                "project": self.config.project_title,
+                "project_id": project_id,
+                "url": ticket.url(self.config.frontend_url),
+                "next_step": (
+                    "Nothing has been written. Show the user this exact comment "
+                    "and which task it would go on. If they approve it, call "
+                    "add_task_comment again with the identical comment plus this "
+                    "approval_token."
+                ),
+            }
+
+        with self._write_lock:
+            # Re-checked inside the lock, so two calls racing with the same text
+            # cannot both find the task uncommented and both write.
+            duplicate = self._existing_comment(ticket.task_id, text)
+            if duplicate is not None:
+                return self._duplicate_comment(project_id, ticket, duplicate)
+
+            # A comment replaces nothing, so unlike an edit its approval binds no
+            # prior value -- there is none to have moved underneath it.
+            self._redeem_approval(
+                approval_token, CHANGE_COMMENT, ticket.task_id, (), (text,)
+            )
+            try:
+                created = self.client.add_comment(ticket.task_id, text_to_html(text))
+            except VikunjaError as exc:
+                raise ToolError(f"Vikunja refused the comment: {exc}") from exc
+
+            comment_id = created.get("id")
+            self._record_mutation(
+                {
+                    "at": _now(),
+                    "kind": CHANGE_COMMENT,
+                    "project_id": project_id,
+                    "task_id": ticket.task_id,
+                    "comment_id": comment_id,
+                    "comment": text,
+                },
+                f"commented on task {ticket.task_id} in project {project_id}",
+            )
+
+        return {
+            "added": True,
+            "task_id": ticket.task_id,
+            "title": ticket.title,
+            "comment_id": comment_id,
+            "project": self.config.project_title,
+            "project_id": project_id,
+            "url": ticket.url(self.config.frontend_url),
+        }
+
+    def _existing_comment(self, task_id: int, text: str) -> dict[str, Any] | None:
+        """A comment already on the task with this exact text, if there is one.
+
+        Read from the task rather than from a ledger of what this connection
+        wrote. A comment has no natural identity, so a resubmission is only
+        recognisable by its content — and the board is the copy that survives a
+        restart, a second process, and a comment left by someone else.
+        """
+        try:
+            existing = self.client.list_comments(task_id)
+        except VikunjaError as exc:
+            raise ToolError(f"{exc} Nothing was written.") from exc
+        for comment in existing:
+            if html_to_text(comment.get("comment") or "").strip() == text:
+                return comment
+        return None
+
+    def _duplicate_comment(
+        self, project_id: int, ticket, comment: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "added": False,
+            "reason": "this exact comment is already on the task; returning it "
+            "instead of writing a second copy",
+            "task_id": ticket.task_id,
+            "title": ticket.title,
+            "comment_id": comment.get("id"),
+            "project": self.config.project_title,
+            "project_id": project_id,
+            "url": ticket.url(self.config.frontend_url),
         }
 
     # -- tools -------------------------------------------------------------
@@ -756,6 +1201,152 @@ class McpService:
                     int(arguments["project_id"]),
                     str(arguments["title"]),
                     str(arguments["description"]),
+                ),
+            ),
+            Tool(
+                name="update_task",
+                title="Update a Vikunja task's title or description",
+                description=(
+                    "Replace the title, the description, or both, on one "
+                    f"existing task on the {self.config.project_title} board. "
+                    "This is a two-step tool and it writes to a real board. Call "
+                    "it first without approval_token: it changes nothing and "
+                    "returns the exact current value beside the exact proposed "
+                    "one, with an approval_token for that one change. Show the "
+                    "user both values, and only once they have explicitly "
+                    "approved that exact change, call it again with the "
+                    "identical arguments plus the approval_token. Submit "
+                    "complete replacement text — there is no partial or "
+                    "find-and-replace edit. Identify the task by its Vikunja "
+                    "task id (the number in a /tasks/<id> URL), never by a #NN "
+                    "title prefix or a board position. It cannot change status, "
+                    "bucket, labels, assignees, priority or due dates, and it "
+                    "cannot delete anything. Asking for the value a task already "
+                    "holds changes nothing and is reported as such."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "integer",
+                            "description": (
+                                "Vikunja's immutable task id. A task outside "
+                                f"{self.config.project_title} is refused."
+                            ),
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": (
+                                "The complete new title, as the user approved "
+                                "it. Omit to leave the title alone."
+                            ),
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": (
+                                "The complete new description as plain text, as "
+                                "the user approved it; blank lines separate "
+                                "paragraphs. This replaces the whole "
+                                "description. Omit to leave it alone."
+                            ),
+                        },
+                        "approval_token": {
+                            "type": "string",
+                            "description": (
+                                "The token returned by the preview call for this "
+                                "exact change. Omit on the first call. Supply it "
+                                "only after the user has approved the exact "
+                                "values that preview showed."
+                            ),
+                        },
+                    },
+                    "required": ["task_id"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": False,
+                    "destructiveHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.update_task(
+                    int(arguments["task_id"]),
+                    title=(
+                        None
+                        if arguments.get("title") is None
+                        else str(arguments["title"])
+                    ),
+                    description=(
+                        None
+                        if arguments.get("description") is None
+                        else str(arguments["description"])
+                    ),
+                    approval_token=(
+                        None
+                        if arguments.get("approval_token") is None
+                        else str(arguments["approval_token"])
+                    ),
+                ),
+            ),
+            Tool(
+                name="add_task_comment",
+                title="Comment on a Vikunja task",
+                description=(
+                    "Add one plain-text comment to an existing task on the "
+                    f"{self.config.project_title} board. This is a two-step tool "
+                    "and it writes to a real board. Call it first without "
+                    "approval_token: it writes nothing and returns the exact "
+                    "comment and the task it would go on, with an "
+                    "approval_token. Show the user that exact comment, and only "
+                    "once they have explicitly approved it, call again with the "
+                    "identical comment plus the approval_token. Comments are "
+                    "append-only: nothing here can edit or delete an existing "
+                    "one, and submitting a comment the task already carries "
+                    "returns the one that is there rather than writing a second "
+                    "copy."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "integer",
+                            "description": (
+                                "Vikunja's immutable task id. A task outside "
+                                f"{self.config.project_title} is refused."
+                            ),
+                        },
+                        "comment": {
+                            "type": "string",
+                            "description": (
+                                "The complete comment as plain text, as the user "
+                                "approved it; blank lines separate paragraphs."
+                            ),
+                        },
+                        "approval_token": {
+                            "type": "string",
+                            "description": (
+                                "The token returned by the preview call for this "
+                                "exact comment. Omit on the first call."
+                            ),
+                        },
+                    },
+                    "required": ["task_id", "comment"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.add_task_comment(
+                    int(arguments["task_id"]),
+                    str(arguments["comment"]),
+                    approval_token=(
+                        None
+                        if arguments.get("approval_token") is None
+                        else str(arguments["approval_token"])
+                    ),
                 ),
             ),
         ]
