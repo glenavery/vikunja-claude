@@ -1,4 +1,4 @@
-"""What the two tools do, and what the boundary refuses to do.
+"""What the tools do, and what the boundary refuses to do.
 
 Several tests assert on the *calls the fake Vikunja saw* rather than only on
 return values. A refusal that still issued the write would satisfy a return
@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import urllib.parse
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 from vikunja_claude.html_text import html_to_text
@@ -18,7 +20,7 @@ from vikunja_claude.mcp import McpProtocol, ToolError
 from vikunja_claude.mcp_service import McpService, idempotency_key
 from vikunja_claude.vikunja import VikunjaClient, VikunjaError
 
-from .fakes import PROJECT_ID, FakeVikunja
+from .fakes import PROJECT_ID, VIEW_ID, FakeVikunja, task
 from .support import McpTestCase, make_mcp_config
 
 OTHER_PROJECT_ID = 1
@@ -91,6 +93,320 @@ class TestGetTask(MutationFreeMixin, McpTestCase):
     def test_reading_changes_nothing(self):
         self.service.get_task(9)
         self.assertTouchedNothingExisting()
+
+
+class TestListOpenTasks(MutationFreeMixin, McpTestCase):
+    """The default board: four open tasks across three columns, one done."""
+
+    OPEN = {5, 9, 10, 11}
+
+    def ids(self, **filters) -> set[int]:
+        return {t["task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
+
+    def test_it_returns_every_open_task_on_the_board(self):
+        self.assertEqual(self.ids(), self.OPEN)
+
+    def test_a_done_task_is_excluded_although_it_is_on_the_board(self):
+        """Task 1 is in Done. It is reachable by id and must not be listed."""
+        self.assertEqual(self.service.get_task(1)["status"], "done")
+        self.assertNotIn(1, self.ids())
+
+    def test_the_count_is_the_number_of_tasks_returned(self):
+        listed = self.service.list_open_tasks()
+        self.assertEqual(listed["count"], len(listed["tasks"]))
+        self.assertEqual(listed["count"], len(self.OPEN))
+
+    def test_every_task_carries_the_fields_a_board_view_needs(self):
+        found = {t["task_id"]: t for t in self.service.list_open_tasks()["tasks"]}[9]
+        self.assertEqual(found["title"], "#33 Back up Vikunja database")
+        self.assertEqual(found["ticket"], 33)
+        self.assertEqual(found["reference"], "#33")
+        self.assertEqual(found["status"], "open")
+        self.assertEqual(found["bucket"], "Ready")
+        self.assertEqual(found["labels"], ["Operations"])
+        self.assertEqual(found["priority"], 0)
+        self.assertEqual(found["priority_label"], "unset")
+        self.assertEqual(found["created"], "2026-07-26T05:05:50Z")
+        self.assertEqual(found["updated"], "2026-07-26T05:05:50Z")
+        self.assertEqual(found["url"], "http://127.0.0.1:3456/tasks/9")
+
+    def test_it_names_the_project_it_listed(self):
+        listed = self.service.list_open_tasks()
+        self.assertEqual(listed["project"], "AI Alpha Engine")
+        self.assertEqual(listed["project_id"], PROJECT_ID)
+
+    def test_it_does_not_carry_descriptions(self):
+        """A board listing is not 20 full ticket bodies; get_task is for that."""
+        for entry in self.service.list_open_tasks()["tasks"]:
+            self.assertNotIn("description", entry)
+            self.assertNotIn("comments", entry)
+
+    def test_listing_changes_nothing(self):
+        self.service.list_open_tasks()
+        self.assertTouchedNothingExisting()
+
+    def test_it_comes_back_through_the_protocol(self):
+        listed = self.call_tool("list_open_tasks")["result"]["structuredContent"]
+        self.assertEqual({t["task_id"] for t in listed["tasks"]}, self.OPEN)
+
+    def test_it_is_callable_with_no_arguments_at_all(self):
+        """"read the open tickets" carries no bucket and no label."""
+        response = self.call_tool("list_open_tasks")
+        self.assertNotIn("isError", response["result"])
+
+
+class TestListingIsNotOnePageOfEachBucket(McpTestCase):
+    """Vikunja pages tasks inside a bucket and caps a page at 50.
+
+    The board this was built against holds 170 tasks in one column and answers
+    a request for 250 with 50, so "one call, whole board" is not a listing --
+    it is the first page of each column, silently.
+    """
+
+    BACKLOG = 130
+    layout = {
+        "Backlog": [
+            task(1000 + i, f"#{1000 + i} Backlog item {i}", "2026-07-26T05:00:00Z")
+            for i in range(BACKLOG)
+        ],
+        "Ready": [task(9, "#33 Back up Vikunja database", "2026-07-26T05:05:50Z")],
+        "Done": [task(1, "#25 Wrap the reports step", "2026-07-26T04:59:00Z", done=True)],
+    }
+
+    def test_every_open_task_arrives_across_pages(self):
+        listed = self.service.list_open_tasks()
+        self.assertEqual(listed["count"], self.BACKLOG + 1)
+        self.assertEqual(
+            {t["task_id"] for t in listed["tasks"]},
+            {1000 + i for i in range(self.BACKLOG)} | {9},
+        )
+
+    def test_a_single_request_really_would_have_been_short(self):
+        """Guards the test above: without paging the fake stops at 50."""
+        one_page = self.client.list_tickets(PROJECT_ID, VIEW_ID)
+        backlog = [t for t in one_page if t.bucket_title == "Backlog"]
+        self.assertEqual(len(backlog), 50)
+        self.assertLess(len(backlog), self.BACKLOG)
+
+    def test_it_asked_for_more_than_one_page(self):
+        self.service.list_open_tasks()
+        pages = [path for _, path, _ in self.vikunja.calls if "page=" in path]
+        self.assertGreater(len(pages), 1)
+
+
+class TestAShortReadIsAnErrorNotAShorterBoard(McpTestCase):
+    """The one failure a listing must never have is a quiet one."""
+
+    class Truncating(FakeVikunja):
+        """Serves one page and claims there were more. Nothing says which."""
+
+        def _view_tasks(self, path: str) -> list[dict]:
+            served = super()._view_tasks(path)
+            for bucket in served:
+                if bucket["title"] == "Backlog":
+                    bucket["count"] = bucket["count"] + 7
+            return served
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.vikunja = self.Truncating()
+        self.client = VikunjaClient(
+            self.config.api_url, self.config.token, transport=self.vikunja
+        )
+        self.service = McpService(self.config, self.client)
+
+    def test_it_refuses_rather_than_returning_what_it_has(self):
+        with self.assertRaises(ToolError) as caught:
+            self.service.list_open_tasks()
+        message = str(caught.exception)
+        self.assertIn("silently omit", message)
+        self.assertIn("Backlog", message)
+
+
+class TestAVikunjaThatIgnoresTheFilter(McpTestCase):
+    """`done = false` is sent to save a walk, never to decide the answer.
+
+    A Vikunja that did not apply it would hand back the Done column too. The
+    listing must still exclude those tasks -- and must not read its own second
+    filtering as evidence that the server served short.
+    """
+
+    class Unfiltered(FakeVikunja):
+        def _view_tasks(self, path: str) -> list[dict]:
+            return super()._view_tasks(path.split("?")[0] + "?" + "&".join(
+                part
+                for part in urllib.parse.urlsplit(path).query.split("&")
+                if not part.startswith("filter=")
+            ))
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.vikunja = self.Unfiltered()
+        self.client = VikunjaClient(
+            self.config.api_url, self.config.token, transport=self.vikunja
+        )
+        self.service = McpService(self.config, self.client)
+
+    def test_the_done_task_is_still_excluded(self):
+        listed = self.service.list_open_tasks()
+        self.assertEqual({t["task_id"] for t in listed["tasks"]}, {5, 9, 10, 11})
+
+    def test_the_server_really_did_hand_over_the_done_task(self):
+        """Guards the test above: without this the fake proves nothing."""
+        served = self.client.list_tickets(PROJECT_ID, VIEW_ID)
+        self.assertIn(1, {t.task_id for t in served})
+
+    def test_filtering_client_side_is_not_mistaken_for_a_short_read(self):
+        self.assertEqual(self.service.list_open_tasks()["count"], 4)
+
+
+class TestListOpenTaskOrdering(McpTestCase):
+    layout = {
+        "Backlog": [
+            task(30, "#30 Low", "2026-07-26T05:00:00Z", priority=1),
+            task(20, "#20 Urgent, later id", "2026-07-26T05:00:00Z", priority=4),
+            task(10, "#10 Urgent, earlier id", "2026-07-26T05:00:00Z", priority=4),
+        ],
+        "Ready": [
+            task(40, "#40 Unset", "2026-07-26T05:00:00Z"),
+            task(5, "#5 Do now", "2026-07-26T05:00:00Z", priority=5),
+        ],
+        "Done": [task(1, "#1 Done", "2026-07-26T04:59:00Z", done=True, priority=5)],
+    }
+
+    def order(self) -> list[int]:
+        return [t["task_id"] for t in self.service.list_open_tasks()["tasks"]]
+
+    def test_most_urgent_first_then_by_task_id(self):
+        self.assertEqual(self.order(), [5, 10, 20, 30, 40])
+
+    def test_the_order_does_not_depend_on_which_bucket_a_task_sits_in(self):
+        """5 and 40 share a column and land at opposite ends of the listing."""
+        listed = self.order()
+        self.assertEqual(listed[0], 5)
+        self.assertEqual(listed[-1], 40)
+
+    def test_repeating_the_call_gives_the_identical_order(self):
+        self.assertEqual(self.order(), self.order())
+
+    def test_priority_is_reported_as_the_number_and_as_a_name(self):
+        first = self.service.list_open_tasks()["tasks"][0]
+        self.assertEqual(first["priority"], 5)
+        self.assertEqual(first["priority_label"], "do now")
+
+
+class TestListOpenTaskFilters(McpTestCase):
+    layout = {
+        "Backlog": [
+            task(5, "#29 Admin", "2026-07-26T05:01:00Z", labels=["Ops"]),
+            task(6, "#31 Unlabelled", "2026-07-26T05:02:00Z"),
+        ],
+        "Ready": [
+            task(9, "#33 Back up", "2026-07-26T05:05:50Z", labels=["Ops", "S7"]),
+            task(10, "#34 Version the skill", "2026-07-26T05:09:00Z", labels=["S7"]),
+        ],
+        "In Progress": [],
+        "Done": [
+            task(1, "#25 Wrap", "2026-07-26T04:59:00Z", done=True, labels=["Ops"])
+        ],
+    }
+
+    def ids(self, **filters) -> set[int]:
+        return {t["task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
+
+    def test_a_bucket_filter_narrows_to_that_column(self):
+        self.assertEqual(self.ids(bucket="Ready"), {9, 10})
+
+    def test_a_bucket_filter_is_matched_without_regard_to_case_or_padding(self):
+        self.assertEqual(self.ids(bucket="  ready "), {9, 10})
+
+    def test_the_filter_that_was_applied_is_reported_canonically(self):
+        listed = self.service.list_open_tasks(bucket="ready")
+        self.assertEqual(listed["filters"], {"bucket": "Ready", "label": None})
+
+    def test_an_empty_column_is_an_empty_answer_not_a_refusal(self):
+        listed = self.service.list_open_tasks(bucket="In Progress")
+        self.assertEqual(listed["count"], 0)
+        self.assertEqual(listed["tasks"], [])
+
+    def test_an_unknown_bucket_is_refused_and_names_the_real_ones(self):
+        """An empty list would read as 'nothing open there', which is a lie."""
+        with self.assertRaises(ToolError) as caught:
+            self.service.list_open_tasks(bucket="Redy")
+        message = str(caught.exception)
+        self.assertIn("Redy", message)
+        self.assertIn("Ready", message)
+        self.assertIn("Backlog", message)
+
+    def test_a_label_filter_narrows_to_tasks_carrying_it(self):
+        self.assertEqual(self.ids(label="S7"), {9, 10})
+        self.assertEqual(self.ids(label="Ops"), {5, 9})
+
+    def test_a_label_filter_is_matched_without_regard_to_case(self):
+        self.assertEqual(self.ids(label="s7"), {9, 10})
+
+    def test_a_label_filter_never_reaches_a_done_task(self):
+        self.assertNotIn(1, self.ids(label="Ops"))
+
+    def test_an_unused_label_narrows_to_nothing_and_says_what_exists(self):
+        listed = self.service.list_open_tasks(label="Operatoins")
+        self.assertEqual(listed["tasks"], [])
+        self.assertEqual(listed["labels_in_use"], ["Ops", "S7"])
+
+    def test_the_two_filters_compose(self):
+        self.assertEqual(self.ids(bucket="Ready", label="Ops"), {9})
+
+    def test_omitting_both_filters_returns_the_whole_open_board(self):
+        self.assertEqual(self.ids(), {5, 6, 9, 10})
+
+    def test_filtering_through_the_protocol_works_the_same(self):
+        listed = self.call_tool("list_open_tasks", bucket="Ready", label="S7")
+        found = listed["result"]["structuredContent"]
+        self.assertEqual({t["task_id"] for t in found["tasks"]}, {9, 10})
+
+
+class TestTheListingCannotWrite(McpTestCase):
+    """Stronger than "it issued no known mutation": it issued nothing but reads."""
+
+    def test_every_call_the_listing_makes_is_a_read(self):
+        self.service.list_open_tasks(bucket="Ready", label="Operations")
+        methods = {method for method, _, _ in self.vikunja.calls}
+        self.assertEqual(methods, {"GET"})
+
+    def test_it_sends_no_request_body_at_all(self):
+        self.service.list_open_tasks()
+        self.assertEqual([body for _, _, body in self.vikunja.calls], [
+            None for _ in self.vikunja.calls
+        ])
+
+    def test_the_board_is_identical_afterwards(self):
+        before = deepcopy(self.vikunja.layout)
+        self.service.list_open_tasks()
+        self.service.list_open_tasks(bucket="Backlog")
+        self.assertEqual(self.vikunja.layout, before)
+
+    def test_the_tool_declares_itself_read_only(self):
+        listing = {t.name: t for t in self.service.tools()}["list_open_tasks"]
+        self.assertTrue(listing.annotations["readOnlyHint"])
+        self.assertEqual(listing.required_arguments(), [])
+
+    def test_no_argument_can_point_it_at_another_project(self):
+        """Unlike create_task, it takes no project at all — there is nothing to
+        refuse, because there is nothing to name."""
+        schema = {t.name: t for t in self.service.tools()}["list_open_tasks"].input_schema
+        self.assertNotIn("project_id", schema["properties"])
+        self.assertNotIn("project", schema["properties"])
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_every_path_it_reads_belongs_to_the_configured_project(self):
+        self.service.list_open_tasks(bucket="Ready")
+        read = [path for _, path, _ in self.vikunja.calls if path.startswith("/projects/")]
+        self.assertTrue(read)
+        for path in read:
+            self.assertTrue(
+                path.startswith(f"/projects/{PROJECT_ID}"),
+                f"the listing read {path!r}, which is outside the allowed project",
+            )
 
 
 class TestCreateTask(MutationFreeMixin, McpTestCase):
@@ -307,21 +623,26 @@ class TestProjectOverrideIsHonoured(unittest.TestCase):
             self.assertNotIn("GET /projects", signatures(vikunja))
 
 
-class TestTheSurfaceIsTwoTools(McpTestCase):
+class TestTheSurfaceIsThreeTools(McpTestCase):
     def test_the_service_offers_exactly_the_advertised_operations(self):
         self.assertEqual(
-            {tool.name for tool in self.service.tools()}, {"get_task", "create_task"}
+            {tool.name for tool in self.service.tools()},
+            {"get_task", "list_open_tasks", "create_task"},
         )
 
     def test_driving_every_tool_never_touches_an_existing_task(self):
         """Exercise the whole surface, then check nothing existing moved."""
         protocol = McpProtocol(self.service.tools())
         self.call_tool("get_task", task_id=9)
+        self.call_tool("list_open_tasks")
+        self.call_tool("list_open_tasks", bucket="Ready", label="Operations")
         self.call_tool(
             "create_task", project_id=PROJECT_ID, title="A ticket", description="A body."
         )
 
-        self.assertEqual(protocol.tool_names, {"get_task", "create_task"})
+        self.assertEqual(
+            protocol.tool_names, {"get_task", "list_open_tasks", "create_task"}
+        )
         for signature in signatures(self.vikunja):
             for pattern, what in MUTATIONS:
                 self.assertIsNone(

@@ -10,7 +10,7 @@ registration (RFC 7591).
 It is deliberately not an identity provider. There are no users, no accounts, no
 roles and no sign-up: there is one operator, who proves it with one passphrase,
 and every token this server issues carries the same single scope, which means
-exactly the two operations the MCP boundary exposes. Authorising cannot widen
+exactly the operations the MCP boundary exposes. Authorising cannot widen
 that — there is nothing wider to grant.
 
 The module handles the protocol and returns :class:`Response` objects; the HTTP
@@ -34,7 +34,7 @@ from typing import Any
 from .config import McpConfig
 from .oauth_store import OAuthStore, digest, new_secret
 
-# One scope, meaning the two tools and nothing else. It is not a permission
+# One scope, meaning the boundary's fixed tool set and nothing else. It is not a permission
 # system: it exists because the protocol has a place for the name of what was
 # granted, and that name should say what it is.
 SCOPE = "vikunja:tickets"
@@ -46,8 +46,8 @@ MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_SECONDS = 300
 
 REVOCABLE_GRANT_SUMMARY = (
-    "read one Vikunja task by id, and create one task on the "
-    "{project} board"
+    "read one Vikunja task by id, list the open tasks, and create one task "
+    "on the {project} board"
 )
 
 
@@ -707,6 +707,7 @@ class AuthorizationServer:
     <strong>{html.escape(self.config.project_title)}</strong> board, which lets it:</p>
     <ul>
       <li><strong>read</strong> a Vikunja task by its id;</li>
+      <li><strong>list</strong> every task that is still open on the board;</li>
       <li><strong>create</strong> a task — only in the
           {html.escape(self.config.project_title)} project.</li>
     </ul>
