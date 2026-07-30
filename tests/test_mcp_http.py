@@ -14,9 +14,8 @@ import unittest
 from pathlib import Path
 
 from vikunja_claude.config import ConfigError
-from vikunja_claude.mcp_server import build_mcp_server
+from vikunja_claude.mcp_server import MAX_BODY_BYTES, build_mcp_server
 
-from .fakes import PROJECT_ID
 from .support import HttpTestCase, make_mcp_config
 
 
@@ -155,22 +154,24 @@ class TestMalformedRequests(HttpTestCase):
         self.assertIn("batch", json.loads(text)["error"]["message"].lower())
 
     def test_an_oversized_body_is_refused(self):
-        huge = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "create_task",
-                "arguments": {
-                    "project_id": PROJECT_ID,
-                    "title": "x",
-                    "description": "y" * (2 * 1024 * 1024),
-                },
-            },
-        }
-        status, _, _ = self.open(body=huge)
+        """Refused on the declared length, before a byte of body is read.
+
+        `declare_length` sends none, which is why this is deterministic: a
+        client that streams the megabytes as well is racing the server's
+        close, not testing the limit.
+        """
+        status, _, text = self.declare_length(2 * MAX_BODY_BYTES)
         self.assertEqual(status, 413)
+        self.assertIn(str(MAX_BODY_BYTES), json.loads(text)["error"]["message"])
         self.assertEqual(self.vikunja.calls, [])
+
+    def test_a_body_at_the_limit_is_not_refused(self):
+        """The refusal is bounded by the limit, not by "large-ish"."""
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        body += " " * (MAX_BODY_BYTES - len(body))
+        status, _, text = self.open(body=body)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(text)["result"], {})
 
     def test_a_failure_never_returns_a_traceback(self):
         status, _, text = self.open(body="{not json")
