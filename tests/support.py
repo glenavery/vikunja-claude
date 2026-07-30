@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import json
 import secrets
+import socket
 import tempfile
 import threading
 import unittest
@@ -204,6 +206,51 @@ class HttpTestCase(unittest.TestCase):
                 return response.status, dict(response.headers), response.read().decode()
         except urllib.error.HTTPError as exc:
             return exc.code, dict(exc.headers), exc.read().decode()
+
+    def declare_length(
+        self, byte_count: int, path: str = "/mcp", token=UNSET, timeout: float = 5
+    ):
+        """POST a declared Content-Length with no body bytes on the wire.
+
+        Returns (status, headers, body-text), like `open`.
+
+        The size limit is a decision about the *declared* length, taken before
+        a byte of body is read, so a request that never sends one is the whole
+        of what the rule sees. Writing the body as well measures the socket
+        instead of the rule: the server answers and closes while the client is
+        still sending, and the refusal is lost to a broken pipe or to the reset
+        that closing on unread bytes provokes — about once in three runs.
+
+        Getting a complete response back here is also the only direct evidence
+        that the server decided from the header, since nothing followed it.
+        """
+        if token is UNSET:
+            token = self.access_token()
+        host, port = self.server.server_address[:2]
+        connection = socket.create_connection((host, port), timeout=timeout)
+        try:
+            head = [
+                f"POST {path} HTTP/1.1",
+                f"Host: {host}:{port}",
+                "Accept: application/json",
+                "Content-Type: application/json",
+                f"Content-Length: {byte_count}",
+            ]
+            if token is not None:
+                head.append(f"Authorization: Bearer {token}")
+            connection.sendall(("\r\n".join(head) + "\r\n\r\n").encode())
+            response = http.client.HTTPResponse(connection)
+            try:
+                response.begin()
+            except TimeoutError:
+                self.fail(
+                    f"nothing answered a declared {byte_count}-byte body within "
+                    f"{timeout}s: the server is waiting on a body it should have "
+                    "refused from the header alone"
+                )
+            return response.status, dict(response.getheaders()), response.read().decode()
+        finally:
+            connection.close()
 
     def rpc(self, method: str, params: dict | None = None, **kwargs):
         message = {"jsonrpc": "2.0", "id": 1, "method": method}
