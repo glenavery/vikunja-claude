@@ -8,6 +8,7 @@ anything; real environment variables always win.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import re
 import shlex
@@ -88,6 +89,14 @@ CODE_TTL_SECONDS = 60
 
 MIN_PASSPHRASE_CHARS = 32
 
+# The investment application's admin instance, which owns the operational reads
+# task 138 approved. There is deliberately **no default URL**: the operational
+# endpoints exist only on the admin instance, and a default pointing at the
+# public one would turn "not configured" into a stream of 404s that read like a
+# broken API rather than like an unconfigured integration.
+INVESTMENT_API_URL_ENV = "INVESTMENT_API_URL"
+INVESTMENT_API_KEY_ENV = "INVESTMENT_API_KEY"
+
 
 def load_env_file(path: Path) -> None:
     """Populate ``os.environ`` from a simple KEY=VALUE file, without overriding."""
@@ -130,6 +139,103 @@ def _state_dir() -> Path:
 def _project_id_override() -> int | None:
     raw = os.environ.get("VIKUNJA_PROJECT_ID", "").strip()
     return int(raw) if raw else None
+
+
+#: Tailscale's address space. Traffic inside a tailnet is WireGuard-encrypted, so
+#: plain http to one of these carries the API key over an encrypted link — which
+#: is why this is not the same rule as :func:`_absolute_https_url`, whose concern
+#: is OAuth metadata published to the public internet.
+_TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")
+_TAILNET_V6 = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+_TAILNET_SUFFIX = ".ts.net"
+
+
+def _is_private_host(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    host = hostname.lower().rstrip(".")
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    if host.endswith(_TAILNET_SUFFIX):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if address.is_loopback:
+        return True
+    return address in _TAILNET_V4 or address in _TAILNET_V6
+
+
+def _private_api_url(name: str, value: str) -> str:
+    """An http(s) URL that an API key may be sent to, or an explicit refusal.
+
+    The investment admin instance is bound to a Tailscale address and serves
+    plain http, which is correct — the tailnet is the encryption. So http is
+    permitted **only** to loopback or a tailnet address. Anywhere else it would
+    put ``INVESTMENT_API_KEY`` on the wire in clear text, and a typo in a hostname
+    is exactly how that happens.
+    """
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.scheme not in ("https", "http") or not parsed.netloc:
+        raise ConfigError(f"{name} must be an absolute http(s) URL, not {value!r}.")
+    if parsed.query or parsed.fragment:
+        raise ConfigError(f"{name} must have no query string or fragment: {value!r}")
+    if parsed.path.rstrip("/"):
+        # The three read paths are appended to this base. A base carrying a path
+        # of its own would silently produce a different URL than the one named in
+        # `vikunja_claude.investment`.
+        raise ConfigError(
+            f"{name} must be a bare scheme://host:port with no path: {value!r}"
+        )
+    if parsed.scheme == "http" and not _is_private_host(parsed.hostname):
+        raise ConfigError(
+            f"{name} is plain http to {parsed.hostname!r}, which is neither "
+            "loopback nor a Tailscale address. That would send "
+            f"{INVESTMENT_API_KEY_ENV} over the network in clear text; use https, "
+            "or the tailnet address the admin instance is bound to."
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class InvestmentConfig:
+    """Where the AI Server operational reads live, and the key to read them with.
+
+    Both settings or neither. Half-configured is a startup failure rather than a
+    tool that is advertised and always refuses: the operational reads are the
+    only part of this boundary that can be *absent*, and "absent" has to mean one
+    thing.
+    """
+
+    api_url: str
+    api_key: str
+
+    @classmethod
+    def from_env(cls) -> "InvestmentConfig | None":
+        """The configured investment reads, or None when they are switched off.
+
+        None is the disabled state task 138 asks for ("the integration can be
+        disabled without affecting Vikunja or AI Alpha Engine"). It is honoured by
+        **not advertising** the operational tools at all — a tool that cannot be
+        performed should not appear in ``tools/list``, because a model reads an
+        advertised tool as a capability and will report its failure as a fact
+        about the system rather than about the configuration.
+        """
+        url = os.environ.get(INVESTMENT_API_URL_ENV, "").strip().rstrip("/")
+        key = os.environ.get(INVESTMENT_API_KEY_ENV, "").strip()
+        if not url and not key:
+            return None
+        if not url or not key:
+            missing = INVESTMENT_API_URL_ENV if not url else INVESTMENT_API_KEY_ENV
+            present = INVESTMENT_API_KEY_ENV if not url else INVESTMENT_API_URL_ENV
+            raise ConfigError(
+                f"{present} is set but {missing} is not. Set both to enable the "
+                "operational reads, or neither to leave them switched off — "
+                "half-configured would advertise reads that can never succeed."
+            )
+        _private_api_url(INVESTMENT_API_URL_ENV, url)
+        return cls(api_url=url, api_key=key)
 
 
 @dataclass(frozen=True)
@@ -382,6 +488,13 @@ class McpConfig:
     port: int
     state_dir: Path
     project_id: int | None = None
+    #: None means the operational reads are switched off, and their tools are not
+    #: advertised. See :meth:`InvestmentConfig.from_env`.
+    investment: InvestmentConfig | None = None
+
+    @property
+    def operational_reads_enabled(self) -> bool:
+        return self.investment is not None
 
     @property
     def ledger_path(self) -> Path:
@@ -415,4 +528,5 @@ class McpConfig:
             host=os.environ.get("VIKUNJA_MCP_HOST", "127.0.0.1"),
             port=int(os.environ.get("VIKUNJA_MCP_PORT", "3461")),
             state_dir=_state_dir(),
+            investment=InvestmentConfig.from_env(),
         )

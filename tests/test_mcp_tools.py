@@ -20,7 +20,7 @@ from vikunja_claude.mcp_service import McpService, idempotency_key
 from vikunja_claude.vikunja import VikunjaClient, VikunjaError
 
 from .fakes import PROJECT_ID, VIEW_ID, FakeVikunja, FilterIgnoringVikunja, task
-from .support import McpTestCase, make_mcp_config
+from .support import VIKUNJA_TOOLS, McpTestCase, make_mcp_config
 
 OTHER_PROJECT_ID = 1
 
@@ -615,11 +615,11 @@ class TestProjectOverrideIsHonoured(unittest.TestCase):
             self.assertNotIn("GET /projects", signatures(vikunja))
 
 
-class TestTheSurfaceIsThreeTools(McpTestCase):
+class TestTheWholeSurface(McpTestCase):
     def test_the_service_offers_exactly_the_advertised_operations(self):
         self.assertEqual(
             {tool.name for tool in self.service.tools()},
-            {"get_task", "list_open_tasks", "create_task"},
+            VIKUNJA_TOOLS,
         )
 
     def test_driving_every_tool_never_touches_an_existing_task(self):
@@ -633,7 +633,7 @@ class TestTheSurfaceIsThreeTools(McpTestCase):
         )
 
         self.assertEqual(
-            protocol.tool_names, {"get_task", "list_open_tasks", "create_task"}
+            protocol.tool_names, VIKUNJA_TOOLS
         )
         for signature in signatures(self.vikunja):
             for pattern, what in MUTATIONS:

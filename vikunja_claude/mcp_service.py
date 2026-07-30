@@ -1,9 +1,17 @@
 """The operations the MCP boundary exposes, and the rules around them.
 
-The whole surface is here: two reads and one create. Nothing in this module can
+The whole surface is here: reads, and one create. Nothing in this module can
 edit, close, delete, comment on or move an existing task, and it reaches Vikunja
 only through :class:`~vikunja_claude.vikunja.VikunjaClient` methods that cannot
 do those things either.
+
+The operational reads (repository, pipeline, system health — task 138) are the
+one part of this surface that can be **absent**: they are advertised only when
+:class:`~vikunja_claude.config.InvestmentConfig` is configured, because a tool
+that can never succeed is read by a model as a capability, and its failure
+reported as a fact about the system rather than about the configuration. They
+reach nothing directly — no shell, no database — only three fixed GETs handled by
+:mod:`vikunja_claude.investment`.
 """
 
 from __future__ import annotations
@@ -17,11 +25,19 @@ from typing import Any
 
 from .config import McpConfig
 from .html_text import html_to_text, text_to_html
+from .investment import InvestmentStatusClient, InvestmentStatusError
 from .mcp import Tool, ToolError
 from .vikunja import VikunjaClient, VikunjaError
 
 MAX_TITLE_CHARS = 250
 MAX_DESCRIPTION_CHARS = 20000
+
+#: The statuses ``search_tasks`` accepts. A closed set, so a typo is a refusal
+#: rather than a silently narrower search.
+STATUS_OPEN = "open"
+STATUS_DONE = "done"
+STATUS_ANY = "any"
+SEARCH_STATUSES = (STATUS_OPEN, STATUS_DONE, STATUS_ANY)
 
 #: Vikunja stores priority as 0-5. The number is what it holds; these are what a
 #: reader means by it. Naming is the only thing added here -- the ordering is
@@ -53,12 +69,32 @@ def idempotency_key(project_id: int, title: str, description: str) -> str:
 
 
 class McpService:
-    def __init__(self, config: McpConfig, client: VikunjaClient):
+    def __init__(
+        self,
+        config: McpConfig,
+        client: VikunjaClient,
+        investment: InvestmentStatusClient | None = None,
+    ):
         self.config = config
         self.client = client
         # One process, one port, one unit — so a lock is enough to make
         # check-then-create atomic against a concurrent retry.
         self._create_lock = threading.Lock()
+        # Built from configuration unless one is injected. None here and None in
+        # the config mean the same thing, and it is checked in one place
+        # (`operational_reads_enabled`) rather than at each call site.
+        if investment is not None:
+            self.investment: InvestmentStatusClient | None = investment
+        elif config.investment is not None:
+            self.investment = InvestmentStatusClient(
+                config.investment.api_url, config.investment.api_key
+            )
+        else:
+            self.investment = None
+
+    @property
+    def operational_reads_enabled(self) -> bool:
+        return self.investment is not None
 
     # -- resolution --------------------------------------------------------
 
@@ -195,6 +231,139 @@ class McpService:
             ],
         }
 
+    def search_tasks(
+        self, text: str, status: str = STATUS_OPEN
+    ) -> dict[str, Any]:
+        """Tasks whose title or description contains ``text``.
+
+        Three deliberate choices.
+
+        **Matching is done here, not by Vikunja's filter language.** That language
+        is a string this boundary would have to build from model-supplied text; a
+        filter is not SQL, but it is still an expression, and interpolating an
+        untrusted fragment into one to search for a *literal* is the wrong shape
+        for the job. The whole board is walked and compared in Python, where
+        ``text`` can only ever be a substring.
+
+        **Status is a closed set, and ``done`` is reachable.** "Search by status"
+        was approved, and a search that could not see finished tasks would answer
+        "has this been done before?" with a confident no. Unlike
+        :meth:`list_open_tasks`, which is the *open queue* by definition, this one
+        must be able to look at history.
+
+        **The project is not a parameter.** This boundary is configured with one
+        board, and it is named in the answer rather than chosen by the caller —
+        so a search cannot silently be answered from somewhere else, for the same
+        reason :meth:`create_task` refuses a project it was not given.
+        """
+        needle = (text or "").strip()
+        if not needle:
+            raise ToolError(
+                "text is required and cannot be blank: an empty search would "
+                "return the whole board, which is what list_open_tasks is for"
+            )
+        wanted = (status or STATUS_OPEN).strip().casefold() or STATUS_OPEN
+        if wanted not in SEARCH_STATUSES:
+            raise ToolError(
+                f"status must be one of {', '.join(sorted(SEARCH_STATUSES))}, "
+                f"not {status!r}"
+            )
+
+        project_id, view_id = self._ids()
+        try:
+            if wanted == STATUS_OPEN:
+                tickets = self.client.list_open_tickets(project_id, view_id)
+            else:
+                tickets = self.client.list_all_tickets(project_id, view_id)
+        except VikunjaError as exc:
+            raise ToolError(str(exc)) from exc
+
+        if wanted == STATUS_DONE:
+            tickets = [t for t in tickets if t.done]
+
+        folded = needle.casefold()
+        matches = [
+            t
+            for t in tickets
+            if folded in t.title.casefold() or folded in t.description.casefold()
+        ]
+        # Title matches first: a word in a title is what the task is about, a word
+        # in a description may be a passing mention. Then most urgent, then id —
+        # the same total order list_open_tasks uses, for the same reason.
+        matches.sort(
+            key=lambda t: (
+                0 if folded in t.title.casefold() else 1,
+                -t.priority,
+                t.task_id,
+            )
+        )
+
+        return {
+            "project": self.config.project_title,
+            "project_id": project_id,
+            "query": needle,
+            "status": wanted,
+            "searched": len(tickets),
+            "count": len(matches),
+            "tasks": [
+                {
+                    "task_id": t.task_id,
+                    "ticket": t.number,
+                    "reference": t.reference,
+                    "title": t.title,
+                    "summary": t.summary,
+                    "status": "done" if t.done else "open",
+                    "bucket": t.bucket_title,
+                    "priority": t.priority,
+                    "priority_label": PRIORITY_NAMES.get(t.priority, "unknown"),
+                    "labels": t.labels,
+                    "matched_in": (
+                        "title" if folded in t.title.casefold() else "description"
+                    ),
+                    "created": t.created,
+                    "updated": t.updated,
+                    "url": t.url(self.config.frontend_url),
+                }
+                for t in matches
+            ],
+        }
+
+    # -- operational reads (task 138) --------------------------------------
+
+    def _investment(self) -> InvestmentStatusClient:
+        """The configured client, or a refusal that names the configuration.
+
+        Reached only if a tool was called that should not have been advertised,
+        so it says which setting is missing rather than reporting an unknown
+        state as a healthy one.
+        """
+        if self.investment is None:
+            raise ToolError(
+                "The operational reads are not configured on this boundary. Set "
+                "INVESTMENT_API_URL and INVESTMENT_API_KEY to enable them. "
+                "Nothing was read, so nothing is known about the state this "
+                "would have reported."
+            )
+        return self.investment
+
+    def repository_state(self) -> dict[str, Any]:
+        try:
+            return self._investment().repository_state()
+        except InvestmentStatusError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def pipeline_status(self) -> dict[str, Any]:
+        try:
+            return self._investment().pipeline_status()
+        except InvestmentStatusError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def system_health(self) -> dict[str, Any]:
+        try:
+            return self._investment().system_health()
+        except InvestmentStatusError as exc:
+            raise ToolError(str(exc)) from exc
+
     # -- create ------------------------------------------------------------
 
     def _ledger(self) -> dict[str, dict[str, Any]]:
@@ -303,7 +472,101 @@ class McpService:
     # -- tools -------------------------------------------------------------
 
     def tools(self) -> list[Tool]:
-        """The complete, fixed set of operations this connection can perform."""
+        """The complete, fixed set of operations this connection can perform.
+
+        Fixed for the lifetime of the process — which is what
+        ``capabilities.tools.listChanged: False`` promises a client. The
+        operational tools are included or omitted once, from configuration read
+        at startup, and never appear and disappear underneath a live session.
+        """
+        return [*self._vikunja_tools(), *self._operational_tools()]
+
+    def _operational_tools(self) -> list[Tool]:
+        """The three AI Server reads, or nothing at all when unconfigured."""
+        if not self.operational_reads_enabled:
+            return []
+        return [
+            Tool(
+                name="get_repository_state",
+                title="Get the AI Server repository state",
+                description=(
+                    "Read which commit the AI Server investment repository is "
+                    "checked out at: branch, commit hash, the commit's subject "
+                    "and timestamp, and whether the working tree is clean. Use "
+                    "this to know what code is deployed. Counts of changed and "
+                    "untracked files are returned, not filenames. Read-only; it "
+                    "runs no commands you name and cannot write to the "
+                    "repository."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.repository_state(),
+            ),
+            Tool(
+                name="get_pipeline_status",
+                title="Get the latest nightly pipeline status",
+                description=(
+                    "Read the most recent nightly investment pipeline run: its "
+                    "overall status, when it started and finished, every stage "
+                    "with that stage's own outcome, which stages did not "
+                    "succeed, what S7 did to the intelligence chain, and whether "
+                    "each portfolio got a report from this run. Note that a "
+                    "degraded stage does not by itself make the run degraded — "
+                    "only report generation does — so read the run status and "
+                    "the stage list as two separate facts. `run_present: false` "
+                    "means no run has ever been recorded, which is not a "
+                    "failure. Read-only."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.pipeline_status(),
+            ),
+            Tool(
+                name="get_system_health",
+                title="Get the AI Server system health",
+                description=(
+                    "Read the AI Server system-health checks: database backup "
+                    "age, disk usage, Docker containers, the scheduled jobs, "
+                    "database connectivity and API status, plus one overall "
+                    "status folded from them (worst wins; `unknown` means a "
+                    "check could not be read, which is not `ok`). The checks run "
+                    "when you ask — there is no cached result. Log output and "
+                    "crontab lines are deliberately not included. Read-only."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.system_health(),
+            ),
+        ]
+
+    def _vikunja_tools(self) -> list[Tool]:
         return [
             Tool(
                 name="get_task",
@@ -386,6 +649,61 @@ class McpService:
                         None
                         if arguments.get("label") is None
                         else str(arguments["label"])
+                    ),
+                ),
+            ),
+            Tool(
+                name="search_tasks",
+                title="Search the Vikunja tasks",
+                description=(
+                    "Find tasks on the "
+                    f"{self.config.project_title} board whose title or "
+                    "description contains a piece of text. Use this to answer "
+                    "'is there already a ticket about X' and 'has this been done "
+                    "before' — unlike list_open_tasks, this one can see finished "
+                    "tasks, and it is the right tool to check before asking for a "
+                    "new ticket to be created. Matching is a plain "
+                    "case-insensitive substring, not a query language: no "
+                    "wildcards, no boolean operators. Each result says whether "
+                    "the match was in the title or the description. Returns no "
+                    "descriptions or comments — read one task with get_task. "
+                    "Read-only."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "The text to look for, matched as a "
+                                "case-insensitive substring of the title or the "
+                                "description."
+                            ),
+                        },
+                        "status": {
+                            "type": "string",
+                            "enum": list(SEARCH_STATUSES),
+                            "description": (
+                                "Which tasks to search: 'open' (the default), "
+                                "'done', or 'any'. Use 'done' or 'any' to check "
+                                "whether something was already handled."
+                            ),
+                        },
+                    },
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.search_tasks(
+                    str(arguments["text"]),
+                    status=(
+                        STATUS_OPEN
+                        if arguments.get("status") is None
+                        else str(arguments["status"])
                     ),
                 ),
             ),

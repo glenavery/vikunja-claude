@@ -16,7 +16,7 @@ from pathlib import Path
 from vikunja_claude.config import ConfigError
 from vikunja_claude.mcp_server import MAX_BODY_BYTES, build_mcp_server
 
-from .support import HttpTestCase, make_mcp_config
+from .support import VIKUNJA_TOOLS, HttpTestCase, make_mcp_config
 
 
 class TestAuthentication(HttpTestCase):
@@ -60,7 +60,7 @@ class TestAuthentication(HttpTestCase):
         status, _, text = self.rpc("tools/list")
         self.assertEqual(status, 200)
         names = {tool["name"] for tool in json.loads(text)["result"]["tools"]}
-        self.assertEqual(names, {"get_task", "list_open_tasks", "create_task"})
+        self.assertEqual(names, VIKUNJA_TOOLS)
 
 
 class TestBrowserOriginsAreRefused(HttpTestCase):

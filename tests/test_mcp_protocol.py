@@ -22,9 +22,10 @@ from vikunja_claude.mcp import (
     ToolError,
 )
 
-from .support import McpTestCase
+from .support import VIKUNJA_TOOLS, McpTestCase
 
-EXPOSED_TOOLS = {"get_task", "list_open_tasks", "create_task"}
+#: The default surface: the operational reads are off unless configured.
+EXPOSED_TOOLS = set(VIKUNJA_TOOLS)
 
 
 def request(

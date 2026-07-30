@@ -16,7 +16,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from vikunja_claude.config import Config, McpConfig, OAuthConfig
+from vikunja_claude.config import (
+    Config,
+    InvestmentConfig,
+    McpConfig,
+    OAuthConfig,
+)
 from vikunja_claude.launcher import Launcher
 from vikunja_claude.mcp import McpProtocol
 from vikunja_claude.mcp_server import build_mcp_server
@@ -34,6 +39,22 @@ REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect"
 #: the one from the live failure, because a made-up one would not show that the
 #: value is opaque and unknown until the connector exists.
 CONNECTOR_REDIRECT_URI = "https://chatgpt.com/connector/oauth/jFpZaNIKITJA"
+
+#: The Vikunja half of the tool surface. Always advertised, and exhaustive — the
+#: assertions that use this are the ones proving the boundary cannot edit, close,
+#: delete or comment, so a name added here without a reason weakens them.
+VIKUNJA_TOOLS = {"get_task", "list_open_tasks", "search_tasks", "create_task"}
+
+#: The operational half (task 138). Advertised only when the investment reads are
+#: configured, so the default surface is ``VIKUNJA_TOOLS`` alone.
+OPERATIONAL_TOOLS = {
+    "get_repository_state",
+    "get_pipeline_status",
+    "get_system_health",
+}
+
+INVESTMENT_API_URL = "http://127.0.0.1:8002"
+INVESTMENT_API_KEY = "test-investment-key-never-in-prompts"
 
 
 def make_oauth_config(**overrides) -> OAuthConfig:
@@ -63,6 +84,12 @@ def make_config(state_dir: Path, **overrides) -> Config:
     )
     defaults.update(overrides)
     return Config(**defaults)
+
+
+def make_investment_config(**overrides) -> InvestmentConfig:
+    defaults = dict(api_url=INVESTMENT_API_URL, api_key=INVESTMENT_API_KEY)
+    defaults.update(overrides)
+    return InvestmentConfig(**defaults)
 
 
 def make_mcp_config(state_dir: Path, **overrides) -> McpConfig:
