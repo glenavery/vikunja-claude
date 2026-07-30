@@ -24,7 +24,7 @@ from vikunja_claude.mcp import (
 
 from .support import McpTestCase
 
-EXPOSED_TOOLS = {"get_task", "create_task"}
+EXPOSED_TOOLS = {"get_task", "list_open_tasks", "create_task"}
 
 
 def request(
@@ -66,7 +66,7 @@ class TestHandshake(McpTestCase):
 
 
 class TestAdvertisedSurface(McpTestCase):
-    def test_exactly_two_tools_are_exposed(self):
+    def test_exactly_the_expected_tools_are_exposed(self):
         tools = self.protocol.handle(request("tools/list"))["result"]["tools"]
         self.assertEqual({tool["name"] for tool in tools}, EXPOSED_TOOLS)
 
@@ -84,14 +84,34 @@ class TestAdvertisedSurface(McpTestCase):
                 schema = tool["inputSchema"]
                 self.assertEqual(schema["type"], "object")
                 self.assertFalse(schema["additionalProperties"])
-                self.assertTrue(schema["required"])
+                # `required` is declared, and names only arguments that exist.
+                # Not that it is non-empty: a listing that takes nothing but
+                # optional filters has nothing to require, and a name here that
+                # is not a property is a tool no client could ever call.
+                self.assertIsInstance(schema["required"], list)
+                self.assertEqual(
+                    [k for k in schema["required"] if k not in schema["properties"]], []
+                )
 
-    def test_the_read_tool_is_marked_read_only_and_the_write_tool_is_not(self):
+    def test_the_listing_requires_no_arguments(self):
+        """Its filters are optional, so "list the open tickets" is a valid call."""
+        tools = {
+            tool["name"]: tool
+            for tool in self.protocol.handle(request("tools/list"))["result"]["tools"]
+        }
+        self.assertEqual(tools["list_open_tasks"]["inputSchema"]["required"], [])
+        self.assertEqual(
+            set(tools["list_open_tasks"]["inputSchema"]["properties"]),
+            {"bucket", "label"},
+        )
+
+    def test_the_read_tools_are_marked_read_only_and_the_write_tool_is_not(self):
         tools = {
             tool["name"]: tool
             for tool in self.protocol.handle(request("tools/list"))["result"]["tools"]
         }
         self.assertTrue(tools["get_task"]["annotations"]["readOnlyHint"])
+        self.assertTrue(tools["list_open_tasks"]["annotations"]["readOnlyHint"])
         self.assertFalse(tools["create_task"]["annotations"]["readOnlyHint"])
 
     def test_the_create_tool_tells_the_model_to_confirm_first(self):

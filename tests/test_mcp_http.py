@@ -60,7 +60,7 @@ class TestAuthentication(HttpTestCase):
         status, _, text = self.rpc("tools/list")
         self.assertEqual(status, 200)
         names = {tool["name"] for tool in json.loads(text)["result"]["tools"]}
-        self.assertEqual(names, {"get_task", "create_task"})
+        self.assertEqual(names, {"get_task", "list_open_tasks", "create_task"})
 
 
 class TestBrowserOriginsAreRefused(HttpTestCase):

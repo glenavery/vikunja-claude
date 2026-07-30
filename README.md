@@ -259,13 +259,39 @@ systemctl --user status vikunja-claude       # still running
 | Tool | Does |
 |---|---|
 | `get_task(task_id)` | Title, full description, status, bucket, labels, timestamps and comments for one task on the **AI Alpha Engine** board |
+| `list_open_tasks(bucket?, label?)` | Every task that is not done on that board — id, title, bucket, priority, labels and timestamps, most urgent first. No descriptions, no comments |
 | `create_task(project_id, title, description)` | Creates one task on that board and returns its id and URL |
 
-That is the entire surface. There are two tools, they are a fixed list in the
-code, and there is no generic passthrough — so "this connection cannot edit,
-close, delete, comment on or move a task" is a property of what exists, not a
-promise about what will be asked for. `tests/test_mcp_protocol.py` asserts the
-tool set as an *exact* set, which fails the day a third one appears.
+That is the entire surface. The tools are a fixed list in the code, and there is
+no generic passthrough — so "this connection cannot edit, close, delete, comment
+on or move a task" is a property of what exists, not a promise about what will
+be asked for. `tests/test_mcp_protocol.py` asserts the tool set as an *exact*
+set, which fails the day an unintended one appears.
+
+### Rules the listing holds
+
+`get_task` needs an id you already have. `list_open_tasks` is what answers
+"what is open" — and the only failure that matters for a listing is a quiet one,
+so:
+
+- **No limit argument, and no default page size.** An answer that stopped at
+  fifty would be indistinguishable from a board with fifty things left.
+- **Paging is walked, then checked.** Vikunja pages tasks *inside* each kanban
+  column, caps a page at 50 and **ignores `per_page`** — the live board answers
+  a request for 250 with 50 and reports `count: 170`. So one request is the
+  first page of each column, not a listing. `list_open_tickets` walks the pages
+  and compares what arrived against the totals Vikunja reports; a short read
+  raises instead of returning a shorter board.
+- **`done = false` is sent to save a walk, never to decide the answer.** Every
+  row is checked again client-side, so a Vikunja that ignored the filter would
+  be slower and not wronger.
+- **A mistyped column is refused, not answered.** "No open tickets in Redy"
+  would be a wrong answer to a mistyped question, so an unknown bucket comes
+  back as an error naming the real ones. An *empty* column is a real, empty
+  answer. An unused label is likewise a real observation, and the labels
+  actually in use come back with it.
+- **The order is total.** Most urgent first, then by task id — priority alone
+  is not an order, since most of the board sits at 0.
 
 It also has no shell, no database connection and no filesystem access beyond
 its own ledger, because nothing in `mcp_service.py` has any of those.
@@ -429,7 +455,7 @@ mode → Create. URL is `https://<host>.ts.net:8443/mcp`, authentication is
 server registers ChatGPT dynamically. If it does insist, generate a client id,
 put it in `VIKUNJA_MCP_OAUTH_CLIENT_ID`, restart, and paste the same value.
 
-ChatGPT opens the consent screen in a browser. It names the two operations and
+ChatGPT opens the consent screen in a browser. It names the three operations and
 asks for the passphrase; approving returns a code and the connector finishes.
 **Never choose "no authentication"** — an open write path into the board is
 worse than pasting tickets by hand.
@@ -533,7 +559,7 @@ vikunja_claude/
   web.py          HTML console
   server.py       routes, status codes, loopback guard
   mcp.py          MCP protocol: JSON-RPC, handshake, fixed tool list
-  mcp_service.py  the two tools, the project rule, the dedup ledger
+  mcp_service.py  the tools, the project rule, the dedup ledger
   mcp_server.py   HTTP routing: the OAuth routes, one MCP route, loopback guard
   oauth.py        the OAuth 2.1 authorization server: metadata, PKCE, consent
   oauth_store.py  clients, codes and tokens as one 0600 JSON file

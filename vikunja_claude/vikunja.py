@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -17,6 +18,22 @@ from .html_text import html_to_text
 
 # A ticket number is the "#NN" prefix of the Vikunja task title.
 TICKET_RE = re.compile(r"^\s*#(\d+)(?:\b|\s|$)")
+
+# Vikunja pages tasks *inside* each kanban bucket, and the page size is its own:
+# `per_page` is accepted and ignored on this endpoint. Measured against the live
+# board, a bucket holding 170 tasks answers with 50 and reports `count: 170`.
+# So one request is never a listing -- it is the first page of every bucket.
+KANBAN_BUCKET_PAGE_SIZE = 50
+
+# Vikunja's filter language. Server-side so a board with a long Done column is
+# not walked page by page only to be discarded; every row is still checked
+# client-side, so a Vikunja that ignored this would be slower and not wronger.
+OPEN_TASKS_FILTER = "done = false"
+
+# A bound on paging, not a limit on the answer: at 50 tasks a page this is
+# 50,000 tasks, and reaching it means something is looping rather than that a
+# board is large. It raises rather than returning what it has.
+MAX_VIEW_PAGES = 1000
 
 Transport = Callable[[str, str, dict[str, Any] | None], Any]
 
@@ -64,6 +81,10 @@ class Ticket:
     created: str
     number: int | None = None
     labels: list[str] = field(default_factory=list)
+    #: Vikunja's 0-5 scale, where 0 is "unset" and 5 is the most urgent. Kept as
+    #: the number Vikunja stores; naming it is presentation, and lives above.
+    priority: int = 0
+    updated: str = ""
 
     @property
     def description(self) -> str:
@@ -181,32 +202,111 @@ class VikunjaClient:
 
     # -- tickets -----------------------------------------------------------
 
+    @staticmethod
+    def _ticket(bucket: dict[str, Any], task: dict[str, Any]) -> Ticket:
+        """One task as the board's kanban view reports it, tagged with its bucket."""
+        # A missing #NN prefix is fine: identity is the task id.
+        return Ticket(
+            number=ticket_number(task.get("title", "")),
+            task_id=int(task["id"]),
+            title=task.get("title", ""),
+            description_html=task.get("description") or "",
+            bucket_id=int(bucket["id"]),
+            bucket_title=bucket.get("title"),
+            done=bool(task.get("done")),
+            created=task.get("created") or "",
+            labels=[label.get("title", "") for label in (task.get("labels") or [])],
+            priority=int(task.get("priority") or 0),
+            updated=task.get("updated") or "",
+        )
+
+    def _view_page(
+        self, project_id: int, view_id: int, page: int, task_filter: str | None
+    ) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {"page": page}
+        if task_filter:
+            query["filter"] = task_filter
+        path = (
+            f"/projects/{project_id}/views/{view_id}/tasks"
+            f"?{urllib.parse.urlencode(query)}"
+        )
+        buckets = self.call("GET", path) or []
+        if not isinstance(buckets, list):
+            raise VikunjaError(f"GET {path} did not return a list of buckets")
+        return buckets
+
     def list_tickets(self, project_id: int, view_id: int) -> list[Ticket]:
-        """Every task in the kanban view, tagged with its bucket."""
-        buckets = self.call(
-            "GET", f"/projects/{project_id}/views/{view_id}/tasks?per_page=250"
-        ) or []
-        tickets: list[Ticket] = []
-        for bucket in buckets:
-            for task in bucket.get("tasks") or []:
-                # A missing #NN prefix is fine: identity is the task id.
-                tickets.append(
-                    Ticket(
-                        number=ticket_number(task.get("title", "")),
-                        task_id=int(task["id"]),
-                        title=task.get("title", ""),
-                        description_html=task.get("description") or "",
-                        bucket_id=int(bucket["id"]),
-                        bucket_title=bucket.get("title"),
-                        done=bool(task.get("done")),
-                        created=task.get("created") or "",
-                        labels=[
-                            label.get("title", "")
-                            for label in (task.get("labels") or [])
-                        ],
-                    )
+        """The first page of every bucket in the kanban view.
+
+        Not the whole board: see :data:`KANBAN_BUCKET_PAGE_SIZE`. Enough for the
+        lookups that follow it, which resolve a task the operator just named.
+        :meth:`list_open_tickets` is the one that has to be complete.
+        """
+        return [
+            self._ticket(bucket, task)
+            for bucket in self._view_page(project_id, view_id, 1, None)
+            for task in bucket.get("tasks") or []
+        ]
+
+    def list_open_tickets(self, project_id: int, view_id: int) -> list[Ticket]:
+        """Every task in the project that is not done -- all of them, or an error.
+
+        Paging is walked to exhaustion and then *checked*: Vikunja reports each
+        bucket's true total alongside the page it served, so a short read is
+        detectable, and a listing that quietly dropped a ticket is the one
+        failure this call must never have. It raises instead.
+
+        The check counts every task a page carried, before `done` is considered,
+        because the totals are counts of what the filter matched -- comparing
+        them against the open tasks left after a second, client-side filter
+        would report a shortfall whenever the server ignored the filter.
+        """
+        open_tickets: dict[int, Ticket] = {}
+        seen: set[int] = set()
+        delivered: dict[int, int] = {}
+        totals: dict[int, tuple[str | None, int]] = {}
+
+        for page in range(1, MAX_VIEW_PAGES + 1):
+            buckets = self._view_page(project_id, view_id, page, OPEN_TASKS_FILTER)
+            arrived = 0
+            for bucket in buckets:
+                bucket_id = int(bucket["id"])
+                totals[bucket_id] = (
+                    bucket.get("title"),
+                    int(bucket.get("count") or 0),
                 )
-        return tickets
+                tasks = bucket.get("tasks") or []
+                delivered[bucket_id] = delivered.get(bucket_id, 0) + len(tasks)
+                for task in tasks:
+                    ticket = self._ticket(bucket, task)
+                    if ticket.task_id in seen:
+                        continue
+                    seen.add(ticket.task_id)
+                    arrived += 1
+                    if not ticket.done:
+                        open_tickets[ticket.task_id] = ticket
+            # Pages are consecutive slices, so one that carries nothing new is
+            # the end of every bucket at once.
+            if arrived == 0:
+                break
+        else:
+            raise VikunjaError(
+                f"still receiving tasks after {MAX_VIEW_PAGES} pages of project "
+                f"{project_id}: refusing to return a partial listing"
+            )
+
+        short = [
+            f"{title!r} served {delivered.get(bucket_id, 0)} of {count}"
+            for bucket_id, (title, count) in sorted(totals.items())
+            if delivered.get(bucket_id, 0) < count
+        ]
+        if short:
+            raise VikunjaError(
+                "Vikunja served fewer tasks than it says the board holds, so "
+                "this listing would silently omit open tickets: "
+                + "; ".join(short)
+            )
+        return list(open_tickets.values())
 
     def find_by_task_id(self, task_id: int, project_id: int, view_id: int) -> Ticket:
         """Canonical lookup: Vikunja's immutable task id."""
@@ -246,12 +346,24 @@ class VikunjaClient:
             raise TicketNotFound(f"No tickets in the {bucket_title} bucket", status=404)
         return sorted(ready, key=lambda t: (t.created, t.task_id))[0]
 
+    # -- buckets -----------------------------------------------------------
+
+    def _buckets(self, project_id: int, view_id: int) -> list[dict[str, Any]]:
+        return self.call("GET", f"/projects/{project_id}/views/{view_id}/buckets") or []
+
+    def bucket_titles(self, project_id: int, view_id: int) -> list[str]:
+        """The board's columns, in board order. Read-only.
+
+        Read from the board rather than inferred from the tasks that came back,
+        so an empty column stays a real column: "no open tickets in Ready" and
+        "there is no Ready" are different answers.
+        """
+        return [bucket.get("title", "") for bucket in self._buckets(project_id, view_id)]
+
     # -- mutations ---------------------------------------------------------
 
     def bucket_id_by_title(self, project_id: int, view_id: int, title: str) -> int:
-        buckets = self.call(
-            "GET", f"/projects/{project_id}/views/{view_id}/buckets"
-        ) or []
+        buckets = self._buckets(project_id, view_id)
         for bucket in buckets:
             if bucket.get("title") == title:
                 return int(bucket["id"])

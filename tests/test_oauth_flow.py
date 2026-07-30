@@ -815,14 +815,16 @@ class TestNoFallbackAuthentication(HttpTestCase):
 
 
 class TestTheGrantedSurface(HttpTestCase):
-    """What one successful authorization actually buys: the same two tools."""
+    """What one successful authorization actually buys: the same fixed tools."""
 
     def tool_names(self) -> set[str]:
         _, _, text = self.rpc("tools/list")
         return {tool["name"] for tool in json.loads(text)["result"]["tools"]}
 
-    def test_it_is_exactly_get_task_and_create_task(self):
-        self.assertEqual(self.tool_names(), {"get_task", "create_task"})
+    def test_it_is_exactly_the_three_tools_the_boundary_defines(self):
+        self.assertEqual(
+            self.tool_names(), {"get_task", "list_open_tasks", "create_task"}
+        )
 
     def test_a_valid_token_can_read_a_task(self):
         _, _, text = self.rpc(

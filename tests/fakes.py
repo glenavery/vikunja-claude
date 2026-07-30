@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+import urllib.parse
 from copy import deepcopy
 from typing import Any
 
-from vikunja_claude.vikunja import VikunjaError
+from vikunja_claude.vikunja import KANBAN_BUCKET_PAGE_SIZE, VikunjaError
 
 PROJECT_ID = 2
 VIEW_ID = 12
@@ -25,8 +26,10 @@ def task(task_id: int, title: str, created: str, description: str = "", **extra)
         "id": task_id,
         "title": title,
         "created": created,
+        "updated": extra.get("updated", created),
         "description": description,
         "done": extra.get("done", False),
+        "priority": extra.get("priority", 0),
         "labels": [{"title": t} for t in extra.get("labels", [])],
     }
 
@@ -86,13 +89,10 @@ class FakeVikunja:
                     {"id": VIEW_ID, "title": "Kanban", "view_kind": "kanban"},
                 ],
             }
-        if method == "GET" and path.startswith(
+        if method == "GET" and path.split("?")[0] == (
             f"/projects/{PROJECT_ID}/views/{VIEW_ID}/tasks"
         ):
-            return [
-                {**bucket, "tasks": list(self.layout.get(bucket["title"], []))}
-                for bucket in BUCKETS
-            ]
+            return self._view_tasks(path)
         if method == "GET" and path == f"/projects/{PROJECT_ID}/views/{VIEW_ID}/buckets":
             return [dict(bucket) for bucket in BUCKETS]
 
@@ -127,6 +127,41 @@ class FakeVikunja:
             return deepcopy(self._create(body or {}))
 
         raise VikunjaError(f"FakeVikunja has no route for {method} {path}", status=404)
+
+    def _view_tasks(self, path: str) -> list[dict]:
+        """The kanban view, paged the way Vikunja actually pages it.
+
+        Three behaviours are modelled on purpose, because each one is a way a
+        listing can come back short while looking complete:
+
+        * paging is *per bucket*, and a page holds at most
+          ``KANBAN_BUCKET_PAGE_SIZE`` tasks;
+        * ``per_page`` is accepted and ignored, so asking for more does nothing;
+        * ``count`` reports the bucket's real total, not the slice served.
+
+        Measured against the live board, where a Done column of 170 answered
+        with 50 and said so.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+        page = max(1, int(query.get("page", ["1"])[0]))
+        wanted = query.get("filter", [""])[0].replace(" ", "")
+
+        served = []
+        for bucket in BUCKETS:
+            tasks = list(self.layout.get(bucket["title"], []))
+            if wanted == "done=false":
+                tasks = [t for t in tasks if not t.get("done")]
+            elif wanted:
+                raise VikunjaError(f"FakeVikunja cannot apply filter {wanted!r}")
+            start = (page - 1) * KANBAN_BUCKET_PAGE_SIZE
+            served.append(
+                {
+                    **bucket,
+                    "count": len(tasks),
+                    "tasks": tasks[start : start + KANBAN_BUCKET_PAGE_SIZE],
+                }
+            )
+        return served
 
     def _find(self, task_id: int) -> dict:
         for tasks in self.layout.values():
