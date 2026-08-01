@@ -43,6 +43,7 @@ from vikunja_claude.website import (
 from .fakes import FakeVikunja
 from .support import (
     ISSUER,
+    INVESTMENT_TOOLS,
     OPERATIONAL_TOOLS,
     PASSPHRASE,
     PUBLIC_SITE_URL,
@@ -176,8 +177,13 @@ class TestTheDisabledState(unittest.TestCase):
             ).tools()
         }
         self.assertEqual(page_only, VIKUNJA_TOOLS | WEBSITE_TOOLS)
-        self.assertEqual(reads_only, VIKUNJA_TOOLS | OPERATIONAL_TOOLS)
-        self.assertEqual(both, VIKUNJA_TOOLS | OPERATIONAL_TOOLS | WEBSITE_TOOLS)
+        # INVESTMENT_TOOLS, not OPERATIONAL_TOOLS: the investment settings
+        # switch on the three reads and the authenticated page read (task
+        # 239) together. What this test is about is unchanged — the public
+        # page fetch is still its own setting, and neither side pulls in
+        # the other.
+        self.assertEqual(reads_only, VIKUNJA_TOOLS | INVESTMENT_TOOLS)
+        self.assertEqual(both, VIKUNJA_TOOLS | INVESTMENT_TOOLS | WEBSITE_TOOLS)
 
     def test_an_unadvertised_tool_cannot_be_called_anyway(self):
         protocol = McpProtocol(self._service().tools())
