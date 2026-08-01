@@ -283,6 +283,14 @@ Plus one **public page fetch**, present only when it is configured (see
 |---|---|
 | `fetch_public_page(path)` | The HTML, HTTP status and response headers of one page of the public website — `/`, `/about`, `/terms?lang=sv` — fetched as an anonymous visitor |
 
+Plus one **authenticated page read**, present whenever the operational reads are
+(see [Reading the site as the test paying user](#reading-the-site-as-the-test-paying-user)
+below):
+
+| Tool | Does |
+|---|---|
+| `fetch_test_paying_page(path)` | The same, for one page rendered as the **test paying user** — `/cockpit/<slug>`, `/report/<slug>` — so paying-tier content can be reviewed. The identity is fixed on the server and is never an argument |
+
 That is the entire surface. The tools are a fixed list in the code, and there is
 no generic passthrough — so "this connection cannot close, delete, move, label
 or reassign a task" is a property of what exists, not a promise about what will
@@ -646,7 +654,8 @@ is a write path wearing a read's name.
 
 #### Enabling them
 
-Both settings or neither. Unset, the three tools are **not advertised at all** —
+Both settings or neither. Unset, the three tools — and the authenticated page
+read that shares these settings — are **not advertised at all** —
 a tool that can never succeed is read by a model as a capability, and its failure
 reported as a fact about the system rather than about the configuration.
 Half-configured is a refusal to start, so "off" has exactly one meaning.
@@ -673,19 +682,20 @@ wire in clear text and configuration refuses to load.
 
 ```bash
 ${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env   # remove BOTH settings
-systemctl --user restart vikunja-claude-mcp            # the three tools disappear
+systemctl --user restart vikunja-claude-mcp            # the tools disappear
 ```
 
 Nothing else changes: the Vikunja tools, the board, the ledger and the OAuth
 grants are untouched, and the investment application is not modified or
 restarted. `tests/test_mcp_operational.py` asserts that switching them off
-removes exactly those three names and nothing more.
+removes exactly the names these settings add — the three reads and
+`fetch_test_paying_page` — and nothing more.
 
 #### The investment credential: rotation and revocation
 
 `INVESTMENT_API_KEY` is the investment application's own `API_KEY` — the same
 value its scripts use. It is a **read-only** capability *here* (this boundary
-issues GET to three paths and has no method that could do otherwise), but the key
+issues GET to four paths and has no method that could do otherwise), but the key
 itself is not read-only elsewhere, so treat it as a live credential.
 
 **Revoke this integration's use of it** without touching the key at all — remove
@@ -778,6 +788,70 @@ ${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env   # remove the setting
 systemctl --user restart vikunja-claude-mcp            # the tool disappears
 ```
 
+### Reading the site as the test paying user
+
+One read-only tool, `fetch_test_paying_page(path)`, that returns the HTML the
+site served for one path **rendered as the designated test paying user**. It
+exists because `fetch_public_page` cannot see a paying-tier page by
+construction — it carries no credential, so a cockpit or a report answers it
+with the `303` to `/login` — and reviewing what a paying customer is actually
+shown is otherwise a manual browser job.
+
+**Almost none of this tool is here.** This process holds no session, mints none
+and knows no password. It asks the investment application's admin instance for
+"one page as the test paying user" and the application decides everything that
+matters: who that is (`TEST_PAYING_USER_ID` on the server), whether they are
+still a paying user, which routes it will render, and what may come back. The
+rules live in `api/paying_page_read.py` in that repository, beside the
+application they are about; `vikunja_claude/paying_page.py` is one GET to one
+endpoint.
+
+**The identity is not an argument.** There is no parameter through which a
+caller could name a user, and adding a user id to the call changes nothing —
+there is nowhere for it to go. So this is one fixed read, not an impersonation
+facility with a default.
+
+**It is only ever a paying user.** The application resolves the configured
+user's effective level with its own helper and refuses unless it is exactly
+`paying`. A trusted or admin identity is refused by name, and a test user whose
+subscription lapsed stops the tool rather than quietly downgrading what it
+shows.
+
+**It cannot change anything.** The request is always a `GET`, and every write in
+the application is a POST. On top of that the application refuses the public GET
+routes that manage authentication (login, logout, OAuth, callbacks), billing,
+uploads, imports, refreshes, report generation and administration — and that
+refusal list is held to the route table by a test, so a route added later has to
+be classified before the suite passes.
+
+**No credential comes back.** The session cookie is minted on the server, sent
+on the wire and never returned; the page's own `Set-Cookie` — which every
+authenticated response carries — is reduced to its name, the same way the
+anonymous fetch does it. Redirects are reported, not followed. A body over
+400000 bytes is cut and says so.
+
+#### Enabling it
+
+It rides on the operational reads' two settings: same credential, same admin
+instance, no third switch here. What it also needs is the application's own
+setting, on the **admin** instance:
+
+```bash
+${EDITOR:-vim} /home/glen/stacks/investment/.env
+#   TEST_PAYING_USER_ID=7                  # the designated test paying user
+sudo systemctl restart investment-api-admin
+```
+
+Unset there, the tool is advertised and answers with a refusal naming
+`TEST_PAYING_USER_ID` — deliberately, because whether the application has a test
+identity is the application's fact, and a copy of it in this repository would be
+a second source of truth that can disagree with the one that decides.
+
+`TEST_PAYING_PAGE_ORIGIN` on that side names the origin the page is read from,
+and defaults to `http://127.0.0.1:8001` — the public unit. It must be loopback
+if it is plain `http`: the read carries a live session cookie, and that must not
+go over a network in clear text.
+
 ### Transport
 
 MCP Streamable HTTP: JSON-RPC over `POST /mcp`, answered as JSON or as a single
@@ -817,6 +891,7 @@ vikunja_claude/
   mcp_service.py  the tools, the project rule, the dedup ledger
   investment.py   read-only client for the three AI Server operational reads
   website.py      anonymous, credential-free fetch of one public page
+  paying_page.py  one page read as the server's test paying user (no session here)
   mcp_server.py   HTTP routing: the OAuth routes, one MCP route, loopback guard
   oauth.py        the OAuth 2.1 authorization server: metadata, PKCE, consent
   oauth_store.py  clients, codes and tokens as one 0600 JSON file

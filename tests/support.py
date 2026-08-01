@@ -70,6 +70,16 @@ OPERATIONAL_TOOLS = {
     "get_system_health",
 }
 
+#: The authenticated page read (task 239). Kept apart from ``OPERATIONAL_TOOLS``
+#: even though it rides on the same setting: those three take no arguments and
+#: report status, this one takes a path and renders a page as a real user. The
+#: assertions that name the operational set are about *those three*, and folding
+#: a fourth of a different kind into them would quietly widen what they say.
+PAYING_PAGE_TOOLS = {"fetch_test_paying_page"}
+
+#: Everything the investment admin instance's settings switch on at once.
+INVESTMENT_TOOLS = OPERATIONAL_TOOLS | PAYING_PAGE_TOOLS
+
 #: The public website half (task 204). Advertised only when the public site URL
 #: is configured, and separately from the operational reads — the two settings
 #: are independent, so the default surface is ``VIKUNJA_TOOLS`` alone.

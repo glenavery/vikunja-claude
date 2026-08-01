@@ -34,6 +34,14 @@ reason, from its own setting. It is the one tool here that takes a path, so it
 is worth saying where the safety of that lives: not here. It is handled by
 :mod:`vikunja_claude.website`, which holds no credential at all, so a protected
 page answers it as it answers a stranger and the refusal is what comes back.
+
+The authenticated page read (task 239) is the one tool that sees a page a
+stranger cannot. It rides on the operational reads' setting, because it is the
+same credential to the same admin instance, and its safety lives one layer
+further away still: in the application, which owns the identity
+(``TEST_PAYING_USER_ID``), checks that it is still a paying user, decides which
+routes it will render and returns no session cookie. Nothing here chooses who
+the page is read as, and no argument can — see :mod:`vikunja_claude.paying_page`.
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ from .config import McpConfig
 from .html_text import html_to_text, text_to_html
 from .investment import InvestmentStatusClient, InvestmentStatusError
 from .mcp import Tool, ToolError
+from .paying_page import PayingPageError, PayingSiteClient
 from .vikunja import TicketNotFound, VikunjaClient, VikunjaError
 from .website import PublicPageError, PublicSiteClient
 
@@ -113,6 +122,7 @@ class McpService:
         client: VikunjaClient,
         investment: InvestmentStatusClient | None = None,
         site: PublicSiteClient | None = None,
+        paying_site: PayingSiteClient | None = None,
     ):
         self.config = config
         self.client = client
@@ -144,6 +154,20 @@ class McpService:
             self.site = PublicSiteClient(config.public_site_url)
         else:
             self.site = None
+        # The authenticated read rides on the operational reads' setting: it is
+        # the same key to the same admin instance, and there is deliberately no
+        # second switch here. Whether the *application* has a test paying
+        # identity configured is the application's own setting, and it answers
+        # so — a switch here as well would be a second source of truth that can
+        # disagree with the one that decides.
+        if paying_site is not None:
+            self.paying_site: PayingSiteClient | None = paying_site
+        elif config.investment is not None:
+            self.paying_site = PayingSiteClient(
+                config.investment.api_url, config.investment.api_key
+            )
+        else:
+            self.paying_site = None
 
     @property
     def operational_reads_enabled(self) -> bool:
@@ -152,6 +176,10 @@ class McpService:
     @property
     def page_fetch_enabled(self) -> bool:
         return self.site is not None
+
+    @property
+    def paying_page_fetch_enabled(self) -> bool:
+        return self.paying_site is not None
 
     # -- resolution --------------------------------------------------------
 
@@ -438,6 +466,26 @@ class McpService:
         try:
             return self._site().fetch_page(path)
         except PublicPageError as exc:
+            raise ToolError(str(exc)) from exc
+
+    # -- the site as the test paying user (task 239) ------------------------
+
+    def _paying_site(self) -> PayingSiteClient:
+        """The configured client, or a refusal that names the settings."""
+        if self.paying_site is None:
+            raise ToolError(
+                "The authenticated page read is not configured on this "
+                "boundary. It uses the same admin instance as the operational "
+                "reads, so set INVESTMENT_API_URL and INVESTMENT_API_KEY to "
+                "enable it. Nothing was read."
+            )
+        return self.paying_site
+
+    def fetch_test_paying_page(self, path: Any) -> dict[str, Any]:
+        """One page of the site as the test paying user, decided by the server."""
+        try:
+            return self._paying_site().fetch_page(path)
+        except PayingPageError as exc:
             raise ToolError(str(exc)) from exc
 
     # -- create ------------------------------------------------------------
@@ -967,6 +1015,66 @@ class McpService:
             *self._vikunja_tools(),
             *self._operational_tools(),
             *self._website_tools(),
+            *self._paying_page_tools(),
+        ]
+
+    def _paying_page_tools(self) -> list[Tool]:
+        """The authenticated page read, or nothing at all when unconfigured."""
+        if not self.paying_page_fetch_enabled:
+            return []
+        return [
+            Tool(
+                name="fetch_test_paying_page",
+                title="Fetch a page of the AI Server website as the test paying user",
+                description=(
+                    "Fetch one page of the AI Server website by path — "
+                    '"/cockpit/<slug>", "/report/<slug>", '
+                    '"/portfolio-drivers/<slug>", "/thesis-validation/<slug>", '
+                    '"/news-impact/<slug>", "/portfolio-analysis/<slug>" — '
+                    "rendered for the **test paying user**, and read the HTML "
+                    "the server returned with its HTTP status and response "
+                    "headers. Use it to see paying-tier content that "
+                    "fetch_public_page cannot reach, which answers as an "
+                    "anonymous visitor and gets the redirect to the login page "
+                    "instead. Which user this is, is fixed on the server: there "
+                    "is no way to ask for a different one, it is never a "
+                    "trusted or admin user, and the read is refused outright if "
+                    "that user is no longer a paying one. Routes that manage "
+                    "authentication (login, logout, OAuth, callbacks), billing, "
+                    "uploads, imports, refreshes, report generation and "
+                    "administration are refused, and the request is always a "
+                    "GET — nothing here can change the application's state. No "
+                    "session cookie, key or token is returned; cookie values "
+                    "are withheld and their names listed. Redirects are "
+                    "reported, not followed. A body over 400000 bytes is cut, "
+                    "and says so."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                'A path on the site, starting with "/" and '
+                                "optionally carrying a query string. Not a full "
+                                "URL, and not a user: the site and the identity "
+                                "are both fixed by server configuration."
+                            ),
+                        }
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    # One instance, one identity, both fixed by configuration.
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.fetch_test_paying_page(
+                    arguments.get("path")
+                ),
+            ),
         ]
 
     def _website_tools(self) -> list[Tool]:

@@ -304,9 +304,13 @@ def main() -> int:
     # absent, so which way each was resolved is said at startup rather than
     # discovered from a tool that is missing.
     operational = (
-        f"operational reads via {config.investment.api_url}"
+        # One line for both, because they are one setting: the three reads and
+        # the test-paying page read (task 239) are switched on together, with
+        # the same key against the same admin instance.
+        f"operational reads and test-paying page read via {config.investment.api_url}"
         if config.investment is not None
-        else "operational reads OFF (INVESTMENT_API_URL/INVESTMENT_API_KEY unset)"
+        else "operational reads and test-paying page read OFF "
+        "(INVESTMENT_API_URL/INVESTMENT_API_KEY unset)"
     )
     page_fetch = (
         f"public page fetch via {config.public_site_url}"

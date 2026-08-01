@@ -38,6 +38,7 @@ from vikunja_claude.vikunja import VikunjaClient
 from .fakes import FakeVikunja
 from .support import (
     INVESTMENT_API_KEY,
+    INVESTMENT_TOOLS,
     OPERATIONAL_TOOLS,
     VIKUNJA_TOOLS,
     make_investment_config,
@@ -142,14 +143,17 @@ class TestTheDisabledState(unittest.TestCase):
     def test_configured_they_are(self):
         service = self._service(make_investment_config())
         names = {tool.name for tool in service.tools()}
-        self.assertEqual(names, VIKUNJA_TOOLS | OPERATIONAL_TOOLS)
+        # The same two settings also switch on the authenticated page read
+        # (task 239) — same key, same admin instance. The set is still exact, so
+        # a tool nobody meant to add still fails here.
+        self.assertEqual(names, VIKUNJA_TOOLS | INVESTMENT_TOOLS)
         self.assertTrue(service.operational_reads_enabled)
 
     def test_disabling_them_leaves_the_vikunja_surface_untouched(self):
         """Task 138: "can be disabled without affecting Vikunja"."""
         off = {tool.name for tool in self._service(None).tools()}
         on = {tool.name for tool in self._service(make_investment_config()).tools()}
-        self.assertEqual(on - off, OPERATIONAL_TOOLS)
+        self.assertEqual(on - off, INVESTMENT_TOOLS)
         self.assertEqual(off - on, set())
 
     def test_an_unadvertised_tool_cannot_be_called_anyway(self):
