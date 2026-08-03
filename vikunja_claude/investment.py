@@ -4,34 +4,64 @@ Task 138 approved four operational reads beside the Vikunja ones: the
 repository's branch and commit, whether its working tree is clean, the latest
 nightly-pipeline status and the latest system-health result. It also excluded
 shell execution and direct database access — so this module performs none of
-those. It issues **GET requests to three fixed paths** on the investment
-application, which owns all four facts already and decides there what an external
+those. It issues **GET requests to fixed paths** on the investment application,
+which owns all of those facts already and decides there what an external
 integration may see (``api/operational_reads.py`` in that repository).
 
-Two properties are structural rather than promised.
+Task 279 added three more of the same shape: one tracked file, a literal-text
+search and one commit's diff. They are what let a ticket review inspect the
+implementation being claimed rather than stopping at the completion comment.
+Every rule about them — which revisions resolve, which paths are denied, what is
+redacted, where the limits sit — lives in ``api/repository_read.py`` **there**,
+not here. This module is a client, and a client that re-decided any of that
+would be a second boundary that can disagree with the one that matters.
+
+Three properties are structural rather than promised.
 
 **There is no path parameter.** Each read is a method with a literal constant, so
 there is no argument through which a caller could aim this client at another
 endpoint of that API. A generic ``get(path)`` would have made the two-tool
-discipline of :mod:`vikunja_claude.mcp` meaningless one layer down.
+discipline of :mod:`vikunja_claude.mcp` meaningless one layer down. The task 279
+reads take *query* arguments — a repository-relative path, a commit id, a search
+literal — and those are urlencoded into a fixed path, never concatenated onto
+one. What the caller can vary is what to look for, never where to look.
 
 **There is no write method.** Not a refused one — an absent one. The class cannot
 POST, and the transport it is handed is only ever asked for GET.
+
+**A refusal comes back as a refusal.** The application answers 400/404 for a path
+or revision it will not read, and those arrive here as
+:class:`InvestmentStatusError` carrying the application's own reason. They are
+not retried, not softened, and not reported as an unknown state.
 """
 
 from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Optional
 
-#: The three reads, named once. Adding a fourth is an edit here and a tool there.
+#: The reads, named once. Adding another is an edit here and a tool there.
 PATH_REPOSITORY = "/operational/repository"
 PATH_PIPELINE = "/operational/pipeline"
 PATH_SYSTEM_HEALTH = "/operational/system-health"
 
-READ_PATHS = (PATH_REPOSITORY, PATH_PIPELINE, PATH_SYSTEM_HEALTH)
+#: Tracked Git content (task 279). Literal constants like the three above; the
+#: caller supplies query arguments to them and never the path itself.
+PATH_REPOSITORY_FILE = "/operational/repository/file"
+PATH_REPOSITORY_SEARCH = "/operational/repository/search"
+PATH_REPOSITORY_DIFF = "/operational/repository/diff"
+
+READ_PATHS = (
+    PATH_REPOSITORY,
+    PATH_PIPELINE,
+    PATH_SYSTEM_HEALTH,
+    PATH_REPOSITORY_FILE,
+    PATH_REPOSITORY_SEARCH,
+    PATH_REPOSITORY_DIFF,
+)
 
 #: System health shells out to docker, systemctl and crontab, so it is the slow
 #: one. Generous enough not to fail on a loaded host, bounded so a wedged service
@@ -75,11 +105,10 @@ class InvestmentStatusClient:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            # The body is not repeated. It is the API's own error text and may
-            # name internals; the status code is what the model needs to act on,
-            # and 401/403 is a configuration problem rather than a transient one.
+            # The body is repeated only when it is the application's own
+            # deliberate refusal — see `_explain_status`.
             raise InvestmentStatusError(
-                self._explain_status(exc.code, path)
+                self._explain_status(exc.code, path, _read_detail(exc))
             ) from exc
         except urllib.error.URLError as exc:
             raise InvestmentStatusError(
@@ -104,12 +133,24 @@ class InvestmentStatusClient:
                 f"The investment API sent a non-JSON response for {path}."
             ) from exc
 
-    def _explain_status(self, code: int, path: str) -> str:
+    def _explain_status(
+        self, code: int, path: str, detail: Optional[str] = None
+    ) -> str:
         """What an HTTP failure means, said as the thing to fix.
 
         401/403 and 404 are the two that get a sentence of their own, because
         they are the two that are configuration rather than weather, and because
         neither must ever read as "the status is fine".
+
+        ``detail`` is the application's own refusal text, present only when it
+        answered with a FastAPI error body. That distinction is what lets a 404
+        be told apart: with a detail it is the application saying "no such file
+        at that commit", without one it is the *route* being absent, which is a
+        stale deployment and a completely different thing to fix. The repository
+        reads (task 279) refuse by design — an absolute path, a revision
+        expression, a denied path — and their reasons are written for the caller
+        to act on, so withholding them would turn a precise refusal into a
+        shrug.
         """
         if code in (401, 403):
             return (
@@ -117,6 +158,10 @@ class InvestmentStatusClient:
                 "configured INVESTMENT_API_KEY is not accepted. Nothing was read "
                 "— this is not a statement about the system's health."
             )
+        if code == 400 and detail:
+            return f"The investment API refused this read: {detail}"
+        if code == 404 and detail:
+            return f"The investment API found nothing to read: {detail}"
         if code == 404:
             # Two causes, and naming only the first is how a stale deployment gets
             # misdiagnosed as a misconfiguration — which is what happened the
@@ -129,6 +174,8 @@ class InvestmentStatusClient:
                 "admin) — or the admin instance is running code from before they "
                 "existed and has not been restarted. Nothing was read."
             )
+        if detail:
+            return f"The investment API returned HTTP {code} for {path}: {detail}"
         return f"The investment API returned HTTP {code} for {path}."
 
     # -- the three reads ---------------------------------------------------
@@ -142,6 +189,57 @@ class InvestmentStatusClient:
     def system_health(self) -> dict[str, Any]:
         return self._object(PATH_SYSTEM_HEALTH)
 
+    # -- tracked Git content (task 279) ------------------------------------
+
+    def repository_file(
+        self,
+        path: Any,
+        revision: Any = None,
+        start_line: Any = None,
+        end_line: Any = None,
+    ) -> dict[str, Any]:
+        """One tracked text file at a resolved commit."""
+        return self._object(
+            _with_query(
+                PATH_REPOSITORY_FILE,
+                {
+                    "path": path,
+                    "revision": revision,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                },
+            )
+        )
+
+    def repository_search(
+        self,
+        query: Any,
+        revision: Any = None,
+        path_filter: Any = None,
+        case_sensitive: Any = None,
+    ) -> dict[str, Any]:
+        """Where a literal string appears in tracked files at a commit."""
+        return self._object(
+            _with_query(
+                PATH_REPOSITORY_SEARCH,
+                {
+                    "query": query,
+                    "revision": revision,
+                    "path_filter": path_filter,
+                    "case_sensitive": case_sensitive,
+                },
+            )
+        )
+
+    def repository_diff(self, revision: Any, path_filter: Any = None) -> dict[str, Any]:
+        """What one commit changed, against its first parent."""
+        return self._object(
+            _with_query(
+                PATH_REPOSITORY_DIFF,
+                {"revision": revision, "path_filter": path_filter},
+            )
+        )
+
     def _object(self, path: str) -> dict[str, Any]:
         payload = self._transport(path)
         if not isinstance(payload, dict):
@@ -150,3 +248,46 @@ class InvestmentStatusClient:
                 f"{type(payload).__name__}, not an object."
             )
         return payload
+
+
+def _read_detail(exc: urllib.error.HTTPError) -> Optional[str]:
+    """The application's own refusal text, if it sent one.
+
+    Only a FastAPI error body — ``{"detail": "..."}`` with a string — counts.
+    Anything else (an HTML error page from a proxy, an empty 404 from a route
+    that does not exist) returns None, and the caller says the generic thing.
+    Reading the body is best-effort by design: a failure to parse it must not
+    replace the HTTP failure with a parsing failure.
+    """
+    try:
+        payload = json.loads(exc.read() or b"")
+    except Exception:
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("detail"), str):
+        return payload["detail"].strip() or None
+    return None
+
+
+def _with_query(path: str, arguments: Mapping[str, Any]) -> str:
+    """A fixed path with the caller's arguments urlencoded onto it.
+
+    ``path`` is always one of this module's constants and is never built from an
+    argument. Values are dropped when omitted rather than sent empty, so an
+    absent ``revision`` means "the server's default, HEAD" instead of "a
+    revision named ''" — the two get different answers, and only one of them is
+    what the caller meant.
+
+    Booleans are lowercased because that is what FastAPI's bool parser accepts;
+    Python's ``str(True)`` is ``"True"``, which it rejects.
+    """
+    query: dict[str, str] = {}
+    for key, value in arguments.items():
+        if value is None or value == "":
+            continue
+        if isinstance(value, bool):
+            query[key] = "true" if value else "false"
+        else:
+            query[key] = str(value)
+    if not query:
+        return path
+    return f"{path}?{urllib.parse.urlencode(query)}"

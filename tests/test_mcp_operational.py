@@ -6,9 +6,11 @@ Three properties are asserted here that no other test in the tree covers.
   A model reads an advertised tool as a capability and reports its failure as a
   fact about the system; "system health unavailable" and "system health not
   configured" must not arrive by the same route.
-* **The client cannot be aimed.** There is no path argument anywhere between the
-  tool and the HTTP request, so this boundary cannot reach any endpoint of the
-  investment API other than the three named reads.
+* **The client cannot be aimed.** No argument anywhere between a tool and the
+  HTTP request can move the endpoint, so this boundary cannot reach any endpoint
+  of the investment API other than the named reads. Task 279 added three that
+  take arguments — one of them called ``path`` — so that property is now
+  asserted directly rather than implied by the method list.
 * **A failed read is never a healthy answer.** Every failure path is a `ToolError`
   that says nothing was read.
 """
@@ -26,6 +28,9 @@ from vikunja_claude.config import ConfigError, InvestmentConfig
 from vikunja_claude.investment import (
     PATH_PIPELINE,
     PATH_REPOSITORY,
+    PATH_REPOSITORY_DIFF,
+    PATH_REPOSITORY_FILE,
+    PATH_REPOSITORY_SEARCH,
     PATH_SYSTEM_HEALTH,
     READ_PATHS,
     InvestmentStatusClient,
@@ -38,6 +43,7 @@ from vikunja_claude.vikunja import VikunjaClient
 from .fakes import FakeVikunja
 from .support import (
     INVESTMENT_API_KEY,
+    INVESTMENT_API_URL,
     INVESTMENT_TOOLS,
     OPERATIONAL_TOOLS,
     VIKUNJA_TOOLS,
@@ -226,21 +232,74 @@ class TestTheReads(OperationalTestCase):
 # ── the client cannot be aimed ───────────────────────────────────────────────
 
 class TestTheClientSurface(unittest.TestCase):
-    def test_there_are_exactly_three_read_paths(self):
+    def test_the_read_paths_are_a_closed_set(self):
+        """Six named reads, and no seventh arrives except by editing this list."""
         self.assertEqual(
-            set(READ_PATHS), {PATH_REPOSITORY, PATH_PIPELINE, PATH_SYSTEM_HEALTH}
+            set(READ_PATHS),
+            {
+                PATH_REPOSITORY,
+                PATH_PIPELINE,
+                PATH_SYSTEM_HEALTH,
+                PATH_REPOSITORY_FILE,
+                PATH_REPOSITORY_SEARCH,
+                PATH_REPOSITORY_DIFF,
+            },
         )
 
     def test_the_client_exposes_no_way_to_name_a_path(self):
-        """No `get(path)`, so no endpoint of the investment API but these three."""
+        """No `get(path)`, so no endpoint of the investment API but these six."""
         public = {
             name
             for name in dir(InvestmentStatusClient)
             if not name.startswith("_")
         }
         self.assertEqual(
-            public, {"repository_state", "pipeline_status", "system_health"}
+            public,
+            {
+                "repository_state",
+                "pipeline_status",
+                "system_health",
+                "repository_file",
+                "repository_search",
+                "repository_diff",
+            },
         )
+
+    def test_no_argument_can_change_which_endpoint_is_requested(self):
+        """The task 279 reads take arguments; none of them reaches the path.
+
+        This is the assertion the two above used to carry between them by
+        implication. Once a read takes a caller-supplied value — and one of them
+        is even *called* ``path`` — "there is no path parameter" stops being
+        self-evident from the method list, so it is checked directly: whatever
+        the arguments, the URL's path component is one of the constants.
+
+        The values below are chosen to escape if anything concatenated them:
+        an absolute path, a traversal, a second query string and a path that
+        would leave the prefix. They come back urlencoded into the query, and
+        the endpoint is unmoved.
+        """
+        requested: list[str] = []
+
+        def transport(path: str):
+            requested.append(path)
+            return {}
+
+        client = InvestmentStatusClient(
+            INVESTMENT_API_URL, INVESTMENT_API_KEY, transport=transport
+        )
+        hostile = "../../../etc/passwd?x=1#frag"
+        client.repository_file(hostile, revision=hostile)
+        client.repository_search(hostile, path_filter=hostile)
+        client.repository_diff(hostile, path_filter=hostile)
+
+        self.assertEqual(len(requested), 3)
+        for requested_path in requested:
+            endpoint = requested_path.split("?", 1)[0]
+            self.assertIn(endpoint, READ_PATHS)
+            # And the hostile value is present only as an encoded query value.
+            self.assertNotIn("/etc/passwd", requested_path)
+            self.assertIn("%2F", requested_path)
 
     def test_the_client_has_no_write_method(self):
         """Absent, not refused."""

@@ -77,8 +77,20 @@ OPERATIONAL_TOOLS = {
 #: a fourth of a different kind into them would quietly widen what they say.
 PAYING_PAGE_TOOLS = {"fetch_test_paying_page"}
 
+#: The tracked-content reads (task 279). Kept apart from ``OPERATIONAL_TOOLS``
+#: for the same reason ``PAYING_PAGE_TOOLS`` is: those three take no arguments
+#: and report status, these three take a path, a literal or a commit and return
+#: repository content. The assertions naming the operational set are about
+#: *those three*, and folding a different kind of read into them would quietly
+#: widen what they say.
+REPOSITORY_CONTENT_TOOLS = {
+    "read_repository_file",
+    "search_repository_text",
+    "read_repository_commit_diff",
+}
+
 #: Everything the investment admin instance's settings switch on at once.
-INVESTMENT_TOOLS = OPERATIONAL_TOOLS | PAYING_PAGE_TOOLS
+INVESTMENT_TOOLS = OPERATIONAL_TOOLS | PAYING_PAGE_TOOLS | REPOSITORY_CONTENT_TOOLS
 
 #: The public website half (task 204). Advertised only when the public site URL
 #: is configured, and separately from the operational reads — the two settings

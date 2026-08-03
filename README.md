@@ -276,6 +276,15 @@ Plus three **operational reads**, present only when they are configured (see
 | `get_pipeline_status()` | The latest nightly-pipeline run: status, every stage's own outcome, what S7 did, whether each portfolio got a report |
 | `get_system_health()` | Backup age, disks, Docker, scheduled jobs, database and API, with one folded overall status |
 
+Plus three **tracked-content reads**, present whenever the operational reads are
+(see [Reading tracked Git content](#reading-tracked-git-content) below):
+
+| Tool | Does |
+|---|---|
+| `read_repository_file(path, revision?, start_line?, end_line?)` | One tracked text file of the investment repository at HEAD or at a commit you name |
+| `search_repository_text(query, revision?, path_filter?, case_sensitive?)` | Where a **literal** string appears in tracked files, with paths and line numbers |
+| `read_repository_commit_diff(revision, path_filter?)` | What one commit changed, against its first parent — including commits that were never pushed |
+
 Plus one **public page fetch**, present only when it is configured (see
 [Public page fetch](#public-page-fetch-website-review) below):
 
@@ -787,6 +796,45 @@ discovering from a page of login redirects.
 ${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env   # remove the setting
 systemctl --user restart vikunja-claude-mcp            # the tool disappears
 ```
+
+### Reading tracked Git content
+
+Three read-only tools — `read_repository_file`, `search_repository_text` and
+`read_repository_commit_diff` — that let a ticket review inspect the
+implementation being claimed instead of stopping at the completion comment.
+`get_repository_state` already says *that* the checkout is on commit X; these
+say what is in it. A GitHub connector would not do the job, because AI Alpha
+Engine commits are usually local and never pushed.
+
+**Almost none of this is here either.** These are one GET each to a fixed
+endpoint of the admin instance. Which revisions resolve, which paths are denied,
+what counts as binary, what gets redacted and where the limits sit are all
+decided by `api/repository_read.py` in the investment repository, beside the
+files they are about. Re-deciding any of it here would create a second boundary
+that can drift from the one that actually guards them.
+
+What that boundary holds, in short:
+
+- **It reads Git objects, never the filesystem.** So an untracked file, an
+  uncommitted edit and a file outside the repository are invisible by
+  construction rather than by refusal, and a symlink cannot be followed out.
+- **A revision is a commit id or `HEAD`** — never a branch, tag or expression
+  like `HEAD~3` — and it must be reachable from a local branch. An unpushed
+  task-branch commit works; one that only the reflog remembers does not.
+- **`.env` files, credentials, keys, certificates, databases, backups, logs,
+  uploads and run artefacts are refused by path**, including per file inside a
+  diff, where the caller does not choose the paths. Refused and binary files are
+  *named* with a reason rather than silently dropped.
+- **Secret-looking values are redacted** on the way out of all three, and the
+  count comes back with the result.
+- **Search is fixed-string.** A caller-supplied regular expression is a program,
+  and running one over a whole tree is its own denial-of-service.
+- **Every limit is reported** beside the result it bounded, so a truncated
+  answer is never mistaken for a complete one.
+
+The three tools appear whenever the operational reads are configured — same
+credential, same admin instance, no third switch. The endpoints they call are
+registered on the admin instance only, so on the public one they do not exist.
 
 ### Reading the site as the test paying user
 
