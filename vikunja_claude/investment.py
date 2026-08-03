@@ -41,6 +41,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from http import HTTPStatus
 from typing import Any, Callable, Mapping, Optional
 
 #: The reads, named once. Adding another is an edit here and a tool there.
@@ -254,18 +255,36 @@ def _read_detail(exc: urllib.error.HTTPError) -> Optional[str]:
     """The application's own refusal text, if it sent one.
 
     Only a FastAPI error body — ``{"detail": "..."}`` with a string — counts.
-    Anything else (an HTML error page from a proxy, an empty 404 from a route
-    that does not exist) returns None, and the caller says the generic thing.
-    Reading the body is best-effort by design: a failure to parse it must not
-    replace the HTTP failure with a parsing failure.
+    An HTML error page from a proxy, or an empty body, returns None and the
+    caller says the generic thing. Reading the body is best-effort by design: a
+    failure to parse it must not replace the HTTP failure with a parsing
+    failure.
+
+    **A generic phrase is not a reason.** Starlette answers a request for a route
+    it does not have with ``{"detail": "Not Found"}`` — a body, and a useless
+    one. Taken as the application's reason it would replace the diagnosis that
+    matters for exactly that case ("the admin instance is running code from
+    before these endpoints existed, and has not been restarted") with the word
+    "Not Found". So a detail equal to the status code's own reason phrase is
+    treated as no detail at all. Derived from :mod:`http` rather than listed,
+    because that is where Starlette gets it too.
     """
     try:
         payload = json.loads(exc.read() or b"")
     except Exception:
         return None
-    if isinstance(payload, dict) and isinstance(payload.get("detail"), str):
-        return payload["detail"].strip() or None
-    return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("detail"), str):
+        return None
+    detail = payload["detail"].strip()
+    if not detail:
+        return None
+    try:
+        generic = HTTPStatus(exc.code).phrase
+    except ValueError:
+        generic = ""
+    if detail.casefold() == generic.casefold():
+        return None
+    return detail
 
 
 def _with_query(path: str, arguments: Mapping[str, Any]) -> str:

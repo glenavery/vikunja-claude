@@ -413,6 +413,48 @@ class TestRefusalsCarryTheirReason(RepositoryContentTestCase):
         without_detail = self._client_error(404, b"")
         self.assertIn("INSTANCE_MODE", without_detail)
 
+    def test_starlettes_generic_not_found_body_is_not_treated_as_a_reason(self):
+        """The absent-route 404 has a body, and it says nothing.
+
+        A request for a route the app does not have is answered
+        ``{"detail": "Not Found"}`` — verified against a live public-mode
+        instance, which is where this case actually arises, because these
+        endpoints are registered on the admin instance only. Taken as the
+        application's own reason it replaces the diagnosis that matters for
+        exactly that case with the words "Not Found", and the stale-deployment
+        cause task 138 learned to name goes missing. That is a regression in the
+        *existing* reads, not only the new ones, which is why it is asserted for
+        both.
+        """
+        message = self._client_error(404, b'{"detail": "Not Found"}')
+
+        self.assertIn("INSTANCE_MODE", message)
+        self.assertNotIn("found nothing to read", message)
+
+    def test_the_same_holds_for_the_pre_existing_reads(self):
+        """Task 279 must not change what the task 138 reads say when they fail."""
+        client = InvestmentStatusClient(INVESTMENT_API_URL, INVESTMENT_API_KEY)
+
+        def fake_urlopen(request, timeout=None):
+            raise self._http_error(404, b'{"detail": "Not Found"}')
+
+        with mock.patch.object(urllib.request, "urlopen", fake_urlopen):
+            for read in (
+                client.repository_state,
+                client.pipeline_status,
+                client.system_health,
+            ):
+                with self.assertRaises(InvestmentStatusError) as caught:
+                    read()
+                self.assertIn("INSTANCE_MODE", str(caught.exception))
+
+    def test_a_generic_phrase_for_another_status_is_also_not_a_reason(self):
+        """Derived from the status code, not from a list containing 'Not Found'."""
+        message = self._client_error(500, b'{"detail": "Internal Server Error"}')
+
+        self.assertIn("500", message)
+        self.assertNotIn("Internal Server Error:", message)
+
     def test_an_unparseable_body_does_not_replace_the_http_failure(self):
         message = self._client_error(400, b"<html>gateway said no</html>")
 
