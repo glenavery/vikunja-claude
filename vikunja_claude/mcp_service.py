@@ -449,6 +449,51 @@ class McpService:
         except InvestmentStatusError as exc:
             raise ToolError(str(exc)) from exc
 
+    # -- tracked Git content (task 279) ------------------------------------
+    #
+    # These three decide nothing. Which revisions resolve, which paths are
+    # denied, what counts as binary, what is redacted and where the limits sit
+    # are all decided by `api/repository_read.py` in the investment repository,
+    # and its refusals arrive here as `InvestmentStatusError` carrying its own
+    # reason. Re-checking any of it here would be a second boundary that can
+    # disagree with the one that actually guards the files.
+
+    def repository_file(
+        self,
+        path: Any,
+        revision: Any = None,
+        start_line: Any = None,
+        end_line: Any = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._investment().repository_file(
+                path, revision, start_line, end_line
+            )
+        except InvestmentStatusError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def repository_search(
+        self,
+        query: Any,
+        revision: Any = None,
+        path_filter: Any = None,
+        case_sensitive: Any = None,
+    ) -> dict[str, Any]:
+        try:
+            return self._investment().repository_search(
+                query, revision, path_filter, case_sensitive
+            )
+        except InvestmentStatusError as exc:
+            raise ToolError(str(exc)) from exc
+
+    def repository_diff(
+        self, revision: Any, path_filter: Any = None
+    ) -> dict[str, Any]:
+        try:
+            return self._investment().repository_diff(revision, path_filter)
+        except InvestmentStatusError as exc:
+            raise ToolError(str(exc)) from exc
+
     # -- the public website (task 204) --------------------------------------
 
     def _site(self) -> PublicSiteClient:
@@ -1014,8 +1059,195 @@ class McpService:
         return [
             *self._vikunja_tools(),
             *self._operational_tools(),
+            *self._repository_content_tools(),
             *self._website_tools(),
             *self._paying_page_tools(),
+        ]
+
+    def _repository_content_tools(self) -> list[Tool]:
+        """The three tracked-content reads, or nothing at all when unconfigured.
+
+        They ride on the operational reads' setting, like the paying-page read
+        does: it is the same key to the same admin instance, and a second switch
+        here would be a second source of truth about whether that instance is
+        reachable.
+        """
+        if not self.operational_reads_enabled:
+            return []
+
+        # Said once, in every one of the three descriptions. The single most
+        # important thing for a model to know about these tools is what they are
+        # a view of — "the repository at a commit" and not "the server's disk" —
+        # because that is the distinction that decides whether it reasons about
+        # a path it can have or a path it cannot.
+        source_note = (
+            "Results come from tracked Git content at a resolved commit in the "
+            "AI Server investment repository — not from arbitrary server "
+            "filesystem access. Uncommitted edits, untracked files and files "
+            "outside the repository are invisible here, and .env files, "
+            "credentials, keys, certificates, databases, backups, logs, "
+            "uploads and run artefacts are refused by path. Secret-looking "
+            "values are redacted before anything is returned. Read-only."
+        )
+        revision_note = (
+            "A commit id (7-40 hex characters) that some local branch reaches. "
+            "Omit it for the current HEAD. Local commits that were never pushed "
+            "work fine — that is what this is for. Branch names, tags and Git "
+            "revision expressions ('HEAD~3', 'main^', '@{yesterday}') are "
+            "refused; resolve those yourself and pass the id."
+        )
+
+        return [
+            Tool(
+                name="read_repository_file",
+                title="Read one tracked file from the AI Server repository",
+                description=(
+                    "Read one tracked text file by repository-relative path, at "
+                    "HEAD or at a commit you name — for example "
+                    '"api/repository_read.py". Use it to inspect the actual '
+                    "implementation behind a ticket's completion claim rather "
+                    "than taking the claim at face value. Supply start_line and "
+                    "end_line to read part of a large file; the response always "
+                    "reports the file's own total_lines, so a partial read is "
+                    "recognisable as one. The resolved 40-character commit is in "
+                    "every response. Binary files, symlinks and directories are "
+                    "refused. " + source_note
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": (
+                                "A repository-relative path, e.g. "
+                                '"api/routes/operational.py". Absolute paths and '
+                                '".." are refused.'
+                            ),
+                        },
+                        "revision": {"type": "string", "description": revision_note},
+                        "start_line": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "First line to return (1-based).",
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "description": "Last line to return (1-based).",
+                        },
+                    },
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.repository_file(
+                    arguments.get("path"),
+                    arguments.get("revision"),
+                    arguments.get("start_line"),
+                    arguments.get("end_line"),
+                ),
+            ),
+            Tool(
+                name="search_repository_text",
+                title="Search the AI Server repository for literal text",
+                description=(
+                    "Find where a literal string appears in tracked files, at "
+                    "HEAD or at a commit you name, and get back the file paths "
+                    "and line numbers with the matching lines. Use it to locate "
+                    "an implementation, check whether a symbol is still "
+                    "referenced, or find the tests covering a change. The query "
+                    "is matched as **fixed text, not a regular expression** — "
+                    "'.*' looks for a literal '.*' — and it is not a command. "
+                    "Narrow it with path_filter to a directory ('api/routes') or "
+                    "a simple pattern ('api/*.py'). Results are capped per file "
+                    "and overall, and the response says when it was cut. "
+                    + source_note
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": (
+                                "The literal text to find. At least 3 "
+                                "characters. Not a regular expression."
+                            ),
+                        },
+                        "revision": {"type": "string", "description": revision_note},
+                        "path_filter": {
+                            "type": "string",
+                            "description": (
+                                "Narrow to a repository-relative directory "
+                                "('api/routes') or a simple pattern "
+                                "('api/*.py', '*.md')."
+                            ),
+                        },
+                        "case_sensitive": {
+                            "type": "boolean",
+                            "description": "Match case exactly. Defaults to true.",
+                        },
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.repository_search(
+                    arguments.get("query"),
+                    arguments.get("revision"),
+                    arguments.get("path_filter"),
+                    arguments.get("case_sensitive"),
+                ),
+            ),
+            Tool(
+                name="read_repository_commit_diff",
+                title="Read what one AI Server commit changed",
+                description=(
+                    "Read the changes one commit introduced, against its first "
+                    "parent: the list of files with their added/deleted line "
+                    "counts, and the text patch. Use it to review the work a "
+                    "ticket's commit actually did — it works for local commits "
+                    "that were never pushed, and it keeps working after later "
+                    "commits have landed on main, which is the case a GitHub "
+                    "connector cannot serve. Get the commit id from "
+                    "get_repository_state or from the ticket's completion "
+                    "comment. Merge commits are compared against their first "
+                    "parent and say so (`is_merge`). Every changed file is "
+                    "listed even when its patch is not included; binary and "
+                    "refused files carry an `omitted_reason` instead of "
+                    "content. " + source_note
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "revision": {"type": "string", "description": revision_note},
+                        "path_filter": {
+                            "type": "string",
+                            "description": (
+                                "Narrow the diff to a repository-relative "
+                                "directory or a simple pattern."
+                            ),
+                        },
+                    },
+                    "required": ["revision"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.repository_diff(
+                    arguments.get("revision"), arguments.get("path_filter")
+                ),
+            ),
         ]
 
     def _paying_page_tools(self) -> list[Tool]:
