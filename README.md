@@ -241,11 +241,16 @@ Decide that consciously; the service will not decide it for you.
 
 ## The MCP boundary (ChatGPT)
 
-A second, separate service that lets ChatGPT **read the board**, **create a
-ticket**, **correct a ticket's wording**, **comment on one**, **read a few
-operational facts about the AI Server** and **read a public page of its
+A second, separate service that lets an outside assistant **read the board**,
+**create a ticket**, **correct a ticket's wording**, **comment on one**, **read
+a few operational facts about the AI Server** and **read a public page of its
 website** — so project context does not have to be pasted in by hand, and a
 ticket dictated in a conversation does not have to be retyped onto the board.
+
+It was built for ChatGPT and the heading keeps that name because the published
+`service_documentation` metadata links to this anchor, but the boundary is not
+ChatGPT-specific: Claude connects to the same endpoint as a custom connector.
+Only registration distinguishes them — see *Authentication* below.
 
 It is a different unit on a different port with a different credential, and it
 shares nothing with the launcher but the Vikunja settings. Stopping it stops
@@ -470,6 +475,20 @@ What holds:
   submitted URI** is then stored on the client, and a second connector's
   callback — a perfectly valid shape in its own right — is refused for the first
   connector's client. The configured list (below) is still matched exactly.
+- **Every other client has to be named in configuration**, because that shape is
+  ChatGPT's and nothing else is admitted by form. Claude's connector registers
+  `https://claude.ai/api/mcp/auth_callback` (measured 2026-08-05 against the live
+  deployment; the `claude.com` spelling registers happily if listed, but is not
+  what claude.ai sends), so it works only once that URI is in
+  `VIKUNJA_MCP_OAUTH_REDIRECT_URIS`. Setting that variable **replaces** the
+  default rather than adding to it, so ChatGPT's fixed callback has to be listed
+  alongside anything new or that connector silently stops being able to register.
+- **A refusal here reaches the operator as whatever the client decides to say.**
+  claude.ai reports only "Couldn't register with … sign-in service" and an
+  opaque reference id; the access log records `POST /oauth/register 400` and no
+  body. The actual reason — `invalid_redirect_uri`, and the permitted list — is
+  in the response body, so reproduce the registration with `curl` rather than
+  reading the log and guessing.
 - **A code is single use**, lives 60 seconds, and is bound to the client, the
   redirect URI, the challenge and the resource. Redeeming one twice fails *and*
   revokes every token the first redemption issued — a replayed code means it
@@ -510,7 +529,7 @@ VIKUNJA_MCP_OAUTH_PASSPHRASE=<the value generated above>
 |---|---|
 | `VIKUNJA_MCP_OAUTH_ISSUER` | **Required.** Public HTTPS base URL. Every metadata document is published under it and tokens are bound to `<issuer>/mcp`. Must be `https` unless it is loopback |
 | `VIKUNJA_MCP_OAUTH_PASSPHRASE` | **Required.** At least 32 characters. Typed at the consent screen; five wrong answers lock it for five minutes |
-| `VIKUNJA_MCP_OAUTH_REDIRECT_URIS` | Optional. Space- or comma-separated exact URIs. Defaults to `https://chatgpt.com/connector_platform_oauth_redirect`. ChatGPT's per-connector callback is admitted by shape as well and needs no entry here |
+| `VIKUNJA_MCP_OAUTH_REDIRECT_URIS` | Optional. Space- or comma-separated exact URIs. Defaults to `https://chatgpt.com/connector_platform_oauth_redirect`, and **setting it replaces that default** — list the ChatGPT callback again alongside whatever you add. ChatGPT's per-connector callback is admitted by shape as well and needs no entry here; every other client does need one, e.g. `https://claude.ai/api/mcp/auth_callback` for Claude |
 | `VIKUNJA_MCP_OAUTH_CLIENT_ID` / `_SECRET` | Optional. A pre-registered client, for a ChatGPT dialog that insists on a client id instead of registering one itself |
 
 The server refuses to start if the issuer or the passphrase is missing, blank,
@@ -569,6 +588,16 @@ ChatGPT opens the consent screen in a browser. It names the three operations and
 asks for the passphrase; approving returns a code and the connector finishes.
 **Never choose "no authentication"** — an open write path into the board is
 worse than pasting tickets by hand.
+
+**Claude** connects the same way: claude.ai → Settings → Connectors → Add custom
+connector, the same `<issuer>/mcp` URL, client id and secret left blank. The one
+prerequisite is configuration rather than anything in the dialog — its callback
+must already be in `VIKUNJA_MCP_OAUTH_REDIRECT_URIS`, because registration
+happens before the consent screen and fails without ever showing it. Then the
+same passphrase gates approval. A completed flow leaves a client named `Claude`
+in the OAuth state file holding an access and a refresh token, which is how you
+confirm it from this side; the file also names the redirect URI that was
+actually used, so an unused spelling can be dropped from the list afterwards.
 
 Verify the boundary from the command line first, which is faster than debugging
 in a chat window. An unauthenticated call must be refused, and must say where a
