@@ -40,6 +40,9 @@ th { color:var(--muted); font-weight:500; width:10rem; }
        border-radius:999px; font-size:.8rem; margin-right:.3rem; }
 .warn { border-left:3px solid #c9812f; padding:.6rem .9rem; background:var(--panel);
         border-radius:0 6px 6px 0; margin:1rem 0; }
+.comment { border-left:3px solid var(--accent); padding:0 0 0 .9rem; margin:1rem 0; }
+.comment .sub { margin:0 0 .35rem; font-size:.85rem; }
+.comment pre { margin:0; }
 #out:empty { display:none; }
 """
 
@@ -134,6 +137,31 @@ here straight from a Vikunja task.</p>
     )
 
 
+def comments_html(comments) -> str:
+    """A task's comments, oldest first.
+
+    "No comments yet" is written out rather than left blank. Blank is what the
+    page showed while it did not read comments at all, so an empty section
+    would be indistinguishable from the feature being absent -- which is the
+    condition this replaces.
+
+    Bodies arrive as text flattened from the Vikunja editor's HTML and are
+    escaped here. They are the one part of this page that a person other than
+    the operator wrote.
+    """
+    if not comments:
+        return "<p class=\"sub\">No comments yet.</p>"
+    items = []
+    for comment in comments:
+        who = escape(str(comment.get("author") or "unknown"))
+        when = escape(str(comment.get("created") or ""))
+        items.append(
+            f"<div class=\"comment\"><p class=\"sub\">{who} &middot; {when}</p>"
+            f"<pre>{escape(comment.get('text') or '')}</pre></div>"
+        )
+    return "".join(items)
+
+
 def ticket_page(data: dict) -> str:
     task_id = escape(str(data["task_id"]))
     reference = escape(str(data["reference"]))
@@ -162,6 +190,8 @@ task id {task_id}</p>
 </table>
 <h2>Description</h2>
 <pre>{escape(data['description'] or '(none)')}</pre>
+<h2>Comments</h2>
+{comments_html(data.get('comments'))}
 <h2>Generated prompt</h2>
 <pre>{escape(data['prompt'])}</pre>
 <div class="row">

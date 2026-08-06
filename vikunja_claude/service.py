@@ -64,6 +64,11 @@ class TicketService:
             "description": ticket.description,
             "prompt": self.prompt_for(ticket),
             "running": active,
+            # The ticket as it stands NOW, not as it was filed. A comment is
+            # where the filer corrects or redirects a brief mid-flight, and a
+            # preview that showed only the description let a run work from a
+            # version the human had already moved on from.
+            "comments": self.client.comment_views(ticket.task_id),
         }
 
     # -- action ------------------------------------------------------------

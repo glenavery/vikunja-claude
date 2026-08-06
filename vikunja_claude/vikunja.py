@@ -19,6 +19,28 @@ from .html_text import html_to_text
 # A ticket number is the "#NN" prefix of the Vikunja task title.
 TICKET_RE = re.compile(r"^\s*#(\d+)(?:\b|\s|$)")
 
+# What a comment looks like once it leaves this module. Named here so the three
+# read surfaces -- `vkctl.py show`, the /task page, and the MCP's get_task --
+# agree on the fields rather than each deriving its own from the raw API row.
+# It is a projection for the same reason the MCP boundary projects everything
+# else: a field Vikunja adds upstream is not published to a caller by accident.
+COMMENT_FIELDS = ("id", "author", "created", "text")
+
+
+def comment_view(row: dict[str, Any]) -> dict[str, Any]:
+    """One raw comment row, reduced to the published shape.
+
+    `text` is flattened out of the editor's HTML. Callers that render into a
+    page must still escape it -- this makes the body readable, it does not make
+    it safe to interpolate.
+    """
+    return {
+        "id": row.get("id"),
+        "author": (row.get("author") or {}).get("username"),
+        "created": row.get("created"),
+        "text": html_to_text(row.get("comment") or ""),
+    }
+
 # Vikunja pages tasks *inside* each kanban bucket, and the page size is its own:
 # `per_page` is accepted and ignored on this endpoint. Measured against the live
 # board, a bucket holding 170 tasks answers with 50 and reports `count: 170`.
@@ -426,6 +448,16 @@ class VikunjaClient:
         if not isinstance(comments, list):
             raise VikunjaError(f"GET /tasks/{task_id}/comments did not return a list")
         return comments
+
+    def comment_views(self, task_id: int) -> list[dict[str, Any]]:
+        """A task's comments, projected, oldest first.
+
+        The form every read surface should use. `list_comments` returns raw API
+        rows and stays available for a caller that genuinely needs one -- the
+        idempotency check in `mcp_service` does -- but a surface that *shows*
+        comments wants them projected, and there is one definition of that.
+        """
+        return [comment_view(row) for row in self.list_comments(task_id)]
 
     # -- task mutation -----------------------------------------------------
     #

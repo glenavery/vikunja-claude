@@ -207,7 +207,7 @@ class McpService:
         project_id, view_id = self._ids()
         try:
             ticket = self.client.find_by_task_id(task_id, project_id, view_id)
-            comments = self.client.list_comments(task_id)
+            comments = self.client.comment_views(task_id)
         except VikunjaError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -225,15 +225,7 @@ class McpService:
             "project": self.config.project_title,
             "project_id": project_id,
             "url": ticket.url(self.config.frontend_url),
-            "comments": [
-                {
-                    "id": comment.get("id"),
-                    "author": (comment.get("author") or {}).get("username"),
-                    "created": comment.get("created"),
-                    "text": html_to_text(comment.get("comment") or ""),
-                }
-                for comment in comments
-            ],
+            "comments": comments,
         }
 
     def list_open_tasks(
