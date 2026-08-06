@@ -188,17 +188,42 @@ class TheMcpTool(McpTestCase):
         self.assertIn("`vikunja-db`", payload["comments"][0]["text"])
 
 
-class TheCliOutput(ServiceTestCase):
+class CliTestCase(ServiceTestCase):
+    """Drives `vkctl show` itself, not the helper it calls.
+
+    The first version of these tests called `_print_comments` directly and
+    reproduced what `show` does around it. That passes with the call site
+    DELETED from `show` -- it measured the helper and called it the command,
+    which is the same class of mistake as asserting a constant instead of the
+    served page. So `main()` is invoked for real, with only the config and the
+    transport substituted.
+    """
+
+    def run_vkctl(self, *argv: str) -> tuple[int, str]:
+        import vkctl
+
+        config, client = self.config, self.client
+        original_from_env = vkctl.Config.from_env
+        original_client = vkctl.VikunjaClient
+        vkctl.Config.from_env = staticmethod(lambda *a, **kw: config)
+        vkctl.VikunjaClient = lambda *a, **kw: client
+        out = io.StringIO()
+        try:
+            with redirect_stdout(out):
+                code = vkctl.main(list(argv))
+        finally:
+            vkctl.Config.from_env = original_from_env
+            vkctl.VikunjaClient = original_client
+        return code, out.getvalue()
+
+
+class TheCliOutput(CliTestCase):
     comments = COMMENTS
 
     def _show(self, task_id: int) -> str:
-        import vkctl
-        ticket = self.service.get_task(task_id)
-        out = io.StringIO()
-        with redirect_stdout(out):
-            print(ticket.description)
-            vkctl._print_comments(self.client.comment_views(ticket.task_id))
-        return out.getvalue()
+        code, text = self.run_vkctl("show", "--task", str(task_id))
+        self.assertEqual(code, 0, text)
+        return text
 
     def test_show_prints_each_comment_with_its_author_and_time(self):
         text = self._show(9)
@@ -218,15 +243,13 @@ class TheCliOutput(ServiceTestCase):
         self.assertLess(text.index("authoritative"), text.index("comments (2):"))
 
 
-class TheCliOutputWithoutComments(ServiceTestCase):
+class TheCliOutputWithoutComments(CliTestCase):
     def test_show_says_none_rather_than_printing_nothing(self):
         """The other half of the regression test. `show` printing nothing is
         precisely what it did before it read comments at all."""
-        import vkctl
-        out = io.StringIO()
-        with redirect_stdout(out):
-            vkctl._print_comments(self.client.comment_views(9))
-        self.assertIn("comments: (none)", out.getvalue())
+        code, text = self.run_vkctl("show", "--task", "9")
+        self.assertEqual(code, 0, text)
+        self.assertIn("comments: (none)", text)
 
 
 class TheReadsStayReads(ServiceTestCase):
