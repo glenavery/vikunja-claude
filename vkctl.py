@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"bucket: {ticket.bucket_title}  task id: {ticket.task_id}")
             print()
             print(ticket.description)
+            _print_comments(client.comment_views(ticket.task_id))
         elif args.command == "comment":
             client.add_comment(ticket.task_id, args.text)
             print(f"commented on {ticket.reference} (task {ticket.task_id})")
@@ -114,6 +115,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"vikunja error: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _print_comments(comments: list[dict]) -> None:
+    """Print a task's comments under `show`, oldest first.
+
+    "(no comments)" is printed rather than nothing. Printing nothing is exactly
+    what this command did while it never read comments at all, so a silent tail
+    would leave a reader unable to tell an uncommented ticket from a stale
+    build of this script -- which is how the gap survived long enough to become
+    lore ("check comments via the API, the page renders none").
+    """
+    print()
+    print(f"comments ({len(comments)}):" if comments else "comments: (none)")
+    for comment in comments:
+        who = comment.get("author") or "unknown"
+        print()
+        print(f"--- {comment.get('created')} by {who} (comment {comment.get('id')})")
+        print(comment.get("text") or "")
 
 
 def _read_html(path: str) -> str:

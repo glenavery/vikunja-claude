@@ -427,6 +427,7 @@ class ServiceTestCase(unittest.TestCase):
     """A TicketService wired to fakes, with a throwaway state directory."""
 
     layout = None
+    comments: dict | None = None
     vikunja_fail: Exception | None = None
 
     def setUp(self) -> None:
@@ -434,7 +435,9 @@ class ServiceTestCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.state_dir = Path(self._tmp.name)
         self.config = make_config(self.state_dir)
-        self.vikunja = FakeVikunja(layout=self.layout, fail=self.vikunja_fail)
+        self.vikunja = FakeVikunja(
+            layout=self.layout, fail=self.vikunja_fail, comments=self.comments
+        )
         self.client = VikunjaClient(
             self.config.api_url, self.config.token, transport=self.vikunja
         )
