@@ -11,6 +11,7 @@ from __future__ import annotations
 import unittest
 import urllib.parse
 
+from vikunja_claude.mcp import ToolError
 from vikunja_claude.mcp_service import McpService, SEARCH_STATUSES
 from vikunja_claude.vikunja import OPEN_TASKS_FILTER, VikunjaClient
 
@@ -149,12 +150,22 @@ class TestWhatItRefuses(SearchTestCase):
         self.assertIn("error", response)
         self.assertIn("text", response["error"]["message"])
 
-    def test_the_project_cannot_be_named_by_the_caller(self):
-        """One configured board. A project argument would be a wider read."""
+    def test_the_project_is_chosen_from_the_approved_set_not_supplied(self):
+        """The caller picks an approved board; it cannot name any other.
+
+        The selector is an id out of a configured tuple, so widening it is a
+        configuration change rather than an argument. There is still no way to
+        name a board by title or to smuggle one past the schema.
+        """
         tool = next(t for t in self.service.tools() if t.name == "search_tasks")
-        self.assertNotIn("project_id", tool.input_schema["properties"])
+        self.assertIn("project_id", tool.input_schema["properties"])
         self.assertNotIn("project", tool.input_schema["properties"])
         self.assertIs(tool.input_schema["additionalProperties"], False)
+
+        with self.assertRaises(ToolError) as caught:
+            self.service.search_tasks("architecture", project_id=1)
+        self.assertIn("1", str(caught.exception))
+        self.assertIn("may touch", str(caught.exception))
 
     def test_the_text_never_reaches_vikunjas_filter_language(self):
         """Matching happens in Python, so the query can only be a substring.

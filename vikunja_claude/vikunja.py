@@ -153,8 +153,12 @@ class VikunjaClient:
         self._token = token
         self._timeout = timeout
         self._transport = transport or self._http
-        self._project_id: int | None = None
-        self._kanban_view_id: int | None = None
+        # Keyed, not single-slot. One client now serves more than one board,
+        # and a lone cache slot would answer the second board's question with
+        # the first board's answer — a well-formed reply about the wrong
+        # project, which nothing downstream could tell from a right one.
+        self._project_ids: dict[str, int] = {}
+        self._projects: dict[int, dict[str, Any]] = {}
 
     # -- transport ---------------------------------------------------------
 
@@ -201,7 +205,7 @@ class VikunjaClient:
     def project_id(self, title: str, override: int | None = None) -> int:
         if override is not None:
             return override
-        if self._project_id is None:
+        if title not in self._project_ids:
             projects = self.call("GET", "/projects") or []
             matches = [p for p in projects if p.get("title") == title]
             if not matches:
@@ -209,18 +213,44 @@ class VikunjaClient:
                 raise VikunjaError(
                     f"No Vikunja project titled {title!r}. Known projects: {known}"
                 )
-            self._project_id = int(matches[0]["id"])
-        return self._project_id
+            self._project_ids[title] = int(matches[0]["id"])
+        return self._project_ids[title]
+
+    def _project(self, project_id: int) -> dict[str, Any]:
+        """``GET /projects/{id}``, once per project.
+
+        An empty reply is not remembered: a Vikunja that answers nothing is
+        broken now, and keeping that answer would leave the project unreadable
+        for the life of the process. One branch decides it — a stored empty
+        payload is indistinguishable from an unasked one, which is what makes
+        the next call re-ask.
+        """
+        if not self._projects.get(project_id):
+            self._projects[project_id] = (
+                self.call("GET", f"/projects/{project_id}") or {}
+            )
+        return self._projects[project_id]
+
+    def project_title(self, project_id: int) -> str:
+        """What Vikunja calls this id.
+
+        The other direction from :meth:`project_id`, and it exists so a caller
+        holding a configured id can check that the board on the other end is
+        still the board that id was approved for.
+        """
+        title = self._project(project_id).get("title")
+        if not title:
+            raise VikunjaError(
+                f"Vikunja served no title for project {project_id}"
+            )
+        return str(title)
 
     def kanban_view_id(self, project_id: int) -> int:
-        if self._kanban_view_id is None:
-            project = self.call("GET", f"/projects/{project_id}") or {}
-            views = project.get("views") or []
-            kanban = [v for v in views if v.get("view_kind") == "kanban"]
-            if not kanban:
-                raise VikunjaError(f"Project {project_id} has no kanban view")
-            self._kanban_view_id = int(kanban[0]["id"])
-        return self._kanban_view_id
+        views = self._project(project_id).get("views") or []
+        kanban = [v for v in views if v.get("view_kind") == "kanban"]
+        if not kanban:
+            raise VikunjaError(f"Project {project_id} has no kanban view")
+        return int(kanban[0]["id"])
 
     # -- tickets -----------------------------------------------------------
 

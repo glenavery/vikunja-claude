@@ -376,12 +376,30 @@ class TestTheAuthorizationRequest(HttpTestCase):
         )
 
     def test_the_consent_screen_states_exactly_what_is_granted(self):
+        """Every board the token reaches, and every verb it can use.
+
+        Both halves are asserted because either one alone would let the screen
+        understate the grant. It previously said the token could not edit or
+        comment, which stopped being true when task 196 added those two behind
+        their approval step — a consent screen that undersells the grant is the
+        same defect as one that oversells it.
+        """
         status, _, page = self.get_authorize()
         self.assertEqual(status, 200)
-        self.assertIn("read", page)
-        self.assertIn("create", page)
-        self.assertIn("AI Alpha Engine", page)
-        self.assertIn("cannot edit, close, delete, comment on or move", page)
+        for verb in ("read", "list", "search", "create", "edit", "comment"):
+            with self.subTest(verb=verb):
+                self.assertIn(verb, page)
+        for board in ("AI Alpha Engine", "AI Alpha Trader"):
+            with self.subTest(board=board):
+                self.assertIn(board, page)
+        self.assertIn("cannot close, delete, move, label", page)
+        self.assertIn("approval", page)
+
+    def test_the_consent_screen_names_no_board_it_cannot_reach(self):
+        """The screen is rendered from the same configured set the tools enforce."""
+        _, _, page = self.get_authorize()
+        self.assertNotIn("Inbox", page)
+        self.assertIn(self.config.projects_phrase, page)
 
     def test_the_consent_screen_asks_for_the_passphrase_and_never_shows_it(self):
         _, _, page = self.get_authorize()

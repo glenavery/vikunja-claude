@@ -319,7 +319,7 @@ def main() -> int:
     )
     print(
         f"vikunja-claude-mcp listening on http://{config.host}:{config.port}/mcp "
-        f"— project {config.project_title!r}, OAuth issuer {config.oauth.issuer}, "
+        f"— projects {config.projects_phrase}, OAuth issuer {config.oauth.issuer}, "
         f"{operational}, {page_fetch}",
         flush=True,
     )

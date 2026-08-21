@@ -26,6 +26,8 @@ DEFAULT_API_URL = "http://127.0.0.1:3456/api/v1"
 DEFAULT_FRONTEND_URL = "http://127.0.0.1:3456"
 DEFAULT_PROJECT = "AI Alpha Engine"
 
+VIKUNJA_MCP_PROJECTS_ENV = "VIKUNJA_MCP_PROJECTS"
+
 # Where ChatGPT sends the browser back to after the operator approves. It is a
 # default rather than a required setting because it is a property of ChatGPT,
 # not of this deployment — but it is still matched exactly, and anything else
@@ -123,6 +125,39 @@ class ConfigError(RuntimeError):
     """Raised when the service is not configured well enough to start."""
 
 
+@dataclass(frozen=True)
+class ProjectRef:
+    """One approved board: the id a caller names, and the title it must have.
+
+    Both halves are held because each one checks the other. The id is what a
+    caller sends and what every request is built from, so it has to be a
+    number this boundary published rather than one it discovered. The title
+    is what the board is called, and comparing it against what Vikunja serves
+    for that id is how a project that has been renumbered, deleted and
+    recreated, or repointed is refused instead of quietly read as the one
+    that was approved.
+    """
+
+    project_id: int
+    title: str
+
+
+#: The boards the MCP boundary may read and write, in order. The first is the
+#: default when a caller names none, which is what every caller written before
+#: there was a second board keeps getting.
+#:
+#: Deliberately the MCP's own setting rather than the launcher's
+#: ``VIKUNJA_PROJECT``: the launcher works one board and this boundary reads
+#: two, so they no longer mean the same thing by "project" and sharing the
+#: name would hide that. An operator who repoints ``VIKUNJA_PROJECT`` must
+#: name the boards here too — and if they do not, the title check at
+#: resolution refuses loudly rather than serving the wrong board.
+DEFAULT_MCP_PROJECTS = (
+    ProjectRef(2, DEFAULT_PROJECT),
+    ProjectRef(3, "AI Alpha Trader"),
+)
+
+
 def _vikunja_token() -> str:
     token = os.environ.get("VIKUNJA_API_TOKEN", "").strip()
     if not token:
@@ -145,6 +180,45 @@ def _state_dir() -> Path:
 def _project_id_override() -> int | None:
     raw = os.environ.get("VIKUNJA_PROJECT_ID", "").strip()
     return int(raw) if raw else None
+
+
+def _mcp_projects() -> tuple[ProjectRef, ...]:
+    """The approved boards, from the environment or the default pair.
+
+    ``2:AI Alpha Engine, 3:AI Alpha Trader`` — id and title together, because
+    a list of bare ids would be a list this boundary could not check, and a
+    list of bare titles would be one a caller could not name.
+    """
+    raw = os.environ.get(VIKUNJA_MCP_PROJECTS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_MCP_PROJECTS
+
+    projects: list[ProjectRef] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        number, separator, title = entry.partition(":")
+        if not separator or not number.strip().isdigit() or not title.strip():
+            raise ConfigError(
+                f"{VIKUNJA_MCP_PROJECTS_ENV} entries look like "
+                f"'2:AI Alpha Engine', comma separated. {entry!r} does not."
+            )
+        projects.append(ProjectRef(int(number.strip()), title.strip()))
+
+    if not projects:
+        raise ConfigError(
+            f"{VIKUNJA_MCP_PROJECTS_ENV} is set but names no project. Unset it "
+            "to serve the default boards, or name the ones this connection "
+            "should serve."
+        )
+    ids = [project.project_id for project in projects]
+    if len(set(ids)) != len(ids):
+        raise ConfigError(
+            f"{VIKUNJA_MCP_PROJECTS_ENV} names a project id more than once: "
+            f"{raw!r}. One id, one board."
+        )
+    return tuple(projects)
 
 
 #: Tailscale's address space. Traffic inside a tailnet is WireGuard-encrypted, so
@@ -517,19 +591,23 @@ class McpConfig:
     Deliberately a separate object from :class:`Config` rather than more fields
     on it. The launcher must start without any OAuth configuration, the MCP
     server must refuse to start without it, and neither should be able to make
-    the other fail to boot. They share the Vikunja settings because there is
-    only one Vikunja and one board — not because the two services are one thing.
+    the other fail to boot. They share the Vikunja *server* settings because
+    there is only one Vikunja — not because the two services are one thing,
+    and no longer because they mean the same thing by "project": the launcher
+    works one board, and this boundary reads the approved set in ``projects``.
     """
 
     api_url: str
     token: str
     oauth: OAuthConfig
-    project_title: str
+    #: The approved boards, in order. Closed: an id outside this tuple is
+    #: refused by every tool, and the first entry is what a caller that names
+    #: no project gets.
+    projects: tuple[ProjectRef, ...]
     frontend_url: str
     host: str
     port: int
     state_dir: Path
-    project_id: int | None = None
     #: None means the operational reads are switched off, and their tools are not
     #: advertised. See :meth:`InvestmentConfig.from_env`.
     investment: InvestmentConfig | None = None
@@ -537,6 +615,41 @@ class McpConfig:
     #: advertised. Independent of ``investment``: reading the website needs no
     #: credential, and either capability can be switched on without the other.
     public_site_url: str | None = None
+
+    @property
+    def default_project(self) -> ProjectRef:
+        """The board a call that names no project is answered from."""
+        return self.projects[0]
+
+    @property
+    def project_title(self) -> str:
+        """The default board's title, for the places that name one board."""
+        return self.default_project.title
+
+    @property
+    def allowed_project_ids(self) -> tuple[int, ...]:
+        return tuple(project.project_id for project in self.projects)
+
+    def project_for(self, project_id: int) -> ProjectRef | None:
+        """The approved board with this id, or None — the whole allowlist."""
+        for project in self.projects:
+            if project.project_id == int(project_id):
+                return project
+        return None
+
+    @property
+    def projects_phrase(self) -> str:
+        """``AI Alpha Engine (2) and AI Alpha Trader (3)``.
+
+        One rendering, used by both the refusals and the tool descriptions, so
+        the set a caller is told about is the set that is enforced.
+        """
+        named = [
+            f"{project.title} ({project.project_id})" for project in self.projects
+        ]
+        if len(named) == 1:
+            return named[0]
+        return ", ".join(named[:-1]) + f" and {named[-1]}"
 
     @property
     def operational_reads_enabled(self) -> bool:
@@ -584,8 +697,7 @@ class McpConfig:
             api_url=os.environ.get("VIKUNJA_API_URL", DEFAULT_API_URL).rstrip("/"),
             token=_vikunja_token(),
             oauth=OAuthConfig.from_env(),
-            project_title=os.environ.get("VIKUNJA_PROJECT", DEFAULT_PROJECT),
-            project_id=_project_id_override(),
+            projects=_mcp_projects(),
             frontend_url=os.environ.get(
                 "VIKUNJA_FRONTEND_URL", DEFAULT_FRONTEND_URL
             ).rstrip("/"),

@@ -19,7 +19,14 @@ from vikunja_claude.mcp import McpProtocol, ToolError
 from vikunja_claude.mcp_service import McpService, idempotency_key
 from vikunja_claude.vikunja import VikunjaClient, VikunjaError
 
-from .fakes import PROJECT_ID, VIEW_ID, FakeVikunja, FilterIgnoringVikunja, task
+from .fakes import (
+    PROJECT_ID,
+    TRADER_PROJECT_ID,
+    VIEW_ID,
+    FakeVikunja,
+    FilterIgnoringVikunja,
+    task,
+)
 from .support import (
     READ_TOOLS,
     VIKUNJA_TOOLS,
@@ -206,8 +213,8 @@ class TestAShortReadIsAnErrorNotAShorterBoard(McpTestCase):
     class Truncating(FakeVikunja):
         """Serves one page and claims there were more. Nothing says which."""
 
-        def _view_tasks(self, path: str) -> list[dict]:
-            served = super()._view_tasks(path)
+        def _view_tasks(self, path: str, board: dict | None = None) -> list[dict]:
+            served = super()._view_tasks(path, board)
             for bucket in served:
                 if bucket["title"] == "Backlog":
                     bucket["count"] = bucket["count"] + 7
@@ -388,13 +395,22 @@ class TestTheListingCannotWrite(McpTestCase):
         self.assertTrue(listing.annotations["readOnlyHint"])
         self.assertEqual(listing.required_arguments(), [])
 
-    def test_no_argument_can_point_it_at_another_project(self):
-        """Unlike create_task, it takes no project at all — there is nothing to
-        refuse, because there is nothing to name."""
+    def test_no_argument_can_point_it_at_an_unapproved_project(self):
+        """It names a board out of the approved set, and refuses any other.
+
+        The refusal is what matters, not the absence of the argument: an
+        unapproved id must not be quietly answered from the default board,
+        because a caller that asked about project 1 would then be handed
+        project 2's queue and told it was project 1's.
+        """
         schema = {t.name: t for t in self.service.tools()}["list_open_tasks"].input_schema
-        self.assertNotIn("project_id", schema["properties"])
+        self.assertIn("project_id", schema["properties"])
         self.assertNotIn("project", schema["properties"])
         self.assertFalse(schema["additionalProperties"])
+
+        with self.assertRaises(ToolError) as caught:
+            self.service.list_open_tasks(project_id=OTHER_PROJECT_ID)
+        self.assertIn(str(OTHER_PROJECT_ID), str(caught.exception))
 
     def test_every_path_it_reads_belongs_to_the_configured_project(self):
         self.service.list_open_tasks(bucket="Ready")
@@ -521,7 +537,7 @@ class TestUnresolvableProject(McpTestCase):
     def test_the_create_fails_explicitly_and_creates_nothing(self):
         with self.assertRaises(ToolError) as caught:
             self.service.create_task(PROJECT_ID, "A ticket", "A body.")
-        self.assertIn("Cannot resolve the project", str(caught.exception))
+        self.assertIn("Cannot resolve project", str(caught.exception))
         self.assertFalse(self.config.ledger_path.exists())
 
 
@@ -607,17 +623,25 @@ class TestThroughTheProtocol(McpTestCase):
         self.assertEqual(created["url"], f"http://127.0.0.1:3456/tasks/{created['task_id']}")
 
 
-class TestProjectOverrideIsHonoured(unittest.TestCase):
-    """A configured project id is authoritative and is not looked up by title."""
+class TestTheConfiguredIdsAreAuthoritative(unittest.TestCase):
+    """Approved ids come from configuration and are never looked up by title."""
 
-    def test_the_override_is_the_only_project_that_may_be_written(self):
+    def test_a_board_resolves_without_listing_every_project(self):
+        """`GET /projects` is the listing that would show every board there is.
+
+        Never asked: the approved ids are configuration, so resolution only
+        ever fetches a board this connection was already allowed to see.
+        """
         with tempfile.TemporaryDirectory() as tmp:
-            config = make_mcp_config(Path(tmp), project_id=PROJECT_ID)
+            config = make_mcp_config(Path(tmp))
             vikunja = FakeVikunja()
             client = VikunjaClient(config.api_url, config.token, transport=vikunja)
             service = McpService(config, client)
 
-            self.assertEqual(service.allowed_project_id(), PROJECT_ID)
+            self.assertEqual(service._board().project_id, PROJECT_ID)
+            self.assertEqual(
+                service._board(TRADER_PROJECT_ID).project_id, TRADER_PROJECT_ID
+            )
             self.assertNotIn("GET /projects", signatures(vikunja))
 
 
@@ -699,7 +723,7 @@ class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
         would let one of these carry `done` through to a whole-task replace.
         """
         forbidden = {"done", "status", "bucket", "bucket_id", "labels", "label_ids",
-                     "assignees", "priority", "due_date", "position", "project_id"}
+                     "assignees", "priority", "due_date", "position"}
         writes = [t for t in self.service.tools() if t.name in WRITE_TOOLS]
         self.assertEqual({t.name for t in writes}, WRITE_TOOLS)
         for tool in writes:
@@ -707,6 +731,39 @@ class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
                 named = set(tool.input_schema.get("properties") or {})
                 self.assertEqual(named & forbidden, set())
                 self.assertFalse(tool.input_schema["additionalProperties"])
+
+    def test_the_board_selector_selects_and_cannot_reproject_a_task(self):
+        """`project_id` left the forbidden list when the writes gained it.
+
+        It is there for a different reason from the fields above: those
+        would change something about the task, and this one only says which
+        approved board the task must already be on. The distinction is only
+        worth anything if the write itself never carries it, so that is what
+        is asserted — the task the edit sends back holds no project field,
+        and nothing is POSTed to a project route.
+        """
+        for tool in [t for t in self.service.tools() if t.name in WRITE_TOOLS]:
+            with self.subTest(tool=tool.name):
+                self.assertIn("project_id", tool.input_schema["properties"])
+                self.assertNotIn("project_id", tool.required_arguments())
+
+        preview = self.service.update_task(9, title="A retitled ticket")
+        self.service.update_task(
+            9,
+            title="A retitled ticket",
+            approval_token=preview["approval_token"],
+        )
+        written = [
+            (method, path, body)
+            for method, path, body in self.vikunja.calls
+            if method in ("POST", "PUT")
+        ]
+        self.assertTrue(written)
+        for method, path, body in written:
+            self.assertNotIn("/projects/", path)
+            self.assertEqual(
+                {k for k in (body or {}) if "project" in k}, set()
+            )
 
 
 if __name__ == "__main__":
