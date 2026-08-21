@@ -72,9 +72,10 @@ class TestGetTask(MutationFreeMixin, McpTestCase):
     }
 
     def test_it_returns_the_whole_ticket(self):
-        task = self.service.get_task(9)
-        self.assertEqual(task["task_id"], 9)
-        self.assertEqual(task["ticket"], 33)
+        task = self.service.get_task(8)
+        self.assertEqual(task["task_number"], 8)
+        self.assertEqual(task["reference"], "#8")
+        self.assertEqual(task["vikunja_task_id"], 9)
         self.assertEqual(task["title"], "#33 Back up Vikunja database")
         self.assertEqual(task["bucket"], "Ready")
         self.assertEqual(task["status"], "open")
@@ -83,19 +84,19 @@ class TestGetTask(MutationFreeMixin, McpTestCase):
         self.assertEqual(task["url"], "http://127.0.0.1:3456/tasks/9")
 
     def test_the_description_arrives_as_readable_text_not_markup(self):
-        task = self.service.get_task(9)
+        task = self.service.get_task(8)
         self.assertIn("authoritative", task["description"])
         self.assertNotIn("<strong>", task["description"])
 
     def test_it_returns_comments(self):
-        comments = self.service.get_task(9)["comments"]
+        comments = self.service.get_task(8)["comments"]
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0]["author"], "glen")
         self.assertEqual(comments[0]["created"], "2026-07-27T09:00:00Z")
         self.assertEqual(comments[0]["text"], "Blocked on the `URTH` backfill.")
 
     def test_a_done_ticket_reports_done(self):
-        self.assertEqual(self.service.get_task(1)["status"], "done")
+        self.assertEqual(self.service.get_task(2)["status"], "done")
 
     def test_an_unknown_task_is_refused_with_a_reason(self):
         with self.assertRaises(ToolError) as caught:
@@ -103,7 +104,7 @@ class TestGetTask(MutationFreeMixin, McpTestCase):
         self.assertIn("4242", str(caught.exception))
 
     def test_reading_changes_nothing(self):
-        self.service.get_task(9)
+        self.service.get_task(8)
         self.assertTouchedNothingExisting()
 
 
@@ -113,14 +114,14 @@ class TestListOpenTasks(MutationFreeMixin, McpTestCase):
     OPEN = {5, 9, 10, 11}
 
     def ids(self, **filters) -> set[int]:
-        return {t["task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
+        return {t["vikunja_task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
 
     def test_it_returns_every_open_task_on_the_board(self):
         self.assertEqual(self.ids(), self.OPEN)
 
     def test_a_done_task_is_excluded_although_it_is_on_the_board(self):
-        """Task 1 is in Done. It is reachable by id and must not be listed."""
-        self.assertEqual(self.service.get_task(1)["status"], "done")
+        """#2 (task id 1) is in Done. It is readable and must not be listed."""
+        self.assertEqual(self.service.get_task(2)["status"], "done")
         self.assertNotIn(1, self.ids())
 
     def test_the_count_is_the_number_of_tasks_returned(self):
@@ -129,10 +130,10 @@ class TestListOpenTasks(MutationFreeMixin, McpTestCase):
         self.assertEqual(listed["count"], len(self.OPEN))
 
     def test_every_task_carries_the_fields_a_board_view_needs(self):
-        found = {t["task_id"]: t for t in self.service.list_open_tasks()["tasks"]}[9]
+        found = {t["vikunja_task_id"]: t for t in self.service.list_open_tasks()["tasks"]}[9]
         self.assertEqual(found["title"], "#33 Back up Vikunja database")
-        self.assertEqual(found["ticket"], 33)
-        self.assertEqual(found["reference"], "#33")
+        self.assertEqual(found["task_number"], 8)
+        self.assertEqual(found["reference"], "#8")
         self.assertEqual(found["status"], "open")
         self.assertEqual(found["bucket"], "Ready")
         self.assertEqual(found["labels"], ["Operations"])
@@ -159,7 +160,7 @@ class TestListOpenTasks(MutationFreeMixin, McpTestCase):
 
     def test_it_comes_back_through_the_protocol(self):
         listed = self.call_tool("list_open_tasks")["result"]["structuredContent"]
-        self.assertEqual({t["task_id"] for t in listed["tasks"]}, self.OPEN)
+        self.assertEqual({t["vikunja_task_id"] for t in listed["tasks"]}, self.OPEN)
 
     def test_it_is_callable_with_no_arguments_at_all(self):
         """"read the open tickets" carries no bucket and no label."""
@@ -178,18 +179,33 @@ class TestListingIsNotOnePageOfEachBucket(McpTestCase):
     BACKLOG = 130
     layout = {
         "Backlog": [
-            task(1000 + i, f"#{1000 + i} Backlog item {i}", "2026-07-26T05:00:00Z")
+            task(
+                1000 + i,
+                f"#{1000 + i} Backlog item {i}",
+                "2026-07-26T05:00:00Z",
+                index=999 + i,
+            )
             for i in range(BACKLOG)
         ],
-        "Ready": [task(9, "#33 Back up Vikunja database", "2026-07-26T05:05:50Z")],
-        "Done": [task(1, "#25 Wrap the reports step", "2026-07-26T04:59:00Z", done=True)],
+        "Ready": [
+            task(9, "#33 Back up Vikunja database", "2026-07-26T05:05:50Z", index=8)
+        ],
+        "Done": [
+            task(
+                1,
+                "#25 Wrap the reports step",
+                "2026-07-26T04:59:00Z",
+                done=True,
+                index=2,
+            )
+        ],
     }
 
     def test_every_open_task_arrives_across_pages(self):
         listed = self.service.list_open_tasks()
         self.assertEqual(listed["count"], self.BACKLOG + 1)
         self.assertEqual(
-            {t["task_id"] for t in listed["tasks"]},
+            {t["vikunja_task_id"] for t in listed["tasks"]},
             {1000 + i for i in range(self.BACKLOG)} | {9},
         )
 
@@ -254,7 +270,7 @@ class TestAVikunjaThatIgnoresTheFilter(McpTestCase):
 
     def test_the_done_task_is_still_excluded(self):
         listed = self.service.list_open_tasks()
-        self.assertEqual({t["task_id"] for t in listed["tasks"]}, {5, 9, 10, 11})
+        self.assertEqual({t["vikunja_task_id"] for t in listed["tasks"]}, {5, 9, 10, 11})
 
     def test_the_server_really_did_hand_over_the_done_task(self):
         """Guards the test above: without this the fake proves nothing."""
@@ -268,19 +284,24 @@ class TestAVikunjaThatIgnoresTheFilter(McpTestCase):
 class TestListOpenTaskOrdering(McpTestCase):
     layout = {
         "Backlog": [
-            task(30, "#30 Low", "2026-07-26T05:00:00Z", priority=1),
-            task(20, "#20 Urgent, later id", "2026-07-26T05:00:00Z", priority=4),
-            task(10, "#10 Urgent, earlier id", "2026-07-26T05:00:00Z", priority=4),
+            task(30, "#30 Low", "2026-07-26T05:00:00Z", priority=1, index=29),
+            task(20, "#20 Urgent, later id", "2026-07-26T05:00:00Z", priority=4, index=19),
+            task(
+                10, "#10 Urgent, earlier id", "2026-07-26T05:00:00Z",
+                priority=4, index=9,
+            ),
         ],
         "Ready": [
-            task(40, "#40 Unset", "2026-07-26T05:00:00Z"),
-            task(5, "#5 Do now", "2026-07-26T05:00:00Z", priority=5),
+            task(40, "#40 Unset", "2026-07-26T05:00:00Z", index=39),
+            task(5, "#5 Do now", "2026-07-26T05:00:00Z", priority=5, index=4),
         ],
-        "Done": [task(1, "#1 Done", "2026-07-26T04:59:00Z", done=True, priority=5)],
+        "Done": [
+            task(1, "#1 Done", "2026-07-26T04:59:00Z", done=True, priority=5, index=2)
+        ],
     }
 
     def order(self) -> list[int]:
-        return [t["task_id"] for t in self.service.list_open_tasks()["tasks"]]
+        return [t["vikunja_task_id"] for t in self.service.list_open_tasks()["tasks"]]
 
     def test_most_urgent_first_then_by_task_id(self):
         self.assertEqual(self.order(), [5, 10, 20, 30, 40])
@@ -303,21 +324,21 @@ class TestListOpenTaskOrdering(McpTestCase):
 class TestListOpenTaskFilters(McpTestCase):
     layout = {
         "Backlog": [
-            task(5, "#29 Admin", "2026-07-26T05:01:00Z", labels=["Ops"]),
-            task(6, "#31 Unlabelled", "2026-07-26T05:02:00Z"),
+            task(5, "#29 Admin", "2026-07-26T05:01:00Z", labels=["Ops"], index=4),
+            task(6, "#31 Unlabelled", "2026-07-26T05:02:00Z", index=5),
         ],
         "Ready": [
-            task(9, "#33 Back up", "2026-07-26T05:05:50Z", labels=["Ops", "S7"]),
-            task(10, "#34 Version the skill", "2026-07-26T05:09:00Z", labels=["S7"]),
+            task(9, "#33 Back up", "2026-07-26T05:05:50Z", labels=["Ops", "S7"], index=8),
+            task(10, "#34 Version the skill", "2026-07-26T05:09:00Z", labels=["S7"], index=9),
         ],
         "In Progress": [],
         "Done": [
-            task(1, "#25 Wrap", "2026-07-26T04:59:00Z", done=True, labels=["Ops"])
+            task(1, "#25 Wrap", "2026-07-26T04:59:00Z", done=True, labels=["Ops"], index=2)
         ],
     }
 
     def ids(self, **filters) -> set[int]:
-        return {t["task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
+        return {t["vikunja_task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
 
     def test_a_bucket_filter_narrows_to_that_column(self):
         self.assertEqual(self.ids(bucket="Ready"), {9, 10})
@@ -367,7 +388,7 @@ class TestListOpenTaskFilters(McpTestCase):
     def test_filtering_through_the_protocol_works_the_same(self):
         listed = self.call_tool("list_open_tasks", bucket="Ready", label="S7")
         found = listed["result"]["structuredContent"]
-        self.assertEqual({t["task_id"] for t in found["tasks"]}, {9, 10})
+        self.assertEqual({t["vikunja_task_id"] for t in found["tasks"]}, {9, 10})
 
 
 class TestTheListingCannotWrite(McpTestCase):
@@ -447,17 +468,17 @@ class TestCreateTask(MutationFreeMixin, McpTestCase):
         result = self.create()
         self.assertTrue(result["created"])
         self.assertEqual(result["project_id"], PROJECT_ID)
-        self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{result['task_id']}")
-        self.assertEqual(self.stored(result["task_id"])["title"], self.TITLE)
+        self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{result['vikunja_task_id']}")
+        self.assertEqual(self.stored(result["vikunja_task_id"])["title"], self.TITLE)
 
     def test_the_stored_description_is_the_one_that_was_asked_for(self):
         result = self.create()
-        stored = self.stored(result["task_id"])["description"]
+        stored = self.stored(result["vikunja_task_id"])["description"]
         self.assertEqual(html_to_text(stored), self.BODY)
 
     def test_the_description_is_escaped_never_interpreted(self):
         result = self.create(description="Watch out for <script>alert(1)</script>")
-        stored = self.stored(result["task_id"])["description"]
+        stored = self.stored(result["vikunja_task_id"])["description"]
         self.assertNotIn("<script>", stored)
         self.assertIn("&lt;script&gt;", stored)
 
@@ -470,7 +491,7 @@ class TestCreateTask(MutationFreeMixin, McpTestCase):
         lines = self.config.ledger_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
         record = json.loads(lines[0])
-        self.assertEqual(record["task_id"], result["task_id"])
+        self.assertEqual(record["task_id"], result["vikunja_task_id"])
         self.assertEqual(record["title"], self.TITLE)
         self.assertEqual(record["project_id"], PROJECT_ID)
         self.assertTrue(record["created_at"])
@@ -531,7 +552,7 @@ class TestUnresolvableProject(McpTestCase):
 
     def test_the_read_fails_explicitly(self):
         with self.assertRaises(ToolError) as caught:
-            self.service.get_task(9)
+            self.service.get_task(8)
         self.assertIn("AI Alpha Engine", str(caught.exception))
 
     def test_the_create_fails_explicitly_and_creates_nothing(self):
@@ -558,7 +579,7 @@ class TestRetriesDoNotDuplicate(McpTestCase):
         second = self.create()
 
         self.assertFalse(second["created"])
-        self.assertEqual(second["task_id"], first["task_id"])
+        self.assertEqual(second["vikunja_task_id"], first["vikunja_task_id"])
         self.assertEqual(self.board_size(), before)
 
     def test_a_retry_after_a_restart_still_does_not_duplicate(self):
@@ -569,13 +590,13 @@ class TestRetriesDoNotDuplicate(McpTestCase):
         second = self.create(service=restarted)
 
         self.assertFalse(second["created"])
-        self.assertEqual(second["task_id"], first["task_id"])
+        self.assertEqual(second["vikunja_task_id"], first["vikunja_task_id"])
 
     def test_a_genuinely_different_ticket_is_created(self):
         first = self.create()
         second = self.service.create_task(PROJECT_ID, self.TITLE, "A different body.")
         self.assertTrue(second["created"])
-        self.assertNotEqual(second["task_id"], first["task_id"])
+        self.assertNotEqual(second["vikunja_task_id"], first["vikunja_task_id"])
 
     def test_whitespace_around_the_same_content_is_the_same_request(self):
         self.assertEqual(
@@ -598,8 +619,8 @@ class TestThroughTheProtocol(McpTestCase):
     """The same guarantees, driven the way a client drives them."""
 
     def test_get_task_comes_back_as_a_tool_result(self):
-        response = self.call_tool("get_task", task_id=9)
-        self.assertEqual(response["result"]["structuredContent"]["task_id"], 9)
+        response = self.call_tool("get_task", task_number=8)
+        self.assertEqual(response["result"]["structuredContent"]["vikunja_task_id"], 9)
 
     def test_a_refused_create_is_a_visible_error_not_a_silent_success(self):
         response = self.call_tool(
@@ -620,7 +641,7 @@ class TestThroughTheProtocol(McpTestCase):
         )
         created = response["result"]["structuredContent"]
         self.assertTrue(created["created"])
-        self.assertEqual(created["url"], f"http://127.0.0.1:3456/tasks/{created['task_id']}")
+        self.assertEqual(created["url"], f"http://127.0.0.1:3456/tasks/{created['vikunja_task_id']}")
 
 
 class TestTheConfiguredIdsAreAuthoritative(unittest.TestCase):
@@ -662,7 +683,7 @@ class TestTheWholeSurface(McpTestCase):
         which is stricter about them than a blanket sweep could be.
         """
         protocol = McpProtocol(self.service.tools())
-        self.call_tool("get_task", task_id=9)
+        self.call_tool("get_task", task_number=8)
         self.call_tool("list_open_tasks")
         self.call_tool("list_open_tasks", bucket="Ready", label="Operations")
         self.call_tool("search_tasks", text="backup", status="any")
@@ -747,9 +768,9 @@ class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
                 self.assertIn("project_id", tool.input_schema["properties"])
                 self.assertNotIn("project_id", tool.required_arguments())
 
-        preview = self.service.update_task(9, title="A retitled ticket")
+        preview = self.service.update_task(8, title="A retitled ticket")
         self.service.update_task(
-            9,
+            8,
             title="A retitled ticket",
             approval_token=preview["approval_token"],
         )

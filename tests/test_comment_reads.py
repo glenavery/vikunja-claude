@@ -181,7 +181,7 @@ class TheMcpTool(McpTestCase):
     def test_get_task_still_returns_the_same_projection(self):
         """The MCP had this already; task 346 pointed it at the shared
         projection rather than its own copy, and its output must not move."""
-        result = self.call_tool("get_task", task_id=9)
+        result = self.call_tool("get_task", task_number=8)
         payload = result["result"]["structuredContent"]
         self.assertEqual([c["id"] for c in payload["comments"]], [41, 42])
         self.assertEqual(set(payload["comments"][0]), set(COMMENT_FIELDS))

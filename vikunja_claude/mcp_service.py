@@ -68,7 +68,14 @@ from .html_text import html_to_text, text_to_html
 from .investment import InvestmentStatusClient, InvestmentStatusError
 from .mcp import Tool, ToolError
 from .paying_page import PayingPageError, PayingSiteClient
-from .vikunja import TicketNotFound, VikunjaClient, VikunjaError
+from .vikunja import (
+    AmbiguousTicket,
+    Ticket,
+    TicketNotFound,
+    VikunjaClient,
+    VikunjaError,
+    task_index,
+)
 from .website import PublicPageError, PublicSiteClient
 
 MAX_TITLE_CHARS = 250
@@ -117,6 +124,44 @@ def _optional_int(value: Any) -> int | None:
     ValueError the protocol reports as a bad argument.
     """
     return None if value is None else int(value)
+
+
+def _task_number_argument(arguments: dict[str, Any]) -> int:
+    """The project-local task number a task tool was called with.
+
+    Every task-specific tool takes exactly one identifier, and this is where
+    that is enforced rather than at six call sites. A caller still sending
+    ``task_id`` is *refused by name*: the two numbers are both small integers
+    naming real tasks on the same board, so quietly ignoring the one that was
+    sent — or quietly honouring it — would operate on a task the caller did
+    not ask for and report success.
+    """
+    if "task_id" in arguments:
+        raise ToolError(
+            "These tools identify a task by task_number — the #N the board "
+            "shows — not by Vikunja's immutable /tasks/<id> number, which is "
+            "usually a different task. Nothing was read and nothing was "
+            "changed. Resend with task_number (and project_id if the task is "
+            "not on the default board); if all you have is a /tasks/<id> "
+            "number, open that URL and read the #N off the task, or find it "
+            "with search_tasks."
+        )
+    return int(arguments["task_number"])
+
+
+def _board_order(ticket: Ticket) -> tuple[int, bool, int, int]:
+    """Sort key: most urgent first, then the number the board shows.
+
+    Shared by the two listings so they cannot drift into different orders for
+    the same board. The middle element keeps an unnumbered task from comparing
+    equal to ``#0`` — it sorts after every numbered one, on its id.
+    """
+    return (
+        -ticket.priority,
+        ticket.task_number is None,
+        ticket.task_number or 0,
+        ticket.task_id,
+    )
 
 
 def _now() -> str:
@@ -273,38 +318,94 @@ class McpService:
             )
         return Board(approved.title, approved.project_id, view_id)
 
+    def _resolve(
+        self, task_number: Any, board: Board, verb: str | None = None
+    ) -> Ticket:
+        """The task the named board shows as ``#task_number``, or a refusal.
+
+        The single resolver every task-specific operation goes through, so
+        "which task did the caller mean" is answered once and identically for
+        a read, an edit and a comment. Both failures refuse:
+
+        **Unresolved.** No task on this board carries that number. The refusal
+        says so and names the board, and it does not then try the number as a
+        ``/tasks/<id>``. That fallback would succeed often — the two number
+        spaces overlap almost completely — and succeeding is the damage: the
+        caller gets a real task, on the right board, that is not the one they
+        read off the screen.
+
+        **Ambiguous.** Two tasks answering to one number is a board this code
+        cannot address unambiguously, so it says which ids collided instead of
+        taking the first.
+        """
+        # A write says what did not happen; a read says nothing happened at
+        # all. One sentence either way, appended once here, so no refusal on
+        # this path can be read as a partial success.
+        outcome = "Nothing was changed." if verb else "Nothing was read."
+        attempt = f"Refusing to {verb} " if verb else "Cannot read "
+
+        try:
+            wanted = int(task_number)
+        except (TypeError, ValueError) as exc:
+            raise ToolError(
+                f"task_number must be a whole number, not {task_number!r}. "
+                f"{outcome}"
+            ) from exc
+
+        try:
+            return self.client.find_by_task_number(
+                wanted, board.project_id, board.view_id
+            )
+        except AmbiguousTicket as exc:
+            raise ToolError(f"{attempt}#{wanted}: {exc} {outcome}") from exc
+        except TicketNotFound as exc:
+            raise ToolError(
+                f"{attempt}#{wanted}: {exc} That board is {board.title} "
+                f"(project {board.project_id}), and this connection serves "
+                f"{self.config.projects_phrase} — if the task is on another "
+                f"board, say which. {outcome}"
+            ) from exc
+
+    def _identity(self, ticket: Ticket, board: Board) -> dict[str, Any]:
+        """How every answer names the task and the board it came from.
+
+        One projection, so the identifier a caller reads back is the one they
+        can call again with. ``vikunja_task_id`` is published as debug
+        metadata — it is what a ``/tasks/<id>`` URL and the mutation ledger
+        carry — and it is deliberately *not* named ``task_id``, because the
+        tools no longer accept a field by that name and a key that looks
+        callable would invite exactly the confusion this contract removes.
+        """
+        return {
+            "task_number": ticket.task_number,
+            "reference": ticket.board_reference,
+            "project": board.title,
+            "project_id": board.project_id,
+            "vikunja_task_id": ticket.task_id,
+        }
+
     # -- read --------------------------------------------------------------
 
-    def get_task(self, task_id: int, project_id: int | None = None) -> dict[str, Any]:
+    def get_task(
+        self, task_number: int, project_id: int | None = None
+    ) -> dict[str, Any]:
         """One task from one approved board, or a refusal naming both.
 
-        The task must be on the board the caller named. That is not a second
-        check bolted onto the lookup — the lookup is *through that board\'s
-        view*, so a task on another board is not in the answer to begin with,
-        and a task id alone is never taken as evidence of which board it is
-        on. Vikunja task ids are unique across projects, so a caller that
-        names the wrong board is told so rather than served.
+        Addressed the way the board addresses it — ``#N``, per project — which
+        makes the project boundary part of the identifier rather than a check
+        applied to one. A project-local number is meaningless without the
+        project, so there is no version of this call that could resolve
+        somewhere the caller did not name.
         """
         board = self._board(project_id)
         try:
-            ticket = self.client.find_by_task_id(
-                task_id, board.project_id, board.view_id
-            )
-            comments = self.client.comment_views(task_id)
-        except TicketNotFound as exc:
-            raise ToolError(
-                f"No task {task_id} on the {board.title} board "
-                f"(project {board.project_id}). {exc} If it is on another "
-                f"board, say which: this connection serves "
-                f"{self.config.projects_phrase}."
-            ) from exc
+            ticket = self._resolve(task_number, board)
+            comments = self.client.comment_views(ticket.task_id)
         except VikunjaError as exc:
             raise ToolError(str(exc)) from exc
 
         return {
-            "task_id": ticket.task_id,
-            "ticket": ticket.number,
-            "reference": ticket.reference,
+            **self._identity(ticket, board),
             "title": ticket.title,
             "summary": ticket.summary,
             "description": ticket.description,
@@ -312,8 +413,6 @@ class McpService:
             "bucket": ticket.bucket_title,
             "labels": ticket.labels,
             "created": ticket.created,
-            "project": board.title,
-            "project_id": board.project_id,
             "url": ticket.url(self.config.frontend_url),
             "comments": comments,
         }
@@ -374,10 +473,15 @@ class McpService:
                 if any(name.casefold() == wanted_label.casefold() for name in t.labels)
             ]
 
-        # Most urgent first, then by task id. Priority alone is not an order --
-        # most of the board sits at 0 -- so the id is what makes it total, and
-        # it is stable across calls in a way that position or title is not.
-        tickets.sort(key=lambda t: (-t.priority, t.task_id))
+        # Most urgent first, then by board number. Priority alone is not an
+        # order -- most of the board sits at 0 -- so the number is what makes
+        # it total, and it is stable across calls in a way that position or
+        # title is not. It is the *number* rather than the task id because
+        # that is the field this answer publishes: an order a reader cannot
+        # reconstruct from what they were shown reads as no order at all. A
+        # task Vikunja gave no number sorts last on its id, which keeps the
+        # key total without inventing one.
+        tickets.sort(key=_board_order)
 
         return {
             "project": board.title,
@@ -387,9 +491,7 @@ class McpService:
             "labels_in_use": labels_in_use,
             "tasks": [
                 {
-                    "task_id": ticket.task_id,
-                    "ticket": ticket.number,
-                    "reference": ticket.reference,
+                    **self._identity(ticket, board),
                     "title": ticket.title,
                     "summary": ticket.summary,
                     "status": "open",
@@ -476,8 +578,7 @@ class McpService:
         matches.sort(
             key=lambda t: (
                 0 if folded in t.title.casefold() else 1,
-                -t.priority,
-                t.task_id,
+                *_board_order(t),
             )
         )
 
@@ -490,9 +591,7 @@ class McpService:
             "count": len(matches),
             "tasks": [
                 {
-                    "task_id": t.task_id,
-                    "ticket": t.number,
-                    "reference": t.reference,
+                    **self._identity(t, board),
                     "title": t.title,
                     "summary": t.summary,
                     "status": "done" if t.done else "open",
@@ -713,9 +812,11 @@ class McpService:
                     "created": False,
                     "reason": "an identical task was already created through "
                     "this connection; returning it instead of creating a second",
-                    "task_id": existing["task_id"],
+                    "task_number": self._recorded_task_number(existing, board),
                     "title": existing["title"],
+                    "project": board.title,
                     "project_id": existing["project_id"],
+                    "vikunja_task_id": existing["task_id"],
                     "url": existing["url"],
                     "created_at": existing["created_at"],
                 }
@@ -728,12 +829,17 @@ class McpService:
                 raise ToolError(f"Vikunja refused the create: {exc}") from exc
 
             task_id = int(created["id"])
+            # The number the board will show for it, straight from the create
+            # reply. Read rather than derived: nothing here can compute the
+            # next index, and guessing one would name a different ticket.
+            task_number = task_index(created.get("index"))
             url = f"{self.config.frontend_url.rstrip('/')}/tasks/{task_id}"
             record = {
                 "created_at": _now(),
                 "key": key,
                 "project_id": allowed,
                 "task_id": task_id,
+                "task_number": task_number,
                 "title": title,
                 "url": url,
             }
@@ -741,12 +847,36 @@ class McpService:
 
         return {
             "created": True,
-            "task_id": task_id,
+            "task_number": task_number,
             "title": title,
             "project": board.title,
             "project_id": allowed,
+            "vikunja_task_id": task_id,
             "url": url,
         }
+
+    def _recorded_task_number(
+        self, record: dict[str, Any], board: Board
+    ) -> int | None:
+        """The board number of a task this connection already created.
+
+        Records written before the identifier changed carry only the immutable
+        id, so the number is looked up from the board for those. A lookup that
+        fails answers None rather than raising: the ledger is the evidence that
+        the ticket was already filed, and turning a successful idempotent
+        replay into an error would invite the caller to create the duplicate
+        the ledger exists to prevent.
+        """
+        number = record.get("task_number")
+        if number is not None:
+            return int(number)
+        try:
+            ticket = self.client.find_by_task_id(
+                int(record["task_id"]), board.project_id, board.view_id
+            )
+        except (VikunjaError, KeyError, TypeError, ValueError):
+            return None
+        return ticket.task_number
 
     # -- approval (task 196) -----------------------------------------------
 
@@ -758,6 +888,11 @@ class McpService:
         after: tuple[str, ...],
     ) -> str:
         """A token naming one exact change to one task.
+
+        Keyed on the immutable task id, not on the number the caller sent. A
+        board number is per project and a token is not, and the point of the
+        binding is that the second call reaches the same row as the first —
+        which is a claim about the task, not about how it was addressed.
 
         Re-previewing the same change returns the token already issued for it
         rather than a second one, so a client that asks twice before showing the
@@ -788,7 +923,7 @@ class McpService:
         self,
         token: str,
         kind: str,
-        task_id: int,
+        ticket: Ticket,
         before: tuple[str, ...],
         after: tuple[str, ...],
     ) -> None:
@@ -800,15 +935,16 @@ class McpService:
         write it authorises are one step, or a concurrent call could redeem the
         same token against a board that moved in between.
         """
+        named = ticket.board_reference
         record = self._pending.get(token)
         if (
             record is None
             or record["kind"] != kind
-            or record["task_id"] != task_id
+            or record["task_id"] != ticket.task_id
         ):
             raise ToolError(
-                f"That approval_token was not issued for this change to task "
-                f"{task_id}. It may already have been used, it may belong to "
+                f"That approval_token was not issued for this change to "
+                f"{named}. It may already have been used, it may belong to "
                 "another task, or the service may have restarted since it was "
                 "issued. Nothing was changed. Call again without approval_token "
                 "to read the current value and get a fresh approval to show the "
@@ -817,7 +953,7 @@ class McpService:
         self._pending.pop(token, None)
         if record["after"] != after:
             raise ToolError(
-                f"This is not the change that was approved for task {task_id}: "
+                f"This is not the change that was approved for {named}: "
                 "the text submitted differs from the text the approval was "
                 "issued for. Nothing was changed. Call again without "
                 "approval_token, show the user the new text, and get a fresh "
@@ -825,7 +961,7 @@ class McpService:
             )
         if record["before"] != before:
             raise ToolError(
-                f"Task {task_id} has changed since that approval was issued, so "
+                f"{named} has changed since that approval was issued, so "
                 "the value the user was shown is no longer the value on the "
                 "board. Nothing was changed. Call again without approval_token "
                 "to see what it holds now."
@@ -838,28 +974,21 @@ class McpService:
             handle.write(json.dumps(record, default=str) + "\n")
         print(f"mcp: {summary}", file=sys.stderr, flush=True)
 
-    def _own_ticket(self, task_id: int, verb: str, project_id: int | None = None):
-        """The task, if it is on the named board. The project boundary, structurally.
+    def _own_ticket(
+        self, task_number: int, verb: str, project_id: int | None = None
+    ):
+        """The task a write names, if the named board has it. The boundary, structurally.
 
-        Looked up through *that board's* view, so a task belonging to another
-        project is not in the answer to begin with — the refusal does not depend
-        on comparing a project id Vikunja reported. Which board is asked is the
-        caller's explicit choice among the approved ones, or the default; it is
-        never inferred from the task id, so "the task exists" can never stand in
-        for "the task is on the board you meant".
+        Resolution and ownership are the same step, and always were — the
+        lookup is through *that board's* view, so a task on another board is
+        not in the answer to begin with. What changed with the project-local
+        identifier is that they are now the same step by construction:
+        ``#N`` has no meaning apart from a project, so there is no longer a
+        number a caller could send that names a task somewhere else.
         """
         board = self._board(project_id)
         try:
-            return board, self.client.find_by_task_id(
-                task_id, board.project_id, board.view_id
-            )
-        except TicketNotFound as exc:
-            raise ToolError(
-                f"Refusing to {verb} task {task_id}: it is not on the "
-                f"{board.title} board (project {board.project_id}). {exc} "
-                f"This connection serves {self.config.projects_phrase}; name "
-                "the right one if the task is on another. Nothing was changed."
-            ) from exc
+            return board, self._resolve(task_number, board, verb=verb)
         except VikunjaError as exc:
             raise ToolError(f"{exc} Nothing was changed.") from exc
 
@@ -867,7 +996,7 @@ class McpService:
 
     def update_task(
         self,
-        task_id: int,
+        task_number: int,
         title: str | None = None,
         description: str | None = None,
         approval_token: str | None = None,
@@ -879,11 +1008,13 @@ class McpService:
         caller submits the complete new text, which is the same thing the user
         is shown, so what was approved and what is stored cannot drift apart.
 
-        ``project_id`` selects which approved board the task must be on, and
-        the two-step flow is untouched by it: the board is resolved on the
-        preview and re-resolved inside the lock on the commit, so a token can
-        no more be redeemed against a task on another board than against
-        different text.
+        ``project_id`` selects which approved board ``task_number`` is read
+        against, and the two-step flow is untouched by it: the board is
+        resolved on the preview and re-resolved inside the lock on the commit,
+        so a token can no more be redeemed against a task on another board
+        than against different text. The token binds the immutable task the
+        number resolved to, so the approval survives nothing about how it was
+        addressed — only the task and the text.
         """
         title = None if title is None else title.strip()
         description = None if description is None else description.strip()
@@ -913,7 +1044,7 @@ class McpService:
                 "Nothing was changed."
             )
 
-        board, ticket = self._own_ticket(task_id, "update", project_id)
+        board, ticket = self._own_ticket(task_number, "update", project_id)
         proposal = self._proposed_update(ticket, title, description)
 
         if not proposal["changed_fields"]:
@@ -925,11 +1056,9 @@ class McpService:
                 "applied": False,
                 "reason": "the task already holds these values, so there was "
                 "nothing to change",
-                "task_id": ticket.task_id,
+                **self._identity(ticket, board),
                 "title": ticket.title,
                 "changed_fields": [],
-                "project": board.title,
-                "project_id": board.project_id,
                 "url": ticket.url(self.config.frontend_url),
             }
 
@@ -937,7 +1066,7 @@ class McpService:
             return {
                 "applied": False,
                 "approval_required": True,
-                "task_id": ticket.task_id,
+                **self._identity(ticket, board),
                 "title": ticket.title,
                 "changed_fields": proposal["changed_fields"],
                 "current": proposal["current"],
@@ -945,8 +1074,6 @@ class McpService:
                 "approval_token": self._issue_approval(
                     CHANGE_UPDATE, ticket.task_id, proposal["before"], proposal["after"]
                 ),
-                "project": board.title,
-                "project_id": board.project_id,
                 "url": ticket.url(self.config.frontend_url),
                 "next_step": (
                     "Nothing has been changed. Show the user the exact current "
@@ -961,25 +1088,23 @@ class McpService:
             # precondition: the board can move between the two calls, and the
             # value the user approved replacing is the one that must still be
             # there.
-            board, current = self._own_ticket(task_id, "update", project_id)
+            board, current = self._own_ticket(task_number, "update", project_id)
             proposal = self._proposed_update(current, title, description)
             if not proposal["changed_fields"]:
                 return {
                     "applied": False,
                     "reason": "the task already holds these values, so there was "
                     "nothing to change",
-                    "task_id": current.task_id,
+                    **self._identity(current, board),
                     "title": current.title,
                     "changed_fields": [],
-                    "project": board.title,
-                    "project_id": board.project_id,
                     "url": current.url(self.config.frontend_url),
                 }
 
             self._redeem_approval(
                 approval_token,
                 CHANGE_UPDATE,
-                current.task_id,
+                current,
                 proposal["before"],
                 proposal["after"],
             )
@@ -1006,21 +1131,21 @@ class McpService:
                     "kind": CHANGE_UPDATE,
                     "project_id": board.project_id,
                     "task_id": current.task_id,
+                    "task_number": current.task_number,
                     "changed_fields": changed,
                     "replaced": proposal["current"],
                     "stored": proposal["proposed"],
                 },
-                f"updated task {current.task_id} in project {board.project_id} "
-                f"({', '.join(changed)}) — {new_title!r}",
+                f"updated {current.board_reference} (task {current.task_id}) in "
+                f"project {board.project_id} ({', '.join(changed)}) — "
+                f"{new_title!r}",
             )
 
         return {
             "applied": True,
-            "task_id": current.task_id,
+            **self._identity(current, board),
             "title": new_title,
             "changed_fields": changed,
-            "project": board.title,
-            "project_id": board.project_id,
             "url": current.url(self.config.frontend_url),
         }
 
@@ -1055,7 +1180,7 @@ class McpService:
 
     def add_task_comment(
         self,
-        task_id: int,
+        task_number: int,
         comment: str,
         approval_token: str | None = None,
         project_id: int | None = None,
@@ -1076,7 +1201,7 @@ class McpService:
                 "was written."
             )
 
-        board, ticket = self._own_ticket(task_id, "comment on", project_id)
+        board, ticket = self._own_ticket(task_number, "comment on", project_id)
         duplicate = self._existing_comment(ticket.task_id, text)
         if duplicate is not None:
             return self._duplicate_comment(board, ticket, duplicate)
@@ -1085,14 +1210,12 @@ class McpService:
             return {
                 "added": False,
                 "approval_required": True,
-                "task_id": ticket.task_id,
+                **self._identity(ticket, board),
                 "title": ticket.title,
                 "comment": text,
                 "approval_token": self._issue_approval(
                     CHANGE_COMMENT, ticket.task_id, (), (text,)
                 ),
-                "project": board.title,
-                "project_id": board.project_id,
                 "url": ticket.url(self.config.frontend_url),
                 "next_step": (
                     "Nothing has been written. Show the user this exact comment "
@@ -1112,7 +1235,7 @@ class McpService:
             # A comment replaces nothing, so unlike an edit its approval binds no
             # prior value -- there is none to have moved underneath it.
             self._redeem_approval(
-                approval_token, CHANGE_COMMENT, ticket.task_id, (), (text,)
+                approval_token, CHANGE_COMMENT, ticket, (), (text,)
             )
             try:
                 created = self.client.add_comment(ticket.task_id, text_to_html(text))
@@ -1126,19 +1249,19 @@ class McpService:
                     "kind": CHANGE_COMMENT,
                     "project_id": board.project_id,
                     "task_id": ticket.task_id,
+                    "task_number": ticket.task_number,
                     "comment_id": comment_id,
                     "comment": text,
                 },
-                f"commented on task {ticket.task_id} in project {board.project_id}",
+                f"commented on {ticket.board_reference} (task "
+                f"{ticket.task_id}) in project {board.project_id}",
             )
 
         return {
             "added": True,
-            "task_id": ticket.task_id,
+            **self._identity(ticket, board),
             "title": ticket.title,
             "comment_id": comment_id,
-            "project": board.title,
-            "project_id": board.project_id,
             "url": ticket.url(self.config.frontend_url),
         }
 
@@ -1160,17 +1283,15 @@ class McpService:
         return None
 
     def _duplicate_comment(
-        self, board: Board, ticket, comment: dict[str, Any]
+        self, board: Board, ticket: Ticket, comment: dict[str, Any]
     ) -> dict[str, Any]:
         return {
             "added": False,
             "reason": "this exact comment is already on the task; returning it "
             "instead of writing a second copy",
-            "task_id": ticket.task_id,
+            **self._identity(ticket, board),
             "title": ticket.title,
             "comment_id": comment.get("id"),
-            "project": board.title,
-            "project_id": board.project_id,
             "url": ticket.url(self.config.frontend_url),
         }
 
@@ -1593,6 +1714,31 @@ class McpService:
             ),
         }
 
+    @staticmethod
+    def _task_number_property() -> dict[str, Any]:
+        """The ``task_number`` selector, rendered once for every tool that takes it.
+
+        One wording, because a model reading three tools must not be able to
+        conclude that one of them means the other number. The description says
+        what the field is, what it is not, and how to get it — a caller holding
+        only a ``/tasks/<id>`` number is told where to look rather than left to
+        try it here, which would resolve to a real and wrong task.
+        """
+        return {
+            "type": "integer",
+            "description": (
+                "The task's number on its board — the #N shown beside the "
+                "title, and what a person means by 'task 647'. It is scoped "
+                "to the board, so it is read together with project_id. This "
+                "is NOT the number in a /tasks/<id> URL: those are handed out "
+                "across every project and normally differ by a few, so #647 "
+                "and /tasks/647 are two different tasks. A number no task on "
+                "the named board carries is refused, never retried as a "
+                "/tasks/<id>. If all you have is that URL, open it and read "
+                "the #N off the task, or find it with search_tasks."
+            ),
+        }
+
     def _vikunja_tools(self) -> list[Tool]:
         return [
             Tool(
@@ -1600,27 +1746,25 @@ class McpService:
                 title="Get a Vikunja task",
                 description=(
                     "Read one task from one of the AI Alpha project boards "
-                    f"({self.config.projects_phrase}) by its Vikunja task id "
-                    "— the number in a /tasks/<id> URL, not the #NN prefix in "
-                    "the title and not a /projects/<id>/<viewId> board view. "
-                    "The task must be on the board you name: a task on the "
-                    "other board is refused, not returned, so pass project_id "
-                    "when the task is not on the default board. Returns the "
-                    "title, full description, status, bucket, labels, "
-                    "timestamps and comments. Read-only."
+                    f"({self.config.projects_phrase}) by the number the board "
+                    "shows for it — the #N beside its title. That number is "
+                    "per board, so it only means anything together with "
+                    "project_id; omit project_id only when the task is on the "
+                    "default board. It is NOT the number in a /tasks/<id> URL, "
+                    "which is a different, global number and usually names a "
+                    "different task. Returns the title, full description, "
+                    "status, bucket, labels, timestamps and comments. "
+                    "Read-only."
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "task_id": {
-                            "type": "integer",
-                            "description": "Vikunja's immutable task id.",
-                        },
+                        "task_number": self._task_number_property(),
                         "project_id": self._project_property(
                             "the task is on"
                         ),
                     },
-                    "required": ["task_id"],
+                    "required": ["task_number"],
                     "additionalProperties": False,
                 },
                 annotations={
@@ -1629,7 +1773,7 @@ class McpService:
                     "openWorldHint": False,
                 },
                 run=lambda arguments: self.get_task(
-                    int(arguments["task_id"]),
+                    _task_number_argument(arguments),
                     project_id=_optional_int(arguments.get("project_id")),
                 ),
             ),
@@ -1818,9 +1962,10 @@ class McpService:
                     "approved that exact change, call it again with the "
                     "identical arguments plus the approval_token. Submit "
                     "complete replacement text — there is no partial or "
-                    "find-and-replace edit. Identify the task by its Vikunja "
-                    "task id (the number in a /tasks/<id> URL), never by a #NN "
-                    "title prefix or a board position. It cannot change status, "
+                    "find-and-replace edit. Identify the task by task_number, "
+                    "the #N the board shows beside its title, together with "
+                    "the board it is on — never by the number in a /tasks/<id> "
+                    "URL and never by a board position. It cannot change status, "
                     "bucket, labels, assignees, priority or due dates, and it "
                     "cannot delete anything. Asking for the value a task already "
                     "holds changes nothing and is reported as such."
@@ -1828,14 +1973,7 @@ class McpService:
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "task_id": {
-                            "type": "integer",
-                            "description": (
-                                "Vikunja's immutable task id. A task that is "
-                                "not on the board named by project_id is "
-                                "refused."
-                            ),
-                        },
+                        "task_number": self._task_number_property(),
                         "project_id": self._project_property(
                             "the task is on"
                         ),
@@ -1865,7 +2003,7 @@ class McpService:
                             ),
                         },
                     },
-                    "required": ["task_id"],
+                    "required": ["task_number"],
                     "additionalProperties": False,
                 },
                 annotations={
@@ -1875,7 +2013,7 @@ class McpService:
                     "openWorldHint": False,
                 },
                 run=lambda arguments: self.update_task(
-                    int(arguments["task_id"]),
+                    _task_number_argument(arguments),
                     title=(
                         None
                         if arguments.get("title") is None
@@ -1915,14 +2053,7 @@ class McpService:
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "task_id": {
-                            "type": "integer",
-                            "description": (
-                                "Vikunja's immutable task id. A task that is "
-                                "not on the board named by project_id is "
-                                "refused."
-                            ),
-                        },
+                        "task_number": self._task_number_property(),
                         "project_id": self._project_property(
                             "the task is on"
                         ),
@@ -1941,7 +2072,7 @@ class McpService:
                             ),
                         },
                     },
-                    "required": ["task_id", "comment"],
+                    "required": ["task_number", "comment"],
                     "additionalProperties": False,
                 },
                 annotations={
@@ -1951,7 +2082,7 @@ class McpService:
                     "openWorldHint": False,
                 },
                 run=lambda arguments: self.add_task_comment(
-                    int(arguments["task_id"]),
+                    _task_number_argument(arguments),
                     str(arguments["comment"]),
                     approval_token=(
                         None

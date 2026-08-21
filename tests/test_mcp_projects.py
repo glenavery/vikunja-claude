@@ -38,12 +38,31 @@ from .fakes import (
 )
 from .support import ISSUER, PASSPHRASE, REDIRECT_URI, TOKEN, McpTestCase, make_mcp_config
 
-#: A task on each board. Distinct ids, as Vikunja's are: the mismatch tests are
-#: only worth anything if asking the wrong board for one of these is a miss
-#: rather than a collision with something real.
+#: A task on each board, by both of its numbers. The **ids** are distinct, as
+#: Vikunja's are, so a board asked for another board's id misses rather than
+#: colliding with something real.
+#:
+#: The **numbers** are not distinct, and that is the point: they are handed out
+#: per project, so #2 is a real task on each board and a different one on each.
+#: A boundary that resolved a number without its board would not error here —
+#: it would return the other board's ticket and look right.
 ENGINE_TASK = 9
+ENGINE_NUMBER = 8
 TRADER_TASK = 40
+TRADER_NUMBER = 2
 TRADER_DONE_TASK = 39
+TRADER_DONE_NUMBER = 1
+
+#: #2 exists on both boards and means a different task on each.
+SHARED_NUMBER = 2
+ENGINE_SHARED_TASK = 1
+TRADER_SHARED_TASK = TRADER_TASK
+
+#: A number only one of the boards has, which is what makes a refusal a
+#: refusal rather than an absence: #10 is the Engine board's task 11, and #3
+#: is the Trader board's task 41.
+ENGINE_ONLY_NUMBER = 10
+TRADER_ONLY_NUMBER = 3
 UNAPPROVED_PROJECT = 1
 
 
@@ -61,14 +80,14 @@ class TestTheDefaultBoardIsUnchanged(McpTestCase):
     """
 
     def test_a_read_that_names_no_board_is_answered_by_the_default(self):
-        task = self.service.get_task(ENGINE_TASK)
+        task = self.service.get_task(ENGINE_NUMBER)
         self.assertEqual(task["project_id"], PROJECT_ID)
         self.assertEqual(task["project"], PROJECT_TITLE)
 
     def test_naming_the_default_explicitly_is_the_same_call(self):
         self.assertEqual(
-            self.service.get_task(ENGINE_TASK),
-            self.service.get_task(ENGINE_TASK, project_id=PROJECT_ID),
+            self.service.get_task(ENGINE_NUMBER),
+            self.service.get_task(ENGINE_NUMBER, project_id=PROJECT_ID),
         )
         self.assertEqual(
             self.service.list_open_tasks(),
@@ -106,8 +125,8 @@ class TestTheSecondBoardIsReadable(McpTestCase):
     """AI Alpha Trader, through the same three reads, named explicitly."""
 
     def test_one_task(self):
-        task = self.service.get_task(TRADER_TASK, project_id=TRADER_PROJECT_ID)
-        self.assertEqual(task["task_id"], TRADER_TASK)
+        task = self.service.get_task(TRADER_NUMBER, project_id=TRADER_PROJECT_ID)
+        self.assertEqual(task["vikunja_task_id"], TRADER_TASK)
         self.assertEqual(task["project_id"], TRADER_PROJECT_ID)
         self.assertEqual(task["project"], TRADER_TITLE)
         self.assertIn("execution architecture", task["title"])
@@ -118,7 +137,7 @@ class TestTheSecondBoardIsReadable(McpTestCase):
         self.assertEqual(listed["project_id"], TRADER_PROJECT_ID)
         self.assertEqual(listed["project"], TRADER_TITLE)
         self.assertEqual(
-            {task["task_id"] for task in listed["tasks"]}, {TRADER_TASK, 41}
+            {task["vikunja_task_id"] for task in listed["tasks"]}, {TRADER_TASK, 41}
         )
         # Its own count, not the Engine board's, and the done task is excluded.
         self.assertEqual(listed["count"], 2)
@@ -129,7 +148,7 @@ class TestTheSecondBoardIsReadable(McpTestCase):
         )
         self.assertEqual(found["project_id"], TRADER_PROJECT_ID)
         self.assertEqual(
-            [task["task_id"] for task in found["tasks"]], [TRADER_DONE_TASK]
+            [task["vikunja_task_id"] for task in found["tasks"]], [TRADER_DONE_TASK]
         )
 
     def test_its_buckets_are_its_own(self):
@@ -169,8 +188,8 @@ class TestOneBoardIsNeverAnsweredFromAnother(McpTestCase):
         engine = self.service.list_open_tasks()
         trader = self.service.list_open_tasks(project_id=TRADER_PROJECT_ID)
         self.assertEqual(
-            {task["task_id"] for task in engine["tasks"]}
-            & {task["task_id"] for task in trader["tasks"]},
+            {task["vikunja_task_id"] for task in engine["tasks"]}
+            & {task["vikunja_task_id"] for task in trader["tasks"]},
             set(),
         )
 
@@ -200,30 +219,75 @@ class TestATaskMustBeOnTheBoardThatWasNamed(McpTestCase):
 
     def test_the_default_board_does_not_serve_the_other_boards_task(self):
         with self.assertRaises(ToolError) as caught:
-            self.service.get_task(TRADER_TASK)
+            self.service.get_task(TRADER_ONLY_NUMBER)
         message = str(caught.exception)
-        self.assertIn(str(TRADER_TASK), message)
+        self.assertIn(str(TRADER_ONLY_NUMBER), message)
         self.assertIn(PROJECT_TITLE, message)
         # And it says where to look, rather than only that it will not.
         self.assertIn(TRADER_TITLE, message)
 
     def test_the_second_board_does_not_serve_the_default_boards_task(self):
         with self.assertRaises(ToolError) as caught:
-            self.service.get_task(ENGINE_TASK, project_id=TRADER_PROJECT_ID)
+            self.service.get_task(ENGINE_ONLY_NUMBER, project_id=TRADER_PROJECT_ID)
         self.assertIn(TRADER_TITLE, str(caught.exception))
+
+    def test_one_number_on_two_boards_is_two_tasks(self):
+        """The sharper form of the two refusals above.
+
+        A missing number refuses loudly, which is the easy case. This is the
+        quiet one: #2 exists on both boards, so a resolver that dropped the
+        project would return *a* real task with a plausible title and no error
+        at all. Nothing but the board decides which of the two answers.
+        """
+        engine = self.service.get_task(SHARED_NUMBER, project_id=PROJECT_ID)
+        trader = self.service.get_task(SHARED_NUMBER, project_id=TRADER_PROJECT_ID)
+
+        self.assertEqual(engine["task_number"], SHARED_NUMBER)
+        self.assertEqual(trader["task_number"], SHARED_NUMBER)
+        self.assertEqual(engine["vikunja_task_id"], ENGINE_SHARED_TASK)
+        self.assertEqual(trader["vikunja_task_id"], TRADER_SHARED_TASK)
+        self.assertNotEqual(engine["title"], trader["title"])
+
+    def test_the_default_board_answers_the_shared_number_with_its_own(self):
+        """Omitting project_id is the default board, not "whichever has one"."""
+        self.assertEqual(
+            self.service.get_task(SHARED_NUMBER),
+            self.service.get_task(SHARED_NUMBER, project_id=PROJECT_ID),
+        )
 
     def test_an_edit_naming_the_wrong_board_changes_nothing(self):
         with self.assertRaises(ToolError) as caught:
             self.service.update_task(
-                TRADER_TASK, title="Renamed", project_id=PROJECT_ID
+                TRADER_ONLY_NUMBER, title="Renamed", project_id=PROJECT_ID
             )
         self.assertIn("Nothing was changed", str(caught.exception))
         self.assertEqual(writes(self.vikunja), [])
 
+    def test_an_edit_on_a_shared_number_lands_on_the_board_that_was_named(self):
+        """The dangerous case for a write: both boards have a #2."""
+        preview = self.service.update_task(
+            SHARED_NUMBER, title="Renamed on the trader board",
+            project_id=TRADER_PROJECT_ID,
+        )
+        self.service.update_task(
+            SHARED_NUMBER,
+            title="Renamed on the trader board",
+            approval_token=preview["approval_token"],
+            project_id=TRADER_PROJECT_ID,
+        )
+        self.assertEqual(
+            self.vikunja._find(TRADER_SHARED_TASK)["title"],
+            "Renamed on the trader board",
+        )
+        self.assertNotEqual(
+            self.vikunja._find(ENGINE_SHARED_TASK)["title"],
+            "Renamed on the trader board",
+        )
+
     def test_a_comment_naming_the_wrong_board_writes_nothing(self):
         with self.assertRaises(ToolError) as caught:
             self.service.add_task_comment(
-                ENGINE_TASK, "A note.", project_id=TRADER_PROJECT_ID
+                ENGINE_ONLY_NUMBER, "A note.", project_id=TRADER_PROJECT_ID
             )
         self.assertIn("Nothing was changed", str(caught.exception))
         self.assertEqual(writes(self.vikunja), [])
@@ -237,9 +301,9 @@ class TestATaskMustBeOnTheBoardThatWasNamed(McpTestCase):
         self.assertEqual(created["project_id"], TRADER_PROJECT_ID)
         self.assertEqual(created["project"], TRADER_TITLE)
         self.assertEqual(
-            self.vikunja.bucket_of(created["task_id"], TRADER_PROJECT_ID), "Backlog"
+            self.vikunja.bucket_of(created["vikunja_task_id"], TRADER_PROJECT_ID), "Backlog"
         )
-        self.assertIsNone(self.vikunja.bucket_of(created["task_id"], PROJECT_ID))
+        self.assertIsNone(self.vikunja.bucket_of(created["vikunja_task_id"], PROJECT_ID))
 
 
 class TestAnUnapprovedProjectIsUnreachable(McpTestCase):
@@ -247,14 +311,16 @@ class TestAnUnapprovedProjectIsUnreachable(McpTestCase):
 
     def test_every_task_tool_refuses_a_project_outside_the_set(self):
         calls = {
-            "get_task": lambda pid: self.service.get_task(ENGINE_TASK, project_id=pid),
+            "get_task": lambda pid: self.service.get_task(
+                ENGINE_NUMBER, project_id=pid
+            ),
             "list_open_tasks": lambda pid: self.service.list_open_tasks(project_id=pid),
             "search_tasks": lambda pid: self.service.search_tasks("a", project_id=pid),
             "update_task": lambda pid: self.service.update_task(
-                ENGINE_TASK, title="Renamed", project_id=pid
+                ENGINE_NUMBER, title="Renamed", project_id=pid
             ),
             "add_task_comment": lambda pid: self.service.add_task_comment(
-                ENGINE_TASK, "A note.", project_id=pid
+                ENGINE_NUMBER, "A note.", project_id=pid
             ),
             "create_task": lambda pid: self.service.create_task(pid, "T", "B"),
         }
@@ -355,7 +421,7 @@ class TestTheApprovalFlowIsUnchangedOnBothBoards(McpTestCase):
 
     def test_a_preview_on_the_second_board_writes_nothing(self):
         preview = self.service.update_task(
-            TRADER_TASK, title="A renamed trader ticket",
+            TRADER_NUMBER, title="A renamed trader ticket",
             project_id=TRADER_PROJECT_ID,
         )
         self.assertTrue(preview["approval_required"])
@@ -366,11 +432,11 @@ class TestTheApprovalFlowIsUnchangedOnBothBoards(McpTestCase):
 
     def test_an_approved_edit_on_the_second_board_applies(self):
         preview = self.service.update_task(
-            TRADER_TASK, title="A renamed trader ticket",
+            TRADER_NUMBER, title="A renamed trader ticket",
             project_id=TRADER_PROJECT_ID,
         )
         applied = self.service.update_task(
-            TRADER_TASK,
+            TRADER_NUMBER,
             title="A renamed trader ticket",
             approval_token=preview["approval_token"],
             project_id=TRADER_PROJECT_ID,
@@ -378,19 +444,19 @@ class TestTheApprovalFlowIsUnchangedOnBothBoards(McpTestCase):
         self.assertTrue(applied["applied"])
         self.assertEqual(applied["project_id"], TRADER_PROJECT_ID)
         self.assertEqual(
-            self.service.get_task(TRADER_TASK, project_id=TRADER_PROJECT_ID)["title"],
+            self.service.get_task(TRADER_NUMBER, project_id=TRADER_PROJECT_ID)["title"],
             "A renamed trader ticket",
         )
 
     def test_a_comment_on_the_second_board_still_needs_its_token(self):
         preview = self.service.add_task_comment(
-            TRADER_TASK, "A trader note.", project_id=TRADER_PROJECT_ID
+            TRADER_NUMBER, "A trader note.", project_id=TRADER_PROJECT_ID
         )
         self.assertTrue(preview["approval_required"])
         self.assertEqual(writes(self.vikunja), [])
 
         added = self.service.add_task_comment(
-            TRADER_TASK,
+            TRADER_NUMBER,
             "A trader note.",
             approval_token=preview["approval_token"],
             project_id=TRADER_PROJECT_ID,
@@ -406,12 +472,12 @@ class TestTheApprovalFlowIsUnchangedOnBothBoards(McpTestCase):
         is not on the board named is not this connection's to change at all.
         """
         preview = self.service.update_task(
-            TRADER_TASK, title="A renamed trader ticket",
+            TRADER_NUMBER, title="A renamed trader ticket",
             project_id=TRADER_PROJECT_ID,
         )
         with self.assertRaises(ToolError) as caught:
             self.service.update_task(
-                TRADER_TASK,
+                TRADER_NUMBER,
                 title="A renamed trader ticket",
                 approval_token=preview["approval_token"],
                 project_id=PROJECT_ID,
@@ -419,18 +485,18 @@ class TestTheApprovalFlowIsUnchangedOnBothBoards(McpTestCase):
         self.assertIn("Nothing was changed", str(caught.exception))
         self.assertEqual(writes(self.vikunja), [])
         self.assertEqual(
-            self.service.get_task(TRADER_TASK, project_id=TRADER_PROJECT_ID)["title"],
+            self.service.get_task(TRADER_NUMBER, project_id=TRADER_PROJECT_ID)["title"],
             "Define the execution architecture",
         )
 
     def test_a_wrong_token_still_refuses_on_the_second_board(self):
         self.service.update_task(
-            TRADER_TASK, title="A renamed trader ticket",
+            TRADER_NUMBER, title="A renamed trader ticket",
             project_id=TRADER_PROJECT_ID,
         )
         with self.assertRaises(ToolError):
             self.service.update_task(
-                TRADER_TASK,
+                TRADER_NUMBER,
                 title="A renamed trader ticket",
                 approval_token="not-a-token",
                 project_id=TRADER_PROJECT_ID,
@@ -442,7 +508,7 @@ class TestTheApprovalFlowIsUnchangedOnBothBoards(McpTestCase):
         second = self.service.create_task(TRADER_PROJECT_ID, "A ticket", "A body.")
         self.assertTrue(first["created"])
         self.assertFalse(second["created"])
-        self.assertEqual(first["task_id"], second["task_id"])
+        self.assertEqual(first["vikunja_task_id"], second["vikunja_task_id"])
 
     def test_the_same_ticket_on_the_other_board_is_a_different_ticket(self):
         """The board is part of what a creation request *is*.
@@ -454,7 +520,7 @@ class TestTheApprovalFlowIsUnchangedOnBothBoards(McpTestCase):
         trader = self.service.create_task(TRADER_PROJECT_ID, "A ticket", "A body.")
         self.assertTrue(engine["created"])
         self.assertTrue(trader["created"])
-        self.assertNotEqual(engine["task_id"], trader["task_id"])
+        self.assertNotEqual(engine["vikunja_task_id"], trader["vikunja_task_id"])
 
 
 class TestTheApprovedSetIsConfiguration(unittest.TestCase):

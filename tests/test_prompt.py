@@ -64,7 +64,7 @@ class PromptGeneration(ServiceTestCase):
 
     def test_empty_description_is_stated_not_silently_blank(self):
         self.vikunja.layout["Ready"].append(
-            task(90, "#90 Bare ticket", "2026-07-26T07:00:00Z", "")
+            task(90, "#90 Bare ticket", "2026-07-26T07:00:00Z", "", index=89)
         )
         prompt = self.service.prompt_for(self.service.get(90))
         self.assertIn("(no description on the ticket)", prompt)

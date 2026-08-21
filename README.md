@@ -96,13 +96,28 @@ curl -s -X POST localhost:3460/task/9/work | jq
 
 ## Identity: task id, not `#NN`
 
-A ticket is identified by its **Vikunja task id** — immutable, assigned by
+**This section is about the launcher and `vkctl.py`. The MCP boundary answers
+the question differently — see [A task is named the way the board names
+it](#a-task-is-named-the-way-the-board-names-it-task-649).** That is not a
+contradiction: the launcher is reached from a `/tasks/<id>` URL a human already
+has open, and the MCP is reached from a `#N` a human read off a card.
+
+A ticket is identified here by its **Vikunja task id** — immutable, assigned by
 Vikunja, and what `/tasks/<id>` in the browser URL refers to. That is what the
 launcher resolves, what the run lock is keyed on, and what `vkctl.py` takes.
 
-The `#NN` prefix in the title is editable, so it is used only for display and
-for the commit reference. A task with no `#NN` prefix still works; its commit
-reference becomes `(vikunja task <id>)`.
+There are **three** numbers in play, and only the first two are Vikunja's:
+
+| Number | What it is | Who uses it |
+|---|---|---|
+| task id | global, immutable, `/tasks/<id>` | the launcher, `vkctl.py`, the run lock |
+| `index` | per project, rendered `#N` on the card | the MCP boundary (`task_number`) |
+| `#NN` title prefix | editable text at the front of a title | display, commit references |
+
+The `#NN` prefix is editable, so it is used only for display and for the commit
+reference. A task with no `#NN` prefix still works; its commit reference becomes
+`(vikunja task <id>)`. It is *not* the same thing as `index`, even though both
+render as `#` and a number, and the AI Alpha boards no longer carry one at all.
 
 `/ticket/{n}` remains as a convenience for humans who think in ticket numbers —
 it resolves the prefix and redirects to the canonical `/task/{id}`. Two tasks
@@ -271,20 +286,57 @@ systemctl --user status vikunja-claude       # still running
 
 | Tool | Does |
 |---|---|
-| `get_task(task_id, project_id?)` | Title, full description, status, bucket, labels, timestamps and comments for one task on one approved board |
-| `list_open_tasks(bucket?, label?, project_id?)` | Every task that is not done on one approved board — id, title, bucket, priority, labels and timestamps, most urgent first. No descriptions, no comments |
+| `get_task(task_number, project_id?)` | Title, full description, status, bucket, labels, timestamps and comments for one task on one approved board |
+| `list_open_tasks(bucket?, label?, project_id?)` | Every task that is not done on one approved board — number, title, bucket, priority, labels and timestamps, most urgent first. No descriptions, no comments |
 | `search_tasks(text, status?, project_id?)` | Tasks on one approved board whose title or description contains `text`. `status` is `open` (default), `done` or `any` — this is the one read that can see finished tasks, so it is what answers "is there already a ticket about this" |
-| `create_task(project_id, title, description)` | Creates one task on the named approved board and returns its id and URL. `project_id` is **required** here |
-| `update_task(task_id, title?, description?, approval_token?, project_id?)` | Replaces one existing task's title, description or both. Two calls: the first returns the exact current and proposed values with an approval token and writes nothing; the second must carry that token |
-| `add_task_comment(task_id, comment, approval_token?, project_id?)` | Appends one plain-text comment to an existing task, behind the same two-call approval |
+| `create_task(project_id, title, description)` | Creates one task on the named approved board and returns its number and URL. `project_id` is **required** here |
+| `update_task(task_number, title?, description?, approval_token?, project_id?)` | Replaces one existing task's title, description or both. Two calls: the first returns the exact current and proposed values with an approval token and writes nothing; the second must carry that token |
+| `add_task_comment(task_number, comment, approval_token?, project_id?)` | Appends one plain-text comment to an existing task, behind the same two-call approval |
+
+#### A task is named the way the board names it (task 649)
+
+**`task_number` is the `#N` shown on the card, and it is the only identifier
+these tools take.** Vikunja keeps two numbers per task: `index`, counted per
+project and rendered as `#N`, and the global `id` in a `/tasks/<id>` URL. They
+disagree — on the AI Alpha Engine board `#647` is task id 648 — and they
+disagree *by a few*, so almost every number is valid under both readings.
+A connector that took the id while people read the number therefore had no
+failure mode that looked like one: ask for "647", get a real ticket, on the
+right board, with a plausible title, and comment on the wrong one.
+
+Four rules follow, and `find_by_task_number` is where all four live so the
+reads and the two writes cannot drift apart:
+
+- **One resolver.** `get_task`, `update_task` and `add_task_comment` resolve
+  through the same call. The two-step approval still binds the *immutable*
+  task the number resolved to, because what a token promises is that the
+  second call reaches the row the first one read — a claim about the task, not
+  about how it was addressed.
+- **Never reinterpreted.** A number no task on the named board carries is
+  refused, and the refusal does not then try it as a `/tasks/<id>`. That
+  fallback would usually succeed, and succeeding is the damage.
+- **Never guessed.** Two tasks answering to one number is refused with both
+  ids, not resolved to the first.
+- **`task_id` is not an argument.** A call carrying one is refused by name
+  rather than ignored, so a client on the old contract is told what to send
+  instead of being silently right about half the time.
+
+Answers carry `task_number` (and `reference`, its `#N` form) as the identifier,
+and the immutable id as `vikunja_task_id` — debug metadata, named so that it
+cannot be mistaken for something to call back with. Listings are ordered on the
+number for the same reason: an order keyed on a field the answer does not
+publish is not an order its reader can read.
+
+The board number is per project, so it is only ever resolved together with one:
+`#2` is a real task on both boards and a different one on each. That makes the
+project boundary part of the identifier rather than a check applied to one.
 
 **`project_id` selects among the approved boards; it never widens the set.**
 An id outside it is refused by name rather than narrowed to the default, and
 the task must be on the board that was named — ownership is never inferred
-from a task id, which is unique across projects and would otherwise make
-"this task exists" stand in for "this task is yours". Widening the boundary
-is a configuration change, and each configured id is checked against the
-title Vikunja serves for it, so a project renumbered underneath the
+from a task number, which means nothing without its project. Widening the
+boundary is a configuration change, and each configured id is checked against
+the title Vikunja serves for it, so a project renumbered underneath the
 configuration is refused instead of read.
 
 Plus three **operational reads**, present only when they are configured (see
@@ -338,7 +390,7 @@ only filter this boundary ever sends is the constant `done = false`.
 
 ### Rules the reads hold
 
-`get_task` needs an id you already have. `list_open_tasks` is what answers
+`get_task` needs a number you already have. `list_open_tasks` is what answers
 "what is open". Both read the board through the same paging, and the only
 failure that matters for either is a quiet one, so:
 
@@ -352,14 +404,16 @@ failure that matters for either is a quiet one, so:
   instead of returning a shorter board. **There is deliberately no "first page"
   read left in the client** — that one was what made `get_task` deny task 35,
   which exists, while blaming the caller for confusing a task id with a view id.
-- **A lookup by id asks for that id, and a miss is not an absence.**
-  `find_by_task_id` filters the view to the one id, which is constant cost and
+- **A lookup asks for the one task, and a miss is not an absence.**
+  `find_by_task_number` filters the view to `index = N` and `find_by_task_id`
+  to `id = N` — the same shape, one per question. Either is constant cost and
   keeps the project boundary structural — it is *this project's* view, so
   another project's task is not in the answer to begin with. (`GET /tasks/{id}`
   would be one request too, but it serves any task in any project and reports
   `bucket_id: 0`, so it can answer neither "is this mine" nor "which column".)
   If the filter yields nothing, the complete walk runs before "no such task" is
-  said. Note which failure that guards: a filter the server *ignores* is
+  said — and for the number, that walk is also what makes a duplicate visible
+  rather than silently taking the first match. Note which failure that guards: a filter the server *ignores* is
   harmless, because the walk then covers the whole board anyway — the harmful
   one is a filter that is applied and matches nothing, whose reply is
   well-formed and consistent and says nothing about the difference between
@@ -372,8 +426,10 @@ failure that matters for either is a quiet one, so:
   back as an error naming the real ones. An *empty* column is a real, empty
   answer. An unused label is likewise a real observation, and the labels
   actually in use come back with it.
-- **The order is total.** Most urgent first, then by task id — priority alone
-  is not an order, since most of the board sits at 0.
+- **The order is total.** Most urgent first, then by the board number the
+  answer publishes — priority alone is not an order, since most of the board
+  sits at 0. A task Vikunja gave no number sorts last, on its id, which keeps
+  the key total without inventing one.
 
 It also has no shell, no database connection and no filesystem access beyond
 its own ledger, because nothing in `mcp_service.py` has any of those.
@@ -639,7 +695,7 @@ curl -s localhost:3461/mcp -H "Authorization: Bearer $ACCESS_TOKEN" \
 
 curl -s localhost:3461/mcp -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_task","arguments":{"task_id":138}}}' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_task","arguments":{"task_number":138}}}' \
   | jq -r '.result.structuredContent.title'
 ```
 
@@ -976,7 +1032,7 @@ not reach.
 ```
 vikunja_claude/
   config.py       env-driven settings for both services, optional .env
-  vikunja.py      Vikunja client, Ticket, #NN lookup
+  vikunja.py      Vikunja client, Ticket, lookup by task id, board number, #NN
   html_text.py    description HTML ↔ plain text
   prompt.py       the prompt template
   launcher.py     locks, spawn, logging, reaping
@@ -993,6 +1049,7 @@ vikunja_claude/
   oauth_store.py  clients, codes and tokens as one 0600 JSON file
 vkctl.py          board updates for the launched Claude
 tests/            lookup, prompt, duplicate launches, API errors, MCP, OAuth
+                  test_mcp_task_numbers.py: the board number is the identifier
 systemd/          two user units: launcher, MCP boundary
 browser/          bookmarklet source
 ```
