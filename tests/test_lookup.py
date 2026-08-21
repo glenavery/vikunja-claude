@@ -58,7 +58,7 @@ class TicketLookup(ServiceTestCase):
 
     def test_duplicate_numbers_are_ambiguous_not_arbitrary(self):
         self.vikunja.layout["Backlog"].append(
-            task(77, "#33 A second ticket claiming 33", "2026-07-26T06:00:00Z")
+            task(77, "#33 A second ticket claiming 33", "2026-07-26T06:00:00Z", index=76)
         )
         with self.assertRaises(AmbiguousTicket) as caught:
             self.service.get(33)
@@ -67,7 +67,7 @@ class TicketLookup(ServiceTestCase):
     def test_tasks_without_a_number_are_still_usable(self):
         """Identity is the task id, so a missing #NN prefix is not fatal."""
         self.vikunja.layout["Ready"].append(
-            task(78, "No ticket prefix at all", "2026-07-26T06:00:00Z")
+            task(78, "No ticket prefix at all", "2026-07-26T06:00:00Z", index=77)
         )
         ticket = self.service.get_task(78)
         self.assertIsNone(ticket.number)
@@ -107,7 +107,7 @@ class TaskIdLookup(ServiceTestCase):
 
     def test_duplicate_hash_prefixes_do_not_affect_task_id_lookup(self):
         self.vikunja.layout["Backlog"].append(
-            task(77, "#33 A second ticket claiming 33", "2026-07-26T06:00:00Z")
+            task(77, "#33 A second ticket claiming 33", "2026-07-26T06:00:00Z", index=76)
         )
         self.assertEqual(self.service.get_task(9).task_id, 9)
         self.assertEqual(self.service.get_task(77).task_id, 77)
@@ -116,7 +116,13 @@ class TaskIdLookup(ServiceTestCase):
 #: Bigger than one Vikunja page (50), so the tasks below live on page 3 and are
 #: unreachable to anything that reads a single page of the bucket.
 DEEP_DONE = [
-    task(2000 + i, f"#{2000 + i} Closed long ago", "2026-07-20T00:00:00Z", done=True)
+    task(
+        2000 + i,
+        f"#{2000 + i} Closed long ago",
+        "2026-07-20T00:00:00Z",
+        done=True,
+        index=1999 + i,
+    )
     for i in range(120)
 ]
 
@@ -131,8 +137,10 @@ class ADeepBucketIsStillReachable(ServiceTestCase):
     """
 
     layout = {
-        "Backlog": [task(5, "#29 Admin", "2026-07-26T05:01:00Z")],
-        "Ready": [task(9, "#33 Back up Vikunja database", "2026-07-26T05:05:50Z")],
+        "Backlog": [task(5, "#29 Admin", "2026-07-26T05:01:00Z", index=4)],
+        "Ready": [
+            task(9, "#33 Back up Vikunja database", "2026-07-26T05:05:50Z", index=8)
+        ],
         "In Progress": [],
         "Waiting": [],
         "Done": DEEP_DONE,
@@ -251,7 +259,12 @@ class TheLookupStaysInsideItsProject(ServiceTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.vikunja.foreign = {
-            self.FOREIGN: task(self.FOREIGN, "#1 Someone else's ticket", "2026-07-01T00:00:00Z")
+            self.FOREIGN: task(
+                self.FOREIGN,
+                "#1 Someone else's ticket",
+                "2026-07-01T00:00:00Z",
+                index=1,
+            )
         }
 
     def test_the_foreign_task_really_is_fetchable_by_bare_id(self):
@@ -293,13 +306,13 @@ class NextReadyTicket(ServiceTestCase):
 
     def test_ignores_other_buckets(self):
         self.vikunja.layout["Backlog"].append(
-            task(80, "#20 Ancient backlog item", "2020-01-01T00:00:00Z")
+            task(80, "#20 Ancient backlog item", "2020-01-01T00:00:00Z", index=79)
         )
         self.assertEqual(self.service.next_ready().number, 33)
 
     def test_ignores_done_tickets_left_in_ready(self):
         self.vikunja.layout["Ready"].insert(
-            0, task(81, "#21 Old but done", "2020-01-01T00:00:00Z", done=True)
+            0, task(81, "#21 Old but done", "2020-01-01T00:00:00Z", done=True, index=80)
         )
         self.assertEqual(self.service.next_ready().number, 33)
 

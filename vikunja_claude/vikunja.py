@@ -82,16 +82,31 @@ class TicketNotFound(VikunjaError):
 
 
 class AmbiguousTicket(VikunjaError):
-    """More than one task carries the same #NN prefix."""
+    """One number names more than one task on the board.
+
+    Raised rather than resolved. Both lookups that can hit it — the legacy
+    ``#NN`` title prefix and Vikunja's project-local index — exist to turn a
+    number a human read into exactly one task, so picking one of several is
+    the failure, not the recovery.
+    """
 
 
 @dataclass(frozen=True)
 class Ticket:
     """A Vikunja task.
 
-    Identity is ``task_id`` — immutable, assigned by Vikunja. ``number`` is the
-    editable ``#NN`` prefix humans use; it may be absent, and it is only ever
-    used for display and for the commit reference.
+    Three numbers, and they are not each other. ``task_id`` is Vikunja's
+    immutable global id — the number in a ``/tasks/<id>`` URL, unique across
+    every project. ``task_number`` is Vikunja's ``index``: the per-project
+    counter it renders as ``#N`` on the board, which is the number a human
+    reading the board is looking at. ``number`` is the legacy ``#NN`` *title
+    prefix* this board used before 2026-07-26, kept for the boards and commit
+    messages that still carry one.
+
+    The first two routinely disagree by a few, because ids are handed out
+    across all projects and indexes are not: on the AI Alpha Engine board,
+    ``#647`` is task id 648. Anything published to a caller says which one it
+    is quoting.
     """
 
     task_id: int
@@ -102,6 +117,10 @@ class Ticket:
     done: bool
     created: str
     number: int | None = None
+    #: Vikunja's ``index`` — the project-local number shown on the board. None
+    #: only when Vikunja did not report one, which is a task this code cannot
+    #: name the way the board names it.
+    task_number: int | None = None
     labels: list[str] = field(default_factory=list)
     #: Vikunja's 0-5 scale, where 0 is "unset" and 5 is the most urgent. Kept as
     #: the number Vikunja stores; naming it is presentation, and lives above.
@@ -123,6 +142,19 @@ class Ticket:
         return f"#{self.number}" if self.number is not None else f"task {self.task_id}"
 
     @property
+    def board_reference(self) -> str:
+        """How the board names this task — what a human sees and types.
+
+        Falls back to the immutable id rather than inventing a number, and
+        says which it fell back to: "#647" and "task 647" are different tasks,
+        so a bare number with no scheme attached is the ambiguity this whole
+        identifier is here to remove.
+        """
+        if self.task_number is not None:
+            return f"#{self.task_number}"
+        return f"task {self.task_id} (no project-local number)"
+
+    @property
     def commit_ref(self) -> str:
         """What a commit message should carry to link back to the board."""
         if self.number is not None:
@@ -139,6 +171,22 @@ def ticket_number(title: str) -> int | None:
     """Return the #NN ticket number in a title, or None if it has no prefix."""
     match = TICKET_RE.match(title or "")
     return int(match.group(1)) if match else None
+
+
+def task_index(value: Any) -> int | None:
+    """Vikunja's ``index`` as an int, or None if it did not send a usable one.
+
+    Zero is treated as absent. Vikunja numbers a project's tasks from 1, so a
+    0 is the JSON zero value of a field the reply left out — reporting it as
+    the board number ``#0`` would name a task that cannot be looked up.
+    """
+    if value is None:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
 
 
 class VikunjaClient:
@@ -260,6 +308,7 @@ class VikunjaClient:
         # A missing #NN prefix is fine: identity is the task id.
         return Ticket(
             number=ticket_number(task.get("title", "")),
+            task_number=task_index(task.get("index")),
             task_id=int(task["id"]),
             title=task.get("title", ""),
             description_html=task.get("description") or "",
@@ -397,6 +446,69 @@ class VikunjaClient:
             f"/tasks/{task_id}; /projects/N/M is a board view, not a task.)",
             status=404,
         )
+
+    def find_by_task_number(
+        self, task_number: int, project_id: int, view_id: int
+    ) -> Ticket:
+        """The task the board shows as ``#task_number``, on this project only.
+
+        This is the lookup a caller who read a number off the board wants, and
+        it is deliberately not :meth:`find_by_task_id` with a different
+        argument name: Vikunja hands out ids globally and indexes per project,
+        so the same integer usually names two different tasks. Resolving the
+        wrong one succeeds — it returns a real task, on the right board, with a
+        plausible title — which is why this never falls back to the other
+        interpretation on a miss.
+
+        Cheap path first: ``index = N`` is a server-side filter, so the common
+        case is one request. A filtered miss is not an absence — the same
+        reasoning as :meth:`find_by_task_id` — so it walks the whole board
+        before saying no, and that walk is also what makes a duplicate index
+        visible instead of silently taking the first match.
+        """
+        wanted = int(task_number)
+        if wanted <= 0:
+            raise TicketNotFound(
+                f"{task_number!r} is not a project-local task number: the "
+                "board numbers its tasks from 1.",
+                status=404,
+            )
+
+        found = self._matching_index(
+            self._walk_view(project_id, view_id, f"index = {wanted}"), wanted
+        )
+        if not found:
+            found = self._matching_index(
+                self.list_all_tickets(project_id, view_id), wanted
+            )
+        if not found:
+            raise TicketNotFound(
+                f"No task #{wanted} in this project. (#{wanted} is the number "
+                f"the board shows beside a title; Vikunja's own /tasks/{wanted} "
+                "is a different number and usually a different task.)",
+                status=404,
+            )
+        if len(found) > 1:
+            ids = ", ".join(str(t.task_id) for t in found)
+            raise AmbiguousTicket(
+                f"#{wanted} matches {len(found)} tasks on this board (ids: "
+                f"{ids}). Refusing to guess which one was meant.",
+                status=409,
+            )
+        return found[0]
+
+    @staticmethod
+    def _matching_index(tickets: list[Ticket], wanted: int) -> list[Ticket]:
+        """Every ticket in ``tickets`` whose project-local number is ``wanted``.
+
+        The filter is an optimisation, never the answer: what came back is
+        checked here, so a Vikunja that ignored ``index = N`` and served the
+        whole board still yields the one right ticket rather than whatever the
+        first bucket happened to hold. It is also what turns "two tasks claim
+        this number" into something the caller can see, since a check that
+        stopped at the first match could not report the second.
+        """
+        return [t for t in tickets if t.task_number == wanted]
 
     def find_ticket(self, number: int, project_id: int, view_id: int) -> Ticket:
         # The whole board, not a filtered slice: #NN is a title prefix rather

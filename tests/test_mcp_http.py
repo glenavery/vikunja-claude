@@ -52,7 +52,7 @@ class TestAuthentication(HttpTestCase):
     def test_a_refused_request_never_reaches_vikunja(self):
         """The refusal is not a narrower version of the same surface."""
         self.rpc(
-            "tools/call", {"name": "get_task", "arguments": {"task_id": 9}}, token=None
+            "tools/call", {"name": "get_task", "arguments": {"task_number": 8}}, token=None
         )
         self.assertEqual(self.vikunja.calls, [])
 
@@ -71,7 +71,7 @@ class TestBrowserOriginsAreRefused(HttpTestCase):
     def test_it_is_refused_before_anything_is_read(self):
         self.rpc(
             "tools/call",
-            {"name": "get_task", "arguments": {"task_id": 9}},
+            {"name": "get_task", "arguments": {"task_number": 8}},
             headers={"Origin": "http://127.0.0.1:3456"},
         )
         self.assertEqual(self.vikunja.calls, [])
@@ -135,10 +135,10 @@ class TestFraming(HttpTestCase):
         self.assertEqual(json.loads(text)["result"]["protocolVersion"], "2025-06-18")
 
         status, _, text = self.rpc(
-            "tools/call", {"name": "get_task", "arguments": {"task_id": 9}}
+            "tools/call", {"name": "get_task", "arguments": {"task_number": 8}}
         )
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(text)["result"]["structuredContent"]["task_id"], 9)
+        self.assertEqual(json.loads(text)["result"]["structuredContent"]["vikunja_task_id"], 9)
 
 
 class TestMalformedRequests(HttpTestCase):

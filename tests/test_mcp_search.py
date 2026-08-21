@@ -20,13 +20,14 @@ from .support import McpTestCase
 
 LAYOUT = {
     "Backlog": [
-        task(5, "#29 Admin: surface generation mode", "2026-07-26T05:01:00Z"),
+        task(5, "#29 Admin: surface generation mode", "2026-07-26T05:01:00Z", index=4),
         task(
             6,
             "#30 Cloudflare client-IP hop",
             "2026-07-26T05:02:00Z",
             "<p>The hop is trusted without verification.</p>",
             priority=4,
+            index=5,
         ),
     ],
     "Ready": [
@@ -36,6 +37,7 @@ LAYOUT = {
             "2026-07-26T05:05:50Z",
             "<p>Vikunja is the authoritative queue.</p>",
             labels=["Operations"],
+            index=8,
         ),
     ],
     "In Progress": [],
@@ -45,6 +47,7 @@ LAYOUT = {
             "#35 Connect ChatGPT to AI Server",
             "2026-07-26T05:20:00Z",
             "<p>Read authoritative information and create tickets.</p>",
+            index=10,
         ),
     ],
     "Done": [
@@ -54,6 +57,7 @@ LAYOUT = {
             "2026-07-26T04:59:00Z",
             "<p>Already handled last week.</p>",
             done=True,
+            index=2,
         ),
     ],
 }
@@ -73,7 +77,7 @@ class SearchTestCase(McpTestCase):
 class TestWhatItFinds(SearchTestCase):
     def test_a_title_substring_matches(self):
         found = self.search(text="Cloudflare")
-        self.assertEqual([t["task_id"] for t in found["tasks"]], [6])
+        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [6])
         self.assertEqual(found["tasks"][0]["matched_in"], "title")
 
     def test_matching_is_case_insensitive(self):
@@ -82,7 +86,7 @@ class TestWhatItFinds(SearchTestCase):
 
     def test_a_description_substring_matches_and_says_so(self):
         found = self.search(text="authoritative")
-        by_id = {t["task_id"]: t for t in found["tasks"]}
+        by_id = {t["vikunja_task_id"]: t for t in found["tasks"]}
         self.assertIn(9, by_id)
         self.assertIn(11, by_id)
         self.assertEqual(by_id[9]["matched_in"], "description")
@@ -115,16 +119,16 @@ class TestStatus(SearchTestCase):
     def test_open_is_the_default_and_excludes_done_tasks(self):
         found = self.search(text="Back up")
         self.assertEqual(found["status"], "open")
-        self.assertEqual([t["task_id"] for t in found["tasks"]], [9])
+        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [9])
 
     def test_done_finds_only_finished_tasks(self):
         found = self.search(text="Back up", status="done")
-        self.assertEqual([t["task_id"] for t in found["tasks"]], [1])
+        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [1])
         self.assertEqual(found["tasks"][0]["status"], "done")
 
     def test_any_finds_both(self):
         found = self.search(text="Back up", status="any")
-        self.assertEqual({t["task_id"] for t in found["tasks"]}, {1, 9})
+        self.assertEqual({t["vikunja_task_id"] for t in found["tasks"]}, {1, 9})
 
     def test_a_status_that_is_not_a_status_is_refused(self):
         """Not silently narrowed: "closed" is not "done", and guessing would lie."""
@@ -197,9 +201,9 @@ class TestItReadsTheWholeBoard(unittest.TestCase):
     def test_every_bucket_page_is_walked(self):
         many = {
             "Backlog": [
-                task(100 + n, f"#{100 + n} filler {n}", "2026-07-26T05:00:00Z")
+                task(100 + n, f"#{100 + n} filler {n}", "2026-07-26T05:00:00Z", index=99 + n)
                 for n in range(120)
-            ] + [task(999, "#999 the needle", "2026-07-26T05:00:00Z")],
+            ] + [task(999, "#999 the needle", "2026-07-26T05:00:00Z", index=998)],
             "Ready": [],
             "In Progress": [],
             "Waiting": [],
@@ -218,7 +222,7 @@ class TestItReadsTheWholeBoard(unittest.TestCase):
             )
             found = service.search_tasks("the needle")
 
-        self.assertEqual([t["task_id"] for t in found["tasks"]], [999])
+        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [999])
         self.assertEqual(found["searched"], 121)
 
 

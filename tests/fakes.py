@@ -37,9 +37,26 @@ TRADER_BUCKETS = [
 ]
 
 
-def task(task_id: int, title: str, created: str, description: str = "", **extra):
+def task(
+    task_id: int,
+    title: str,
+    created: str,
+    description: str = "",
+    *,
+    index: int,
+    **extra,
+):
+    """One stored task, with both of its numbers.
+
+    ``index`` is keyword-only and has **no default** on purpose. Vikunja's
+    project-local number and its global task id are different numbers, and
+    every fixture in this suite states both — a default would let them agree
+    by accident, and a fixture where ``#N`` happens to be ``/tasks/N`` cannot
+    fail the confusion these tests exist to catch.
+    """
     return {
         "id": task_id,
+        "index": index,
         "title": title,
         "created": created,
         "updated": extra.get("updated", created),
@@ -50,8 +67,21 @@ def task(task_id: int, title: str, created: str, description: str = "", **extra)
     }
 
 
+#: The board, with **no task whose number is its own id**, and two numbers that
+#: are some *other* task's id. Task 10 is #9 while task 9 exists as #8, so a
+#: lookup that quietly fell back to `/tasks/<id>` would not error — it would
+#: return a real, plausible, wrong task, which is the failure the project-local
+#: identifier exists to make impossible. Live boards look like this: on the AI
+#: Alpha Engine board #647 is task id 648.
 DEFAULT_LAYOUT = {
-    "Backlog": [task(5, "#29 Admin: surface generation mode", "2026-07-26T05:01:00Z")],
+    "Backlog": [
+        task(
+            5,
+            "#29 Admin: surface generation mode",
+            "2026-07-26T05:01:00Z",
+            index=4,
+        )
+    ],
     "Ready": [
         task(
             9,
@@ -60,20 +90,44 @@ DEFAULT_LAYOUT = {
             "<p>Vikunja is now the <strong>authoritative</strong> queue.</p>"
             "<ul><li>cover <code>vikunja-db</code></li></ul>",
             labels=["Operations"],
+            index=8,
         ),
-        task(10, "#34 Version the OpenClaw health-check skill", "2026-07-26T05:09:00Z"),
+        task(
+            10,
+            "#34 Version the OpenClaw health-check skill",
+            "2026-07-26T05:09:00Z",
+            index=9,
+        ),
     ],
     "In Progress": [
-        task(11, "#35 Add “Work with Claude” integration", "2026-07-26T05:20:00Z")
+        task(
+            11,
+            "#35 Add “Work with Claude” integration",
+            "2026-07-26T05:20:00Z",
+            index=10,
+        )
     ],
     "Waiting": [],
-    "Done": [task(1, "#25 Wrap the reports step", "2026-07-26T04:59:00Z", done=True)],
+    "Done": [
+        task(
+            1,
+            "#25 Wrap the reports step",
+            "2026-07-26T04:59:00Z",
+            done=True,
+            index=2,
+        )
+    ],
 }
 
 #: The Trader board. Task 1 is deliberately *its* task 1, not a copy of the
 #: Engine board's — Vikunja task ids are unique across projects, so the two
 #: boards never share one, and a test that asks the wrong board for a task id
 #: must miss rather than match something plausible.
+#:
+#: Its **numbers**, though, do collide with the Engine board's, because they
+#: are per project: #2 is task 40 here and task 1 there. That is not a quirk
+#: of the fake — it is why a project-local number is only ever resolved
+#: together with the board it was read from.
 TRADER_LAYOUT = {
     "Backlog": [
         task(
@@ -81,6 +135,7 @@ TRADER_LAYOUT = {
             "Size a position from the S7 conviction band",
             "2026-08-19T09:10:00Z",
             "<p>Trader sizing rules.</p>",
+            index=3,
         )
     ],
     "Ready": [
@@ -91,6 +146,7 @@ TRADER_LAYOUT = {
             "<p>How orders reach a broker.</p>",
             labels=["Investigation"],
             priority=4,
+            index=2,
         )
     ],
     "In Progress": [],
@@ -100,6 +156,7 @@ TRADER_LAYOUT = {
             "Pick the paper-trading venue",
             "2026-08-17T07:00:00Z",
             done=True,
+            index=1,
         )
     ],
 }
@@ -278,6 +335,10 @@ class FakeVikunja:
                 tasks = [t for t in tasks if not t.get("done")]
             elif wanted.startswith("id="):
                 tasks = [t for t in tasks if t["id"] == int(wanted[3:])]
+            elif wanted.startswith("index="):
+                # Served the way Vikunja serves it: per project, so the same
+                # number matches a different task on the other board.
+                tasks = [t for t in tasks if t.get("index") == int(wanted[6:])]
             elif wanted:
                 raise VikunjaError(f"FakeVikunja cannot apply filter {wanted!r}")
             start = (page - 1) * KANBAN_BUCKET_PAGE_SIZE
@@ -328,7 +389,7 @@ class FakeVikunja:
             stored[key] = body.get(key, "")
         stored["done"] = bool(body.get("done", False))
         for key, value in body.items():
-            if key not in ("id", "title", "description", "done"):
+            if key not in ("id", "index", "title", "description", "done"):
                 stored[key] = value
         return stored
 
@@ -345,11 +406,23 @@ class FakeVikunja:
             ),
             default=0,
         ) + 1
+        # The number, unlike the id, is per project and counts that board's
+        # own tasks — so a create on the second board gets a low number while
+        # its id is high, which is what the live boards do.
+        next_index = max(
+            (
+                t.get("index") or 0
+                for tasks in board["layout"].values()
+                for t in tasks
+            ),
+            default=0,
+        ) + 1
         item = task(
             new_id,
             body.get("title", ""),
             "2026-07-27T00:00:00Z",
             body.get("description", ""),
+            index=next_index,
         )
         board["layout"].setdefault("Backlog", []).append(item)
         return item
