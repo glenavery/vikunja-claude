@@ -21,6 +21,7 @@ from vikunja_claude.config import (
     InvestmentConfig,
     McpConfig,
     OAuthConfig,
+    ProjectRef,
 )
 from vikunja_claude.launcher import Launcher
 from vikunja_claude.mcp import McpProtocol
@@ -29,7 +30,22 @@ from vikunja_claude.mcp_service import McpService
 from vikunja_claude.service import TicketService
 from vikunja_claude.vikunja import VikunjaClient
 
-from .fakes import FakeVikunja, RecordingSpawn
+from .fakes import (
+    PROJECT_ID,
+    PROJECT_TITLE,
+    TRADER_PROJECT_ID,
+    TRADER_TITLE,
+    FakeVikunja,
+    RecordingSpawn,
+)
+
+#: The approved boards the MCP harness is configured with, matching what the
+#: fake Vikunja serves. Built from the fake's constants rather than repeated,
+#: so a test cannot be configured for a board the fake does not have.
+APPROVED_PROJECTS = (
+    ProjectRef(PROJECT_ID, PROJECT_TITLE),
+    ProjectRef(TRADER_PROJECT_ID, TRADER_TITLE),
+)
 
 TOKEN = "test-token-never-in-prompts"
 PASSPHRASE = "test-operator-passphrase-long-enough-to-be-plausible"
@@ -144,14 +160,13 @@ def make_mcp_config(state_dir: Path, **overrides) -> McpConfig:
         api_url="http://127.0.0.1:3456/api/v1",
         token=TOKEN,
         oauth=oauth,
-        project_title="AI Alpha Engine",
+        projects=APPROVED_PROJECTS,
         frontend_url="http://127.0.0.1:3456",
         host="127.0.0.1",
         # 0 asks the OS for a free port, so tests never collide with the
         # running service or with each other.
         port=0,
         state_dir=state_dir,
-        project_id=None,
     )
     defaults.update(overrides)
     return McpConfig(**defaults)

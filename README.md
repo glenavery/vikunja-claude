@@ -241,11 +241,17 @@ Decide that consciously; the service will not decide it for you.
 
 ## The MCP boundary (ChatGPT)
 
-A second, separate service that lets an outside assistant **read the board**,
+A second, separate service that lets an outside assistant **read the boards**,
 **create a ticket**, **correct a ticket's wording**, **comment on one**, **read
 a few operational facts about the AI Server** and **read a public page of its
 website** — so project context does not have to be pasted in by hand, and a
 ticket dictated in a conversation does not have to be retyped onto the board.
+
+It serves an **approved set of boards**, not every project on the Vikunja:
+`AI Alpha Engine` (project 2) and `AI Alpha Trader` (project 3) by default,
+named in `VIKUNJA_MCP_PROJECTS`. Every task tool takes an optional
+`project_id` naming which one it means, and omitting it means the first —
+so a caller written when there was one board keeps getting that board.
 
 It was built for ChatGPT and the heading keeps that name because the published
 `service_documentation` metadata links to this anchor, but the boundary is not
@@ -265,12 +271,21 @@ systemctl --user status vikunja-claude       # still running
 
 | Tool | Does |
 |---|---|
-| `get_task(task_id)` | Title, full description, status, bucket, labels, timestamps and comments for one task on the **AI Alpha Engine** board |
-| `list_open_tasks(bucket?, label?)` | Every task that is not done on that board — id, title, bucket, priority, labels and timestamps, most urgent first. No descriptions, no comments |
-| `search_tasks(text, status?)` | Tasks whose title or description contains `text`. `status` is `open` (default), `done` or `any` — this is the one read that can see finished tasks, so it is what answers "is there already a ticket about this" |
-| `create_task(project_id, title, description)` | Creates one task on that board and returns its id and URL |
-| `update_task(task_id, title?, description?, approval_token?)` | Replaces one existing task's title, description or both. Two calls: the first returns the exact current and proposed values with an approval token and writes nothing; the second must carry that token |
-| `add_task_comment(task_id, comment, approval_token?)` | Appends one plain-text comment to an existing task, behind the same two-call approval |
+| `get_task(task_id, project_id?)` | Title, full description, status, bucket, labels, timestamps and comments for one task on one approved board |
+| `list_open_tasks(bucket?, label?, project_id?)` | Every task that is not done on one approved board — id, title, bucket, priority, labels and timestamps, most urgent first. No descriptions, no comments |
+| `search_tasks(text, status?, project_id?)` | Tasks on one approved board whose title or description contains `text`. `status` is `open` (default), `done` or `any` — this is the one read that can see finished tasks, so it is what answers "is there already a ticket about this" |
+| `create_task(project_id, title, description)` | Creates one task on the named approved board and returns its id and URL. `project_id` is **required** here |
+| `update_task(task_id, title?, description?, approval_token?, project_id?)` | Replaces one existing task's title, description or both. Two calls: the first returns the exact current and proposed values with an approval token and writes nothing; the second must carry that token |
+| `add_task_comment(task_id, comment, approval_token?, project_id?)` | Appends one plain-text comment to an existing task, behind the same two-call approval |
+
+**`project_id` selects among the approved boards; it never widens the set.**
+An id outside it is refused by name rather than narrowed to the default, and
+the task must be on the board that was named — ownership is never inferred
+from a task id, which is unique across projects and would otherwise make
+"this task exists" stand in for "this task is yours". Widening the boundary
+is a configuration change, and each configured id is checked against the
+title Vikunja serves for it, so a project renumbered underneath the
+configuration is refused instead of read.
 
 Plus three **operational reads**, present only when they are configured (see
 [Operational reads](#operational-reads-ai-server-status) below):
@@ -365,10 +380,11 @@ its own ledger, because nothing in `mcp_service.py` has any of those.
 
 ### Rules the write path holds
 
-- **One project, named not defaulted.** `project_id` is required, and a value
-  other than the configured project is refused outright. It is never silently
-  redirected — creating the ticket in the wrong place is the failure this
-  exists to prevent.
+- **An approved project, named not defaulted.** `project_id` is required on
+  the create — the one tool where it is — and a value outside the approved set
+  is refused outright. It is never silently redirected, and never falls back
+  to the default board: creating the ticket in the wrong place is the failure
+  this exists to prevent, and unlike a read it cannot be taken back.
 - **A retry is not a second ticket.** Identity is the content: the same
   project, title and description returns the first task and reports
   `created: false`. The ledger is on disk, so a restart does not reopen the
@@ -425,10 +441,12 @@ the rules they add.
   a whole-task replace. Both fields go in one `set_task_fields` call, built on
   the client's single read-modify-write path, so the task never sits with a new
   title and an old description.
-- **The task is found through this project's board view**, exactly as the reads
-  are, so a task on somebody else's board is not in the answer to begin with.
-  The refusal does not depend on comparing a project id the caller supplied, and
-  it cannot be bought with a valid approval for a different task.
+- **The task is found through the named board's view**, exactly as the reads
+  are, so a task on any other board — approved or not — is not in the answer to
+  begin with. The refusal does not depend on comparing a project id Vikunja
+  reported, it cannot be bought with a valid approval for a different task, and
+  the board is re-resolved inside the lock on the second call, so an approval
+  cannot be redeemed against a task on a different board either.
 - **Idempotent, in the way each one can be.** An update to the value a task
   already holds changes nothing and says so — which is also what a repeat of an
   applied change lands on. A comment identical to one already on the task
@@ -531,6 +549,7 @@ VIKUNJA_MCP_OAUTH_PASSPHRASE=<the value generated above>
 | `VIKUNJA_MCP_OAUTH_PASSPHRASE` | **Required.** At least 32 characters. Typed at the consent screen; five wrong answers lock it for five minutes |
 | `VIKUNJA_MCP_OAUTH_REDIRECT_URIS` | Optional. Space- or comma-separated exact URIs. Defaults to `https://chatgpt.com/connector_platform_oauth_redirect`, and **setting it replaces that default** — list the ChatGPT callback again alongside whatever you add. ChatGPT's per-connector callback is admitted by shape as well and needs no entry here; every other client does need one, e.g. `https://claude.ai/api/mcp/auth_callback` for Claude |
 | `VIKUNJA_MCP_OAUTH_CLIENT_ID` / `_SECRET` | Optional. A pre-registered client, for a ChatGPT dialog that insists on a client id instead of registering one itself |
+| `VIKUNJA_MCP_PROJECTS` | Optional. The boards this connection may reach, as `id:title` entries, comma separated — `2:AI Alpha Engine, 3:AI Alpha Trader` is the default. The first is the board a call that names none is answered from. Id **and** title, because each checks the other: the id is what a caller names, and the title is compared against what Vikunja serves for that id, so a renumbered project is refused rather than read. This is the MCP's own setting — the launcher's `VIKUNJA_PROJECT` still names the one board it works |
 
 The server refuses to start if the issuer or the passphrase is missing, blank,
 short, or not a publishable URL. There is no unauthenticated mode and no
@@ -965,7 +984,7 @@ vikunja_claude/
   web.py          HTML console
   server.py       routes, status codes, loopback guard
   mcp.py          MCP protocol: JSON-RPC, handshake, fixed tool list
-  mcp_service.py  the tools, the project rule, the dedup ledger
+  mcp_service.py  the tools, the approved-project rule, the dedup ledger
   investment.py   read-only client for the three AI Server operational reads
   website.py      anonymous, credential-free fetch of one public page
   paying_page.py  one page read as the server's test paying user (no session here)

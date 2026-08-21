@@ -157,8 +157,16 @@ class TestDefaults(ConfigTestCase):
         self.assertEqual(mcp.api_url, launcher.api_url)
         self.assertEqual(mcp.frontend_url, launcher.frontend_url)
 
-    def test_the_project_can_be_pinned_by_id(self):
-        self.assertEqual(self.from_env(VIKUNJA_PROJECT_ID="2").project_id, 2)
+    def test_the_default_board_is_the_first_approved_one(self):
+        config = self.from_env()
+        self.assertEqual(config.default_project.project_id, 2)
+        self.assertEqual(config.project_title, "AI Alpha Engine")
+
+    def test_the_approved_boards_can_be_named_by_id_and_title(self):
+        config = self.from_env(VIKUNJA_MCP_PROJECTS="7:Ops, 8:Research")
+        self.assertEqual(config.allowed_project_ids, (7, 8))
+        self.assertEqual(config.project_title, "Ops")
+        self.assertIsNone(config.project_for(2))
 
 
 class TestTheLauncherDoesNotNeedTheOauthConfiguration(unittest.TestCase):

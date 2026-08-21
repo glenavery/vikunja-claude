@@ -139,7 +139,9 @@ class AuthorizationServer:
                 "authorization_servers": [self.oauth.issuer],
                 "scopes_supported": [SCOPE],
                 "bearer_methods_supported": ["header"],
-                "resource_name": f"Vikunja {self.config.project_title} board",
+                "resource_name": (
+                    f"Vikunja project tasks ({self.config.projects_phrase})"
+                ),
                 "resource_documentation": f"{self.oauth.issuer}/health",
             },
         )
@@ -703,17 +705,20 @@ class AuthorizationServer:
         )
         body = f"""
     <h1>Connect {client_name}?</h1>
-    <p>Approving this gives it an access token for the
-    <strong>{html.escape(self.config.project_title)}</strong> board, which lets it:</p>
+    <p>Approving this gives it an access token for
+    <strong>{html.escape(self.config.projects_phrase)}</strong>, which lets it:</p>
     <ul>
       <li><strong>read</strong> a Vikunja task by its id;</li>
-      <li><strong>list</strong> every task that is still open on the board;</li>
-      <li><strong>create</strong> a task — only in the
-          {html.escape(self.config.project_title)} project.</li>
+      <li><strong>list</strong> every task that is still open, and
+          <strong>search</strong> what has been done;</li>
+      <li><strong>create</strong> a task — only on one of those boards;</li>
+      <li><strong>edit</strong> a task's title or description, or
+          <strong>comment</strong> on one — each only after a second call that
+          carries an approval for that exact change.</li>
     </ul>
-    <p class='muted'>It cannot edit, close, delete, comment on or move any task,
-    and it cannot see any other project. Tokens are short-lived and can be
-    revoked at any time by stopping the service.</p>
+    <p class='muted'>It cannot close, delete, move, label, assign or reprioritise
+    any task, and it cannot see any project other than those named above. Tokens
+    are short-lived and can be revoked at any time by stopping the service.</p>
     <p class='muted'>Code goes to <code>{html.escape(request['redirect_uri'])}</code></p>
     {warning}
     <form method="post">

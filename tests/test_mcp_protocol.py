@@ -138,7 +138,7 @@ class TestAdvertisedSurface(McpTestCase):
         self.assertEqual(tools["list_open_tasks"]["inputSchema"]["required"], [])
         self.assertEqual(
             set(tools["list_open_tasks"]["inputSchema"]["properties"]),
-            {"bucket", "label"},
+            {"bucket", "label", "project_id"},
         )
 
     def test_the_read_tools_are_marked_read_only_and_the_write_tool_is_not(self):

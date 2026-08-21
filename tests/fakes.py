@@ -10,7 +10,16 @@ from typing import Any
 from vikunja_claude.vikunja import KANBAN_BUCKET_PAGE_SIZE, VikunjaError
 
 PROJECT_ID = 2
+PROJECT_TITLE = "AI Alpha Engine"
 VIEW_ID = 12
+
+#: The second approved board. Its ids are all distinct from the first board's
+#: — project, view and buckets — because a fake that reused them would let a
+#: request built for one board answer for the other, which is the whole class
+#: of bug the two-project boundary has to not have.
+TRADER_PROJECT_ID = 3
+TRADER_TITLE = "AI Alpha Trader"
+TRADER_VIEW_ID = 22
 
 BUCKETS = [
     {"id": 10, "title": "Backlog"},
@@ -18,6 +27,13 @@ BUCKETS = [
     {"id": 12, "title": "In Progress"},
     {"id": 13, "title": "Waiting"},
     {"id": 9, "title": "Done"},
+]
+
+TRADER_BUCKETS = [
+    {"id": 20, "title": "Backlog"},
+    {"id": 21, "title": "Ready"},
+    {"id": 22, "title": "In Progress"},
+    {"id": 23, "title": "Done"},
 ]
 
 
@@ -54,6 +70,40 @@ DEFAULT_LAYOUT = {
     "Done": [task(1, "#25 Wrap the reports step", "2026-07-26T04:59:00Z", done=True)],
 }
 
+#: The Trader board. Task 1 is deliberately *its* task 1, not a copy of the
+#: Engine board's — Vikunja task ids are unique across projects, so the two
+#: boards never share one, and a test that asks the wrong board for a task id
+#: must miss rather than match something plausible.
+TRADER_LAYOUT = {
+    "Backlog": [
+        task(
+            41,
+            "Size a position from the S7 conviction band",
+            "2026-08-19T09:10:00Z",
+            "<p>Trader sizing rules.</p>",
+        )
+    ],
+    "Ready": [
+        task(
+            40,
+            "Define the execution architecture",
+            "2026-08-18T08:00:00Z",
+            "<p>How orders reach a broker.</p>",
+            labels=["Investigation"],
+            priority=4,
+        )
+    ],
+    "In Progress": [],
+    "Done": [
+        task(
+            39,
+            "Pick the paper-trading venue",
+            "2026-08-17T07:00:00Z",
+            done=True,
+        )
+    ],
+}
+
 
 class FakeVikunja:
     """Serves the handful of endpoints the client uses; records every call."""
@@ -64,9 +114,42 @@ class FakeVikunja:
         fail: Any = None,
         comments: dict[int, list[dict]] | None = None,
         foreign: list[dict] | None = None,
+        trader_layout: dict[str, list[dict]] | None = None,
+        projects: dict[int, dict] | None = None,
     ):
         # Copied: moves mutate the layout, and DEFAULT_LAYOUT is module state.
         self.layout = deepcopy(layout if layout is not None else DEFAULT_LAYOUT)
+        # Both approved boards are served by default, because that is what the
+        # configured boundary expects to find. `projects` replaces the set
+        # outright, which is how "this Vikunja does not have that project" and
+        # "that id is titled something else" become testable conditions.
+        self.projects = (
+            deepcopy(projects)
+            if projects is not None
+            else {
+                PROJECT_ID: {
+                    "title": PROJECT_TITLE,
+                    "view_id": VIEW_ID,
+                    "buckets": BUCKETS,
+                    "layout": self.layout,
+                },
+                TRADER_PROJECT_ID: {
+                    "title": TRADER_TITLE,
+                    "view_id": TRADER_VIEW_ID,
+                    "buckets": TRADER_BUCKETS,
+                    "layout": deepcopy(
+                        trader_layout
+                        if trader_layout is not None
+                        else TRADER_LAYOUT
+                    ),
+                },
+            }
+        )
+        # The first board's layout stays reachable as `.layout`, and stays the
+        # same object the routes serve, so a test that inspects it after a
+        # write sees the write.
+        if PROJECT_ID in self.projects:
+            self.projects[PROJECT_ID]["layout"] = self.layout
         self.fail = fail
         self.comments = deepcopy(comments or {})
         # Tasks that exist in Vikunja but on somebody else's board. `GET
@@ -83,31 +166,45 @@ class FakeVikunja:
             raise self.fail
 
         if method == "GET" and path == "/projects":
-            return [
-                {"id": 1, "title": "Inbox"},
-                {"id": PROJECT_ID, "title": "AI Alpha Engine"},
+            return [{"id": 1, "title": "Inbox"}] + [
+                {"id": number, "title": board["title"]}
+                for number, board in self.projects.items()
             ]
-        if method == "GET" and path == f"/projects/{PROJECT_ID}":
+
+        one = re.match(r"^/projects/(\d+)$", path)
+        if method == "GET" and one:
+            board = self._board(int(one.group(1)))
             return {
-                "id": PROJECT_ID,
-                "title": "AI Alpha Engine",
+                "id": int(one.group(1)),
+                "title": board["title"],
                 "views": [
                     {"id": 9, "title": "List", "view_kind": "list"},
-                    {"id": VIEW_ID, "title": "Kanban", "view_kind": "kanban"},
+                    {
+                        "id": board["view_id"],
+                        "title": "Kanban",
+                        "view_kind": "kanban",
+                    },
                 ],
             }
-        if method == "GET" and path.split("?")[0] == (
-            f"/projects/{PROJECT_ID}/views/{VIEW_ID}/tasks"
-        ):
-            return self._view_tasks(path)
-        if method == "GET" and path == f"/projects/{PROJECT_ID}/views/{VIEW_ID}/buckets":
-            return [dict(bucket) for bucket in BUCKETS]
+
+        viewed = re.match(r"^/projects/(\d+)/views/(\d+)/tasks$", path.split("?")[0])
+        if method == "GET" and viewed:
+            board = self._view(int(viewed.group(1)), int(viewed.group(2)))
+            return self._view_tasks(path, board)
+
+        listed_buckets = re.match(r"^/projects/(\d+)/views/(\d+)/buckets$", path)
+        if method == "GET" and listed_buckets:
+            board = self._view(
+                int(listed_buckets.group(1)), int(listed_buckets.group(2))
+            )
+            return [dict(bucket) for bucket in board["buckets"]]
 
         moved = re.match(
-            rf"^/projects/{PROJECT_ID}/views/{VIEW_ID}/buckets/(\d+)/tasks$", path
+            r"^/projects/(\d+)/views/(\d+)/buckets/(\d+)/tasks$", path
         )
         if method == "POST" and moved:
-            self._move(int(moved.group(1)), int((body or {})["task_id"]))
+            board = self._view(int(moved.group(1)), int(moved.group(2)))
+            self._move(int(moved.group(3)), int((body or {})["task_id"]), board)
             return None
 
         added = re.match(r"^/tasks/(\d+)/comments$", path)
@@ -132,13 +229,30 @@ class FakeVikunja:
         if method == "POST" and single:
             return deepcopy(self._replace(int(single.group(1)), body or {}))
 
-        created = re.match(rf"^/projects/{PROJECT_ID}/tasks$", path)
+        created = re.match(r"^/projects/(\d+)/tasks$", path)
         if method == "PUT" and created:
-            return deepcopy(self._create(body or {}))
+            board = self._board(int(created.group(1)))
+            return deepcopy(self._create(body or {}, board))
 
         raise VikunjaError(f"FakeVikunja has no route for {method} {path}", status=404)
 
-    def _view_tasks(self, path: str) -> list[dict]:
+    def _board(self, project_id: int) -> dict:
+        """One board, or the 404 Vikunja serves for a project that is not there."""
+        board = self.projects.get(project_id)
+        if board is None:
+            raise VikunjaError(f"project {project_id} not found", status=404)
+        return board
+
+    def _view(self, project_id: int, view_id: int) -> dict:
+        """One board addressed by project *and* view, as every listing route is."""
+        board = self._board(project_id)
+        if view_id != board["view_id"]:
+            raise VikunjaError(
+                f"project {project_id} has no view {view_id}", status=404
+            )
+        return board
+
+    def _view_tasks(self, path: str, board: dict | None = None) -> list[dict]:
         """The kanban view, paged the way Vikunja actually pages it.
 
         Three behaviours are modelled on purpose, because each one is a way a
@@ -152,13 +266,14 @@ class FakeVikunja:
         Measured against the live board, where a Done column of 170 answered
         with 50 and said so.
         """
+        board = board if board is not None else self.projects[PROJECT_ID]
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
         page = max(1, int(query.get("page", ["1"])[0]))
         wanted = query.get("filter", [""])[0].replace(" ", "")
 
         served = []
-        for bucket in BUCKETS:
-            tasks = list(self.layout.get(bucket["title"], []))
+        for bucket in board["buckets"]:
+            tasks = list(board["layout"].get(bucket["title"], []))
             if wanted == "done=false":
                 tasks = [t for t in tasks if not t.get("done")]
             elif wanted.startswith("id="):
@@ -195,10 +310,14 @@ class FakeVikunja:
         return comment
 
     def _find(self, task_id: int) -> dict:
-        for tasks in self.layout.values():
-            for item in tasks:
-                if item["id"] == task_id:
-                    return item
+        # Every board, because `GET /tasks/{id}` has no notion of "my project":
+        # it serves any task in any project, which is exactly why a boundary
+        # cannot use it to decide ownership.
+        for board in self.projects.values():
+            for tasks in board["layout"].values():
+                for item in tasks:
+                    if item["id"] == task_id:
+                        return item
         if task_id in self.foreign:
             return self.foreign[task_id]
         raise VikunjaError(f"no such task {task_id}", status=404)
@@ -213,9 +332,18 @@ class FakeVikunja:
                 stored[key] = value
         return stored
 
-    def _create(self, body: dict) -> dict:
+    def _create(self, body: dict, board: dict | None = None) -> dict:
+        board = board if board is not None else self.projects[PROJECT_ID]
+        # Ids are unique across boards, as Vikunja's are: a new task on one
+        # board must never collide with an existing task on the other.
         new_id = max(
-            (t["id"] for tasks in self.layout.values() for t in tasks), default=0
+            (
+                t["id"]
+                for other in self.projects.values()
+                for tasks in other["layout"].values()
+                for t in tasks
+            ),
+            default=0,
         ) + 1
         item = task(
             new_id,
@@ -223,21 +351,22 @@ class FakeVikunja:
             "2026-07-27T00:00:00Z",
             body.get("description", ""),
         )
-        self.layout.setdefault("Backlog", []).append(item)
+        board["layout"].setdefault("Backlog", []).append(item)
         return item
 
-    def _move(self, bucket_id: int, task_id: int) -> None:
-        target = next(b["title"] for b in BUCKETS if b["id"] == bucket_id)
-        for title, tasks in self.layout.items():
+    def _move(self, bucket_id: int, task_id: int, board: dict | None = None) -> None:
+        board = board if board is not None else self.projects[PROJECT_ID]
+        target = next(b["title"] for b in board["buckets"] if b["id"] == bucket_id)
+        for title, tasks in board["layout"].items():
             for item in list(tasks):
                 if item["id"] == task_id:
                     tasks.remove(item)
-                    self.layout.setdefault(target, []).append(item)
+                    board["layout"].setdefault(target, []).append(item)
                     return
         raise VikunjaError(f"no such task {task_id}", status=404)
 
-    def bucket_of(self, task_id: int) -> str | None:
-        for title, tasks in self.layout.items():
+    def bucket_of(self, task_id: int, project_id: int = PROJECT_ID) -> str | None:
+        for title, tasks in self.projects[project_id]["layout"].items():
             if any(t["id"] == task_id for t in tasks):
                 return title
         return None
@@ -251,12 +380,12 @@ class FilterIgnoringVikunja(FakeVikunja):
     correct when it does nothing, so that is a fake rather than an assumption.
     """
 
-    def _view_tasks(self, path: str) -> list[dict]:
+    def _view_tasks(self, path: str, board: dict | None = None) -> list[dict]:
         head, _, query = path.partition("?")
         kept = "&".join(
             part for part in query.split("&") if part and not part.startswith("filter=")
         )
-        return super()._view_tasks(head + (f"?{kept}" if kept else ""))
+        return super()._view_tasks(head + (f"?{kept}" if kept else ""), board)
 
 
 class FilterMatchingNothingVikunja(FakeVikunja):
@@ -270,8 +399,8 @@ class FilterMatchingNothingVikunja(FakeVikunja):
     lookup exists to not have.
     """
 
-    def _view_tasks(self, path: str) -> list[dict]:
-        served = super()._view_tasks(path)
+    def _view_tasks(self, path: str, board: dict | None = None) -> list[dict]:
+        served = super()._view_tasks(path, board)
         if "filter=" not in path:
             return served
         return [{**bucket, "count": 0, "tasks": []} for bucket in served]
