@@ -65,7 +65,11 @@ from typing import Any
 
 from .config import McpConfig
 from .html_text import html_to_text, text_to_html
-from .investment import InvestmentStatusClient, InvestmentStatusError
+from .investment import (
+    REPOSITORY_NAMES,
+    InvestmentStatusClient,
+    InvestmentStatusError,
+)
 from .mcp import Tool, ToolError
 from .paying_page import PayingPageError, PayingSiteClient
 from .vikunja import (
@@ -628,9 +632,9 @@ class McpService:
             )
         return self.investment
 
-    def repository_state(self) -> dict[str, Any]:
+    def repository_state(self, repository: Any = None) -> dict[str, Any]:
         try:
-            return self._investment().repository_state()
+            return self._investment().repository_state(repository)
         except InvestmentStatusError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -649,11 +653,13 @@ class McpService:
     # -- tracked Git content (task 279) ------------------------------------
     #
     # These three decide nothing. Which revisions resolve, which paths are
-    # denied, what counts as binary, what is redacted and where the limits sit
-    # are all decided by `api/repository_read.py` in the investment repository,
-    # and its refusals arrive here as `InvestmentStatusError` carrying its own
-    # reason. Re-checking any of it here would be a second boundary that can
-    # disagree with the one that actually guards the files.
+    # denied, what counts as binary, what is redacted, where the limits sit and
+    # **which repositories exist** are all decided by `api/repository_read.py` in
+    # the investment repository, and its refusals arrive here as
+    # `InvestmentStatusError` carrying its own reason. Re-checking any of it here
+    # would be a second boundary that can disagree with the one that actually
+    # guards the files — so `repository` is passed through unvalidated, exactly
+    # like `revision` and `path`.
 
     def repository_file(
         self,
@@ -661,10 +667,11 @@ class McpService:
         revision: Any = None,
         start_line: Any = None,
         end_line: Any = None,
+        repository: Any = None,
     ) -> dict[str, Any]:
         try:
             return self._investment().repository_file(
-                path, revision, start_line, end_line
+                path, revision, start_line, end_line, repository
             )
         except InvestmentStatusError as exc:
             raise ToolError(str(exc)) from exc
@@ -675,19 +682,22 @@ class McpService:
         revision: Any = None,
         path_filter: Any = None,
         case_sensitive: Any = None,
+        repository: Any = None,
     ) -> dict[str, Any]:
         try:
             return self._investment().repository_search(
-                query, revision, path_filter, case_sensitive
+                query, revision, path_filter, case_sensitive, repository
             )
         except InvestmentStatusError as exc:
             raise ToolError(str(exc)) from exc
 
     def repository_diff(
-        self, revision: Any, path_filter: Any = None
+        self, revision: Any, path_filter: Any = None, repository: Any = None
     ) -> dict[str, Any]:
         try:
-            return self._investment().repository_diff(revision, path_filter)
+            return self._investment().repository_diff(
+                revision, path_filter, repository
+            )
         except InvestmentStatusError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -1313,6 +1323,24 @@ class McpService:
             *self._paying_page_tools(),
         ]
 
+    #: The ``repository`` argument, defined once and spent in four tools. A
+    #: model that learns it on one should not have to relearn it on the next,
+    #: and one definition is why the four cannot come to advertise different
+    #: sets. The enum publishes what the application enforces; nothing is
+    #: enforced here.
+    _REPOSITORY_ARGUMENT = {
+        "type": "string",
+        "enum": list(REPOSITORY_NAMES),
+        "description": (
+            'Which repository to read: "ai-alpha-engine" for the AI Server '
+            'investment application (the default when omitted), or "trader" '
+            "for the AI Alpha Trader day-trading project. Both are read the "
+            "same way and under the same refusals. This is a NAME from a fixed "
+            "list - a filesystem path is not accepted and is refused as an "
+            "unknown name. Every response says which repository it resolved."
+        ),
+    }
+
     def _repository_content_tools(self) -> list[Tool]:
         """The three tracked-content reads, or nothing at all when unconfigured.
 
@@ -1330,31 +1358,39 @@ class McpService:
         # because that is the distinction that decides whether it reasons about
         # a path it can have or a path it cannot.
         source_note = (
-            "Results come from tracked Git content at a resolved commit in the "
-            "AI Server investment repository — not from arbitrary server "
-            "filesystem access. Uncommitted edits, untracked files and files "
-            "outside the repository are invisible here, and .env files, "
-            "credentials, keys, certificates, databases, backups, logs, "
-            "uploads and run artefacts are refused by path. Secret-looking "
+            "Results come from tracked Git content at a resolved commit in one "
+            "of two repositories — the AI Server investment repository "
+            '("ai-alpha-engine", the default) or the AI Alpha Trader project '
+            '("trader") — chosen with the `repository` argument and named back '
+            "in every response — not from arbitrary server filesystem access. "
+            "Uncommitted edits, untracked files and files outside the "
+            "repository are invisible here, and .env files, credentials, keys, "
+            "certificates, databases, backups, logs, uploads and run artefacts "
+            "are refused by path, in both repositories alike. Secret-looking "
             "values are redacted before anything is returned. Read-only."
         )
         revision_note = (
-            "A commit id (7-40 hex characters) that some local branch reaches. "
-            "Omit it for the current HEAD. Local commits that were never pushed "
-            "work fine — that is what this is for. Branch names, tags and Git "
-            "revision expressions ('HEAD~3', 'main^', '@{yesterday}') are "
-            "refused; resolve those yourself and pass the id."
+            "A commit id (7-40 hex characters) that some local branch reaches "
+            "**in the repository you named**. Omit it for that repository's "
+            "current HEAD. Local commits that were never pushed work fine — "
+            "that is what this is for, and it holds for both repositories. "
+            "Branch names, tags and Git revision expressions ('HEAD~3', "
+            "'main^', '@{yesterday}') are refused; resolve those yourself and "
+            "pass the id."
         )
 
         return [
             Tool(
                 name="read_repository_file",
-                title="Read one tracked file from the AI Server repository",
+                title="Read one tracked file from an approved repository",
                 description=(
                     "Read one tracked text file by repository-relative path, at "
-                    "HEAD or at a commit you name — for example "
-                    '"api/repository_read.py". Use it to inspect the actual '
-                    "implementation behind a ticket's completion claim rather "
+                    "HEAD or at a commit you name, from either approved "
+                    "repository — for example "
+                    '"api/repository_read.py" in "ai-alpha-engine", or '
+                    '"docs/architecture.md" in "trader". Use it to inspect the '
+                    "actual implementation behind a ticket's completion claim "
+                    "rather "
                     "than taking the claim at face value. Supply start_line and "
                     "end_line to read part of a large file; the response always "
                     "reports the file's own total_lines, so a partial read is "
@@ -1369,10 +1405,12 @@ class McpService:
                             "type": "string",
                             "description": (
                                 "A repository-relative path, e.g. "
-                                '"api/routes/operational.py". Absolute paths and '
+                                '"api/routes/operational.py". Relative to the '
+                                "repository you named. Absolute paths and "
                                 '".." are refused.'
                             ),
                         },
+                        "repository": self._REPOSITORY_ARGUMENT,
                         "revision": {"type": "string", "description": revision_note},
                         "start_line": {
                             "type": "integer",
@@ -1398,14 +1436,16 @@ class McpService:
                     arguments.get("revision"),
                     arguments.get("start_line"),
                     arguments.get("end_line"),
+                    arguments.get("repository"),
                 ),
             ),
             Tool(
                 name="search_repository_text",
-                title="Search the AI Server repository for literal text",
+                title="Search an approved repository for literal text",
                 description=(
-                    "Find where a literal string appears in tracked files, at "
-                    "HEAD or at a commit you name, and get back the file paths "
+                    "Find where a literal string appears in tracked files, in "
+                    "either approved repository, at HEAD or at a commit you "
+                    "name, and get back the file paths "
                     "and line numbers with the matching lines. Use it to locate "
                     "an implementation, check whether a symbol is still "
                     "referenced, or find the tests covering a change. The query "
@@ -1426,6 +1466,7 @@ class McpService:
                                 "characters. Not a regular expression."
                             ),
                         },
+                        "repository": self._REPOSITORY_ARGUMENT,
                         "revision": {"type": "string", "description": revision_note},
                         "path_filter": {
                             "type": "string",
@@ -1453,11 +1494,12 @@ class McpService:
                     arguments.get("revision"),
                     arguments.get("path_filter"),
                     arguments.get("case_sensitive"),
+                    arguments.get("repository"),
                 ),
             ),
             Tool(
                 name="read_repository_commit_diff",
-                title="Read what one AI Server commit changed",
+                title="Read what one commit changed, in either repository",
                 description=(
                     "Read the changes one commit introduced, against its first "
                     "parent: the list of files with their added/deleted line "
@@ -1471,12 +1513,15 @@ class McpService:
                     "parent and say so (`is_merge`). Every changed file is "
                     "listed even when its patch is not included; binary and "
                     "refused files carry an `omitted_reason` instead of "
-                    "content. " + source_note
+                    "content. Name the `repository` the commit is in — an id "
+                    "from one repository does not exist in the other. "
+                    + source_note
                 ),
                 input_schema={
                     "type": "object",
                     "properties": {
                         "revision": {"type": "string", "description": revision_note},
+                        "repository": self._REPOSITORY_ARGUMENT,
                         "path_filter": {
                             "type": "string",
                             "description": (
@@ -1494,7 +1539,9 @@ class McpService:
                     "openWorldHint": False,
                 },
                 run=lambda arguments: self.repository_diff(
-                    arguments.get("revision"), arguments.get("path_filter")
+                    arguments.get("revision"),
+                    arguments.get("path_filter"),
+                    arguments.get("repository"),
                 ),
             ),
         ]
@@ -1617,19 +1664,23 @@ class McpService:
         return [
             Tool(
                 name="get_repository_state",
-                title="Get the AI Server repository state",
+                title="Get an approved repository's state",
                 description=(
-                    "Read which commit the AI Server investment repository is "
-                    "checked out at: branch, commit hash, the commit's subject "
-                    "and timestamp, and whether the working tree is clean. Use "
-                    "this to know what code is deployed. Counts of changed and "
-                    "untracked files are returned, not filenames. Read-only; it "
-                    "runs no commands you name and cannot write to the "
-                    "repository."
+                    "Read which commit an approved repository is checked out "
+                    "at: branch, commit hash, the commit's subject and "
+                    "timestamp, and whether the working tree is clean. Name the "
+                    '`repository` — "ai-alpha-engine" (the default) to know '
+                    'what code is deployed, or "trader" for the AI Alpha '
+                    "Trader project. The response says which one it resolved. "
+                    "Counts of changed and untracked files are returned, not "
+                    "filenames. Read-only; it runs no commands you name and "
+                    "cannot write to either repository."
                 ),
                 input_schema={
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "repository": self._REPOSITORY_ARGUMENT,
+                    },
                     "required": [],
                     "additionalProperties": False,
                 },
@@ -1638,7 +1689,9 @@ class McpService:
                     "idempotentHint": True,
                     "openWorldHint": False,
                 },
-                run=lambda arguments: self.repository_state(),
+                run=lambda arguments: self.repository_state(
+                    arguments.get("repository")
+                ),
             ),
             Tool(
                 name="get_pipeline_status",

@@ -344,7 +344,7 @@ Plus three **operational reads**, present only when they are configured (see
 
 | Tool | Does |
 |---|---|
-| `get_repository_state()` | Branch, commit, commit subject and whether the investment checkout's working tree is clean |
+| `get_repository_state(repository?)` | Branch, commit, commit subject and whether the named checkout's working tree is clean |
 | `get_pipeline_status()` | The latest nightly-pipeline run: status, every stage's own outcome, what S7 did, whether each portfolio got a report |
 | `get_system_health()` | Backup age, disks, Docker, scheduled jobs, database and API, with one folded overall status |
 
@@ -353,9 +353,12 @@ Plus three **tracked-content reads**, present whenever the operational reads are
 
 | Tool | Does |
 |---|---|
-| `read_repository_file(path, revision?, start_line?, end_line?)` | One tracked text file of the investment repository at HEAD or at a commit you name |
-| `search_repository_text(query, revision?, path_filter?, case_sensitive?)` | Where a **literal** string appears in tracked files, with paths and line numbers |
-| `read_repository_commit_diff(revision, path_filter?)` | What one commit changed, against its first parent — including commits that were never pushed |
+| `read_repository_file(path, revision?, start_line?, end_line?, repository?)` | One tracked text file at HEAD or at a commit you name |
+| `search_repository_text(query, revision?, path_filter?, case_sensitive?, repository?)` | Where a **literal** string appears in tracked files, with paths and line numbers |
+| `read_repository_commit_diff(revision, path_filter?, repository?)` | What one commit changed, against its first parent — including commits that were never pushed |
+
+Those four take an optional `repository` — `"ai-alpha-engine"` (the default) or
+`"trader"`. See [Which repository is read](#which-repository-is-read).
 
 Plus one **public page fetch**, present only when it is configured (see
 [Public page fetch](#public-page-fetch-website-review) below):
@@ -908,7 +911,7 @@ Three read-only tools — `read_repository_file`, `search_repository_text` and
 implementation being claimed instead of stopping at the completion comment.
 `get_repository_state` already says *that* the checkout is on commit X; these
 say what is in it. A GitHub connector would not do the job, because AI Alpha
-Engine commits are usually local and never pushed.
+Engine and AI Alpha Trader commits are usually local and never pushed.
 
 **Almost none of this is here either.** These are one GET each to a fixed
 endpoint of the admin instance. Which revisions resolve, which paths are denied,
@@ -939,6 +942,33 @@ What that boundary holds, in short:
 The three tools appear whenever the operational reads are configured — same
 credential, same admin instance, no third switch. The endpoints they call are
 registered on the admin instance only, so on the public one they do not exist.
+
+#### Which repository is read
+
+Two boards, two repositories. `get_repository_state` and the three
+tracked-content tools each take an optional `repository`:
+
+| Name | Repository |
+|---|---|
+| `"ai-alpha-engine"` (default) | the AI Server investment application |
+| `"trader"` | the AI Alpha Trader day-trading project |
+
+**One set of tools, parameterised — there is no Trader-specific tool.** A
+parallel set would be a second place where the refusals are described, and the
+two could come to advertise different rules for the same boundary.
+
+It is a **name from a fixed list, never a filesystem path.** Which names exist
+is decided and enforced by `api/repository_read.py` in the investment
+repository, exactly like every other rule here; this process forwards the name
+it was given and refuses nothing, so an unknown one comes back with the
+application's own reason naming the valid values. The enum in the tool schemas
+is a copy for a model to read, not a second gate.
+
+Everything above holds for both: the same denial list, the same redaction, the
+same revision grammar, the same limits, and unpushed local commits working in
+either. Reachability is per repository — a commit id from one does not exist in
+the other — so the diff tool asks for the repository the commit is in, and every
+response names the repository it resolved.
 
 ### Reading the site as the test paying user
 

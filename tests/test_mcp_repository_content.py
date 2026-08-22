@@ -23,6 +23,7 @@ So what is asserted here is what belongs to this side:
 
 from __future__ import annotations
 
+import io
 import tempfile
 import unittest
 import urllib.error
@@ -33,6 +34,7 @@ from unittest import mock
 
 from vikunja_claude.investment import (
     PATH_REPOSITORY_DIFF,
+    REPOSITORY_NAMES,
     PATH_REPOSITORY_FILE,
     PATH_REPOSITORY_SEARCH,
     InvestmentStatusClient,
@@ -526,3 +528,181 @@ class TestTheClientStaysAClient(unittest.TestCase):
         self.assertTrue(
             str(seen["url"]).startswith(INVESTMENT_API_URL + PATH_REPOSITORY_SEARCH)
         )
+
+
+# ── which repository (task 646) ──────────────────────────────────────────────
+#
+# The selector belongs to the application: it owns the allow-list, resolves the
+# root and refuses everything else. What belongs to this side is that the name a
+# model gives is carried through unchanged and unvalidated, that omitting it
+# sends nothing at all — which is what preserves the old behaviour — and that
+# the schemas tell a model both names exist.
+
+class TestTheRepositorySelector(RepositoryContentTestCase):
+    def descriptors(self) -> dict[str, dict]:
+        listed = self.protocol.handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        )
+        return {t["name"]: t for t in listed["result"]["tools"]}
+
+    # -- the schemas ------------------------------------------------------
+
+    def test_all_four_reads_take_the_same_repository_argument(self):
+        """One definition, so the four cannot advertise different sets."""
+        for name in sorted(REPOSITORY_CONTENT_TOOLS | {"get_repository_state"}):
+            schema = self.descriptors()[name]["inputSchema"]
+            self.assertIn("repository", schema["properties"], name)
+            argument = schema["properties"]["repository"]
+            self.assertEqual(argument["type"], "string", name)
+            self.assertEqual(
+                argument["enum"], ["ai-alpha-engine", "trader"], name
+            )
+
+    def test_the_enum_is_the_list_the_client_publishes(self):
+        """Not a literal typed twice: it comes from the client module."""
+        for name in sorted(REPOSITORY_CONTENT_TOOLS | {"get_repository_state"}):
+            argument = self.descriptors()[name]["inputSchema"]["properties"][
+                "repository"
+            ]
+            self.assertEqual(argument["enum"], list(REPOSITORY_NAMES), name)
+
+    def test_the_repository_argument_is_never_required(self):
+        """Requirement 4: a caller that omits it keeps its old behaviour."""
+        for name in sorted(REPOSITORY_CONTENT_TOOLS | {"get_repository_state"}):
+            schema = self.descriptors()[name]["inputSchema"]
+            self.assertNotIn("repository", schema.get("required", []), name)
+
+    def test_each_description_names_both_repositories_and_the_default(self):
+        for name in sorted(REPOSITORY_CONTENT_TOOLS | {"get_repository_state"}):
+            description = self.descriptors()[name]["description"]
+            self.assertIn("ai-alpha-engine", description, name)
+            self.assertIn("trader", description, name)
+            self.assertIn("default", description, name)
+
+    def test_the_argument_says_it_is_a_name_and_not_a_path(self):
+        """A model that thinks it can send a root will send one."""
+        argument = self.descriptors()["read_repository_file"]["inputSchema"][
+            "properties"
+        ]["repository"]
+        self.assertIn("NAME from a fixed list", argument["description"])
+        self.assertIn("filesystem path is not accepted", argument["description"])
+
+    def test_no_trader_specific_tool_was_added(self):
+        """One set of tools, parameterised — not a parallel set per repository."""
+        names = {tool.name for tool in self.service.tools()}
+        self.assertFalse(
+            [name for name in names if "trader" in name.lower()], sorted(names)
+        )
+
+    # -- what goes on the wire --------------------------------------------
+
+    def test_the_named_repository_is_sent_as_a_query_value(self):
+        self.structured(
+            "read_repository_file", path="README.md", repository="trader"
+        )
+
+        self.assertEqual(self.recorder.paths[0].split("?")[0], PATH_REPOSITORY_FILE)
+        self.assertEqual(
+            self.recorder.query(),
+            {"path": ["README.md"], "repository": ["trader"]},
+        )
+
+    def test_omitting_it_sends_nothing_at_all(self):
+        """The server's default is the engine; an empty value is not that."""
+        self.structured("read_repository_file", path="README.md")
+
+        self.assertEqual(self.recorder.query(), {"path": ["README.md"]})
+        _, _, raw_query = self.recorder.paths[0].partition("?")
+        self.assertNotIn("repository=", raw_query)
+
+    def test_search_and_diff_carry_it_too(self):
+        self.structured(
+            "search_repository_text", query="TradeIntent", repository="trader"
+        )
+        self.assertEqual(self.recorder.query()["repository"], ["trader"])
+
+        self.recorder.paths.clear()
+        self.structured(
+            "read_repository_commit_diff", revision="c" * 40, repository="trader"
+        )
+        self.assertEqual(self.recorder.paths[0].split("?")[0], PATH_REPOSITORY_DIFF)
+        self.assertEqual(
+            self.recorder.query(),
+            {"revision": ["c" * 40], "repository": ["trader"]},
+        )
+
+    def test_the_endpoint_is_still_a_constant_whatever_is_sent(self):
+        """The selector is a value, never part of the URL's path component."""
+        for supplied in (
+            "trader",
+            "/home/glen/stacks/trader",
+            "../../etc",
+            "ai-alpha-engine",
+        ):
+            self.recorder.paths.clear()
+            self.structured(
+                "read_repository_file", path="README.md", repository=supplied
+            )
+            self.assertEqual(
+                self.recorder.paths[0].split("?")[0], PATH_REPOSITORY_FILE, supplied
+            )
+
+    def test_a_path_shaped_value_is_forwarded_rather_than_judged_here(self):
+        """The application refuses it; this layer does not pre-empt that.
+
+        A second check here would be a second boundary, and the two could come
+        to disagree about what is approved. It arrives urlencoded as a value.
+        """
+        self.structured(
+            "read_repository_file",
+            path="README.md",
+            repository="/home/glen/stacks/trader",
+        )
+
+        self.assertEqual(
+            self.recorder.query()["repository"], ["/home/glen/stacks/trader"]
+        )
+        self.assertNotIn("/home/glen", self.recorder.paths[0].split("?")[0])
+
+
+class TestTheRepositoryRefusalTravels(unittest.TestCase):
+    """An unknown name is refused by the application, with its own reason.
+
+    The refusal is the application's, so this drives the real HTTP path — the
+    one that turns an ``HTTPError`` body into a sentence — rather than a
+    transport that raises. A boundary that replaced "'engine' is not a
+    repository this boundary reads" with "the read failed" would leave a model
+    guessing at a fixed list it was never shown.
+    """
+
+    REFUSAL = (
+        b'{"detail": "\'engine\' is not a repository this boundary reads. '
+        b'Valid names: ai-alpha-engine, trader. This takes the NAME of an '
+        b'approved repository, never a filesystem path."}'
+    )
+
+    def _refused(self, **arguments) -> str:
+        client = InvestmentStatusClient(INVESTMENT_API_URL, INVESTMENT_API_KEY)
+
+        def fake_urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(
+                request.full_url, 400, "refused", {},  # type: ignore[arg-type]
+                io.BytesIO(self.REFUSAL),
+            )
+
+        with mock.patch.object(urllib.request, "urlopen", fake_urlopen):
+            with self.assertRaises(InvestmentStatusError) as caught:
+                client.repository_file("README.md", **arguments)
+        return str(caught.exception)
+
+    def test_the_applications_reason_reaches_the_caller(self):
+        message = self._refused(repository="engine")
+
+        self.assertIn("not a repository this boundary reads", message)
+        self.assertIn("ai-alpha-engine, trader", message)
+        self.assertIn("never a filesystem path", message)
+
+    def test_a_path_shaped_name_is_refused_by_the_application_not_swallowed(self):
+        message = self._refused(repository="/home/glen/stacks/trader")
+
+        self.assertIn("not a repository this boundary reads", message)

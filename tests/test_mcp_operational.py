@@ -211,12 +211,24 @@ class TestTheReads(OperationalTestCase):
         self.assertEqual(answer["overall"], "ok")
         self.assertEqual(self.recorder.paths, [PATH_SYSTEM_HEALTH])
 
-    def test_none_of_them_take_an_argument(self):
+    def test_none_of_them_requires_an_argument(self):
+        """Two take nothing; the state read takes one optional repository name.
+
+        The property being kept is that a caller cannot widen these reads.
+        ``get_repository_state`` learned to answer for the AI Alpha Trader
+        checkout as well, so it takes a name — from a closed enum, optional, and
+        with no other property accepted.
+        """
         for name in sorted(OPERATIONAL_TOOLS):
             tool = next(t for t in self.service.tools() if t.name == name)
-            self.assertEqual(tool.input_schema["properties"], {}, name)
             self.assertEqual(tool.required_arguments(), [], name)
             self.assertIs(tool.input_schema["additionalProperties"], False, name)
+            if name == "get_repository_state":
+                self.assertEqual(
+                    sorted(tool.input_schema["properties"]), ["repository"], name
+                )
+            else:
+                self.assertEqual(tool.input_schema["properties"], {}, name)
 
     def test_all_three_are_marked_read_only(self):
         for name in sorted(OPERATIONAL_TOOLS):

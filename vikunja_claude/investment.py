@@ -9,7 +9,14 @@ which owns all of those facts already and decides there what an external
 integration may see (``api/operational_reads.py`` in that repository).
 
 Task 279 added three more of the same shape: one tracked file, a literal-text
-search and one commit's diff. They are what let a ticket review inspect the
+search and one commit's diff. Those three and the repository-state read now also
+take a ``repository`` **name** — the AI Alpha Engine checkout or the AI Alpha
+Trader one — which is urlencoded like every other argument. It is a name and
+never a path, and which names exist is decided and enforced *there*, by
+``api/repository_read.resolve_repository``. :data:`REPOSITORY_NAMES` below is a
+copy for the tool schema to publish, not a second gate: this module refuses
+nothing, and a name it happens not to know is refused by the application with
+the application's own reason. They are what let a ticket review inspect the
 implementation being claimed rather than stopping at the completion comment.
 Every rule about them — which revisions resolve, which paths are denied, what is
 redacted, where the limits sit — lives in ``api/repository_read.py`` **there**,
@@ -54,6 +61,13 @@ PATH_SYSTEM_HEALTH = "/operational/system-health"
 PATH_REPOSITORY_FILE = "/operational/repository/file"
 PATH_REPOSITORY_SEARCH = "/operational/repository/search"
 PATH_REPOSITORY_DIFF = "/operational/repository/diff"
+
+#: The repository names the application publishes, in its order — the first is
+#: its default. Mirrored here so the MCP tool schemas can tell a model what the
+#: valid values are; the application decides and enforces them.
+REPOSITORY_ENGINE = "ai-alpha-engine"
+REPOSITORY_TRADER = "trader"
+REPOSITORY_NAMES = (REPOSITORY_ENGINE, REPOSITORY_TRADER)
 
 READ_PATHS = (
     PATH_REPOSITORY,
@@ -181,8 +195,10 @@ class InvestmentStatusClient:
 
     # -- the three reads ---------------------------------------------------
 
-    def repository_state(self) -> dict[str, Any]:
-        return self._object(PATH_REPOSITORY)
+    def repository_state(self, repository: Any = None) -> dict[str, Any]:
+        return self._object(
+            _with_query(PATH_REPOSITORY, {"repository": repository})
+        )
 
     def pipeline_status(self) -> dict[str, Any]:
         return self._object(PATH_PIPELINE)
@@ -198,6 +214,7 @@ class InvestmentStatusClient:
         revision: Any = None,
         start_line: Any = None,
         end_line: Any = None,
+        repository: Any = None,
     ) -> dict[str, Any]:
         """One tracked text file at a resolved commit."""
         return self._object(
@@ -208,6 +225,7 @@ class InvestmentStatusClient:
                     "revision": revision,
                     "start_line": start_line,
                     "end_line": end_line,
+                    "repository": repository,
                 },
             )
         )
@@ -218,6 +236,7 @@ class InvestmentStatusClient:
         revision: Any = None,
         path_filter: Any = None,
         case_sensitive: Any = None,
+        repository: Any = None,
     ) -> dict[str, Any]:
         """Where a literal string appears in tracked files at a commit."""
         return self._object(
@@ -228,16 +247,23 @@ class InvestmentStatusClient:
                     "revision": revision,
                     "path_filter": path_filter,
                     "case_sensitive": case_sensitive,
+                    "repository": repository,
                 },
             )
         )
 
-    def repository_diff(self, revision: Any, path_filter: Any = None) -> dict[str, Any]:
+    def repository_diff(
+        self, revision: Any, path_filter: Any = None, repository: Any = None
+    ) -> dict[str, Any]:
         """What one commit changed, against its first parent."""
         return self._object(
             _with_query(
                 PATH_REPOSITORY_DIFF,
-                {"revision": revision, "path_filter": path_filter},
+                {
+                    "revision": revision,
+                    "path_filter": path_filter,
+                    "repository": repository,
+                },
             )
         )
 
