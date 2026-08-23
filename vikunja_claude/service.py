@@ -51,8 +51,11 @@ class TicketService:
     def preview(self, ticket: Ticket) -> dict:
         active = self.launcher.active_launch(ticket.task_id)
         return {
-            "task_id": ticket.task_id,
-            "ticket": ticket.number,
+            # The board number and its rendered form, and no row id (task 659).
+            # The URL below is the one deliberate carrier: /tasks/<id> is
+            # Vikunja's only task route, so a link exists to be opened rather
+            # than quoted.
+            "number": ticket.task_number,
             "reference": ticket.board_reference,
             "title": ticket.title,
             "summary": ticket.summary,

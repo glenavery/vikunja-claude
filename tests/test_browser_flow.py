@@ -52,7 +52,7 @@ class TaskIdRoutes(HttpFlow):
         status, body, _ = self.fetch("/task/9", accept="application/json")
         data = json.loads(body)
         self.assertEqual(status, 200)
-        self.assertEqual(data["task_id"], 9)
+        self.assertEqual(data["number"], 8)
         self.assertEqual(data["reference"], "#8")
         self.assertEqual(self.spawn.calls, [])
 
@@ -62,9 +62,12 @@ class TaskIdRoutes(HttpFlow):
         )
         self.assertEqual(status, 202)
         data = json.loads(body)
-        self.assertEqual(data["task_id"], 9)
-        self.assertEqual(data["ticket"], 33)
+        self.assertEqual(data["number"], 8)
         self.assertEqual(len(self.spawn.calls), 1)
+        # The row-id ROUTE stays — a browser sitting on Vikunja's /tasks/<id>
+        # page has only that number. What comes back names the board (task 659).
+        self.assertNotIn("task_id", data)
+        self.assertNotIn(9, [v for v in data.values() if isinstance(v, int)])
 
     def test_unknown_task_id_is_404(self):
         status, body, _ = self.fetch("/task/4242", accept="application/json")
@@ -79,7 +82,7 @@ class TaskIdRoutes(HttpFlow):
     def test_ticket_number_still_serves_json_directly(self):
         status, body, _ = self.fetch("/ticket/33", accept="application/json")
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body)["task_id"], 9)
+        self.assertEqual(json.loads(body)["number"], 8)
 
 
 class LaunchPage(HttpFlow):
@@ -93,7 +96,7 @@ class LaunchPage(HttpFlow):
     def test_launch_page_posts_same_origin_so_no_cors_is_needed(self):
         _, body, _ = self.fetch("/task/9/launch")
         # The fetch target must be a relative path, not an absolute origin.
-        self.assertIn("fetch('/task/9/work'", body)
+        self.assertIn("fetch('/ticket/8/work'", body)
         self.assertIn("method: 'POST'", body)
         self.assertNotIn("fetch('http", body)
 

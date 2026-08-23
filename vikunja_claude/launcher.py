@@ -32,9 +32,13 @@ class AlreadyRunning(LaunchError):
     """A Claude run for this task is already in flight."""
 
     def __init__(self, task_id: int, reference: str, pid: int, started_at: str):
+        # `task_id` is the lock key and stays an attribute for a caller that
+        # holds one; the MESSAGE names the board (task 659). A row id printed
+        # beside a board number is two numbers a reader can quote, and the one
+        # they would quote is the wrong one.
         super().__init__(
             f"Claude is already working {reference} "
-            f"(task {task_id}, pid {pid}, started {started_at}). "
+            f"(pid {pid}, started {started_at}). "
             "Refusing to launch a second run."
         )
         self.task_id = task_id
@@ -45,8 +49,17 @@ class AlreadyRunning(LaunchError):
 
 @dataclass(frozen=True)
 class LaunchRecord:
-    task_id: int
-    ticket: int | None
+    """What a launch publishes about itself.
+
+    The row id is deliberately NOT here (task 659). This record is spread
+    straight into the `work` response and into `/launches`, and it was the last
+    payload handing a caller the immutable `/tasks/<id>` number beside the board
+    number that identifies the ticket. The id is still the lock key and the log
+    filename — internal, where it is load-bearing — and `running()` recovers it
+    from the lock's own filename rather than from its contents.
+    """
+
+    number: int | None
     reference: str
     pid: int
     started_at: str
@@ -185,8 +198,7 @@ class Launcher:
                 ticket.task_id,
                 ticket.board_reference,
                 {
-                    "task_id": ticket.task_id,
-                    "ticket": ticket.number,
+                    "number": ticket.task_number,
                     "reference": ticket.board_reference,
                     "pid": os.getpid(),
                     "started_at": started,
@@ -210,8 +222,8 @@ class Launcher:
                 self._release(ticket.task_id)
                 self._log(
                     "launch_failed",
-                    task_id=ticket.task_id,
-                    ticket=ticket.number,
+                    number=ticket.task_number,
+                    reference=ticket.board_reference,
                     error=str(exc),
                 )
                 raise LaunchError(
@@ -219,8 +231,7 @@ class Launcher:
                 ) from exc
 
             record = LaunchRecord(
-                task_id=ticket.task_id,
-                ticket=ticket.number,
+                number=ticket.task_number,
                 reference=ticket.board_reference,
                 pid=process.pid,
                 started_at=started,
@@ -233,7 +244,7 @@ class Launcher:
         if self._reap:
             threading.Thread(
                 target=self._wait_and_log,
-                args=(ticket.task_id, process),
+                args=(ticket.task_id, ticket.board_reference, process),
                 daemon=True,
                 name=f"reaper-task-{ticket.task_id}",
             ).start()
@@ -249,14 +260,21 @@ class Launcher:
                 "VIKUNJA_API_URL": self.config.api_url,
                 "VIKUNJA_API_TOKEN": self.config.token,
                 "VIKUNJA_PROJECT": self.config.project_title,
-                "VIKUNJA_TASK_ID": str(ticket.task_id),
             }
         )
-        if ticket.number is not None:
-            env["VIKUNJA_TICKET"] = str(ticket.number)
+        # The board number, and only where there is one. This handed the run
+        # VIKUNJA_TASK_ID (the row id) and VIKUNJA_TICKET (the dead legacy
+        # prefix); nothing read either, so they were two numbers of exposure
+        # bought for nothing (task 659).
+        if ticket.task_number is not None:
+            env["VIKUNJA_TASK_NUMBER"] = str(ticket.task_number)
         return env
 
-    def _wait_and_log(self, task_id: int, process: subprocess.Popen) -> None:
+    def _wait_and_log(
+        self, task_id: int, reference: str, process: subprocess.Popen
+    ) -> None:
+        # The id releases the lock; the reference is what the log says, because
+        # `recent()` is rendered on the console a human reads (task 659).
         try:
             exit_status = process.wait(timeout=self.config.launch_timeout_seconds)
         except subprocess.TimeoutExpired:
@@ -264,7 +282,7 @@ class Launcher:
             exit_status = None
             self._log(
                 "timeout",
-                task_id=task_id,
+                reference=reference,
                 pid=process.pid,
                 after_seconds=self.config.launch_timeout_seconds,
             )
@@ -272,7 +290,7 @@ class Launcher:
             self._release(task_id)
         self._log(
             "finished",
-            task_id=task_id,
+            reference=reference,
             pid=process.pid,
             exit_status=exit_status,
         )

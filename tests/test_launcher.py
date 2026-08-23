@@ -20,7 +20,7 @@ class Launching(ServiceTestCase):
         result = self.service.work(self.service.get(33))
         self.assertTrue(result["launched"])
         self.assertEqual(result["moved_to"], "In Progress")
-        self.assertEqual(result["ticket"], 33)
+        self.assertEqual(result["number"], 8)
         self.assertEqual(result["pid"], 4242)
 
     def test_a_ticket_already_in_progress_is_not_moved_again(self):
@@ -46,7 +46,7 @@ class Launching(ServiceTestCase):
         self.service.work(self.service.get(33))
         env = self.spawn.calls[0]["env"]
         self.assertEqual(env["VIKUNJA_API_TOKEN"], TOKEN)
-        self.assertEqual(env["VIKUNJA_TICKET"], "33")
+        self.assertEqual(env["VIKUNJA_TASK_NUMBER"], "8")
 
     def test_launch_is_logged_with_ticket_pid_and_time(self):
         self.service.work(self.service.get(33))
@@ -56,7 +56,7 @@ class Launching(ServiceTestCase):
         ]
         launched = [e for e in entries if e["event"] == "launched"]
         self.assertEqual(len(launched), 1)
-        self.assertEqual(launched[0]["ticket"], 33)
+        self.assertEqual(launched[0]["reference"], "#8")
         self.assertEqual(launched[0]["pid"], 4242)
         self.assertIn("at", launched[0])
 
@@ -69,7 +69,7 @@ class DuplicateLaunchPrevention(ServiceTestCase):
         with self.assertRaises(AlreadyRunning) as caught:
             self.service.work(self.service.get(33))
         self.assertIn("already working #8", str(caught.exception))
-        self.assertIn("task 9", str(caught.exception))
+        self.assertNotIn("task 9", str(caught.exception))
 
     def test_refusal_does_not_spawn_a_second_process(self):
         self.service.work(self.service.get(33))
@@ -109,7 +109,7 @@ class DuplicateLaunchPrevention(ServiceTestCase):
     def test_running_lists_a_live_launch(self):
         self.alive_pids.add(4242)
         self.service.work(self.service.get(33))
-        self.assertEqual([r["ticket"] for r in self.launcher.running()], [33])
+        self.assertEqual([r["number"] for r in self.launcher.running()], [8])
 
     def test_running_drops_and_clears_a_dead_launch(self):
         self.service.work(self.service.get(33))  # pid 4242 never marked alive

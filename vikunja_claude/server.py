@@ -222,6 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         self._html(
             200,
             web.launch_page(
+                number=ticket.task_number,
                 task_id=ticket.task_id,
                 reference=ticket.board_reference,
                 summary=ticket.summary,

@@ -21,14 +21,24 @@ The remaining carrier is deliberate and named here rather than left implicit:
 link whose job is to be opened is a locator, not an identifier. It is the one
 place a row id still reaches a reader, and the test below pins it to exactly
 that key so a third carrier cannot appear unnoticed.
+
+THE SECOND PASS covers the LAUNCHER, which the first missed. The MCP is what a
+connector reads; the launcher at :3460 is what a person reads and what every
+run is launched from, and it was still publishing the row id in the preview
+payload, in the launch record spread into ``work`` and ``/launches``, on the
+console and preview pages, and in ``VIKUNJA_TASK_ID`` in the child's own
+environment. Nothing read the last one — two numbers of exposure bought for
+nothing. Same rule, same walk, applied to those surfaces.
 """
 
 from __future__ import annotations
 
 import unittest
 
+from vikunja_claude import web
+
 from .fakes import PROJECT_ID
-from .support import McpTestCase
+from .support import McpTestCase, ServiceTestCase
 
 #: The key task 649 published and task 659 removed.
 RETIRED_KEY = "vikunja_task_id"
@@ -120,6 +130,71 @@ class TestTheIdentityIsTheBoardAndTheNumber(McpTestCase):
             with self.subTest(tool=name):
                 self.assertIn("project_id", answer)
                 self.assertIn("project", answer)
+
+
+class TestTheLauncherPublishesNoRowId(ServiceTestCase):
+    """The surfaces a person reads, and the environment a run inherits.
+
+    Fixture task: row id 9, board number 8, legacy title prefix 33 — three
+    numbers, all different, so a payload echoing the wrong one cannot pass by
+    coincidence.
+    """
+
+    ROW_ID = 9
+
+    def _ticket(self):
+        return self.service.get(33)
+
+    def test_the_preview_payload_carries_no_row_id(self):
+        for key, value in _numbers(self.service.preview(self._ticket())):
+            with self.subTest(key=key):
+                self.assertNotEqual(
+                    value, self.ROW_ID, f"preview.{key} publishes the row id")
+
+    def test_the_launch_response_and_the_running_list_carry_no_row_id(self):
+        self.alive_pids.add(4242)
+        result = self.service.work(self._ticket())
+        for name, payload in (("work", result),
+                              ("running", self.launcher.running())):
+            for key, value in _numbers(payload):
+                with self.subTest(surface=name, key=key):
+                    self.assertNotEqual(
+                        value, self.ROW_ID, f"{name}.{key} publishes the row id")
+
+    def test_the_run_inherits_the_board_number_and_not_the_row_id(self):
+        """Nothing ever read VIKUNJA_TASK_ID, so it was pure exposure — and an
+        env var is the most quotable form there is: it reaches the shell."""
+        self.service.work(self._ticket())
+        env = self.spawn.calls[0]["env"]
+        self.assertEqual(env["VIKUNJA_TASK_NUMBER"], "8")
+        self.assertNotIn("VIKUNJA_TASK_ID", env)
+        self.assertNotIn("VIKUNJA_TICKET", env)
+
+    def test_the_rendered_pages_address_the_board_number(self):
+        """A page that links /task/<row id> is a page that teaches the row id,
+        which is how it kept spreading. The Vikunja link is the exemption."""
+        self.alive_pids.add(4242)
+        data = self.service.preview(self._ticket())
+        self.service.work(self._ticket())
+        pages = {
+            "ticket_page": web.ticket_page(data),
+            "launch_page": web.launch_page(
+                number=8, task_id=self.ROW_ID, reference="#8",
+                summary="Back up Vikunja database",
+                vikunja_url=data["url"]),
+            "console": web.console(
+                "AI Alpha Engine", "/repo", self.launcher.running(),
+                self.launcher.recent()),
+        }
+        for name, html in pages.items():
+            with self.subTest(page=name):
+                self.assertNotIn(f"/task/{self.ROW_ID}", html)
+                # The one link out is Vikunja's own task route; remove it and
+                # the row id must be gone from the page entirely.
+                rest = html.replace(data["url"], " ")
+                self.assertNotIn(f"task id {self.ROW_ID}", rest)
+                self.assertNotIn(f"task {self.ROW_ID}", rest)
+                self.assertIn("#8", rest, "the page still names the ticket")
 
 
 # "One number on two boards is two tasks" is task 649's property and lives in

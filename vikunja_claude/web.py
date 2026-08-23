@@ -79,14 +79,30 @@ def page(title: str, body: str) -> str:
     )
 
 
+def _work_path(number, task_id: int | None = None) -> str:
+    """The POST that launches a run, addressed the way the board names it."""
+    if number is not None:
+        return f"/ticket/{int(number)}/work"
+    return f"/task/{int(task_id)}/work" if task_id is not None else "/next/work"
+
+
+def _ticket_href(number) -> str:
+    """Where this service addresses a ticket: by the board number (task 659).
+
+    Falls back to nothing rather than to /task/<row id> — a page that links the
+    row id is a page that teaches the row id, which is how it kept spreading.
+    """
+    return f"/ticket/{int(number)}" if number is not None else "/"
+
+
 def console(project: str, workdir: str, running: list[dict], recent: list[dict]) -> str:
     running_html = ""
     if running:
         items = "".join(
-            "<li><a href=\"/task/{tid}\">{ref}</a> — task {tid}, pid {pid}, "
+            "<li><a href=\"{href}\">{ref}</a> — pid {pid}, "
             "started {at}</li>".format(
-                tid=escape(str(r.get("task_id"))),
-                ref=escape(str(r.get("reference") or r.get("task_id"))),
+                href=escape(_ticket_href(r.get("number"))),
+                ref=escape(str(r.get("reference") or "?")),
                 pid=escape(str(r.get("pid"))),
                 at=escape(str(r.get("started_at"))),
             )
@@ -97,9 +113,9 @@ def console(project: str, workdir: str, running: list[dict], recent: list[dict])
     recent_html = ""
     if recent:
         rows = "".join(
-            "<tr><td>{}</td><td>#{}</td><td>{}</td><td>{}</td></tr>".format(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
                 escape(str(r.get("at", ""))),
-                escape(str(r.get("ticket", "?"))),
+                escape(str(r.get("reference", "?"))),
                 escape(str(r.get("event", ""))),
                 escape(
                     "exit " + str(r["exit_status"])
@@ -163,7 +179,7 @@ def comments_html(comments) -> str:
 
 
 def ticket_page(data: dict) -> str:
-    task_id = escape(str(data["task_id"]))
+    work = escape(_work_path(data.get("number")))
     reference = escape(str(data["reference"]))
     labels = "".join(f"<span class=\"tag\">{escape(l)}</span>" for l in data["labels"])
     running = data.get("running")
@@ -179,8 +195,7 @@ def ticket_page(data: dict) -> str:
         f"{data['reference']} — Work with Claude",
         f"""
 <h1>{reference} {escape(data['summary'])}</h1>
-<p class="sub"><a href="{escape(data['url'])}">open in Vikunja</a> &middot;
-task id {task_id}</p>
+<p class="sub"><a href="{escape(data['url'])}">open in Vikunja</a></p>
 {warn}
 <table>
   <tr><th>Bucket</th><td>{escape(str(data['bucket']))}</td></tr>
@@ -195,7 +210,7 @@ task id {task_id}</p>
 <h2>Generated prompt</h2>
 <pre>{escape(data['prompt'])}</pre>
 <div class="row">
-  <button class="primary" onclick="call('POST','/task/{task_id}/work')">
+  <button class="primary" onclick="call('POST','{work}')">
     Work {reference}</button>
   <button onclick="location.href='/'">Back to console</button>
 </div>
@@ -205,13 +220,23 @@ task id {task_id}</p>
 
 
 def launch_page(
-    task_id: int, reference: str, summary: str, vikunja_url: str
+    number: int | None, task_id: int, reference: str, summary: str,
+    vikunja_url: str
 ) -> str:
     """Auto-launching landing page for the browser button.
 
     Navigating here is cross-origin and always allowed; the POST it fires is
     same-origin, so the one-click flow needs no CORS.
+
+    Reached at ``/task/<row id>/launch`` — the browser is sitting on Vikunja's
+    own ``/tasks/<id>`` page, so that id is what the bookmarklet has. Everything
+    the rendered page then addresses is the BOARD number (task 659): the entry
+    point is not a reason for the page to keep teaching the row id. ``task_id``
+    is the fallback for a task Vikunja reported no index for, which is the only
+    case where the row id is the sole address there is.
     """
+    view = escape(_ticket_href(number) if number is not None else f"/task/{task_id}")
+    work = escape(_work_path(number, task_id))
     return page(
         f"Launching {reference}",
         f"""
@@ -220,7 +245,7 @@ def launch_page(
 <a href="{escape(vikunja_url)}">back to Vikunja</a></p>
 <pre id="out">starting…</pre>
 <div class="row">
-  <button onclick="location.href='/task/{task_id}'">View prompt</button>
+  <button onclick="location.href='{view}'">View prompt</button>
   <button onclick="location.href='/'">Console</button>
 </div>
 <script>
@@ -228,7 +253,7 @@ def launch_page(
   const state = document.getElementById('state');
   const out = document.getElementById('out');
   try {{
-    const res = await fetch('/task/{task_id}/work', {{
+    const res = await fetch('{work}', {{
       method: 'POST', headers: {{'Accept': 'application/json'}}
     }});
     const body = await res.json();

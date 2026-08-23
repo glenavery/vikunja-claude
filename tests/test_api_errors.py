@@ -111,7 +111,7 @@ class HttpErrorMapping(ServiceTestCase):
     def test_successful_launch_is_202(self):
         status, body = self.get("/ticket/33/work", method="POST")
         self.assertEqual(status, 202)
-        self.assertEqual(body["ticket"], 33)
+        self.assertEqual(body["number"], 8)
 
     def test_unknown_route_is_404(self):
         status, _ = self.get("/nope")
@@ -137,7 +137,7 @@ class HttpErrorMapping(ServiceTestCase):
     def test_next_resolves_the_oldest_ready_ticket(self):
         status, body = self.get("/next")
         self.assertEqual(status, 200)
-        self.assertEqual(body["ticket"], 33)
+        self.assertEqual(body["number"], 8)
 
 
 class EmptyVikunja(ServiceTestCase):
