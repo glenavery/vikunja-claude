@@ -85,7 +85,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "create":
             description = _read_html(args.desc_file) if args.desc_file else ""
             created = client.create_task(project_id, args.title, description)
-            print(f"created task {created['id']}: {created['title']}")
+            # The number the board will show, read from the create reply.
+            # Nothing here can compute the next index, and the row id is not
+            # what a reader will look the ticket up by (task 660).
+            index = created.get("index")
+            shown = f"#{index}" if index else f"task {created['id']}"
+            print(f"created {shown}: {created['title']}")
             return 0
 
         view_id = client.kanban_view_id(project_id)
@@ -102,27 +107,27 @@ def main(argv: list[str] | None = None) -> int:
             ticket = client.find_ticket(args.ticket, project_id, view_id)
 
         if args.command == "show":
-            print(f"{ticket.reference} {ticket.summary}")
+            print(f"{ticket.board_reference} {ticket.summary}")
             print(f"bucket: {ticket.bucket_title}  board: {ticket.board_reference}")
             print()
             print(ticket.description)
             _print_comments(client.comment_views(ticket.task_id))
         elif args.command == "comment":
             client.add_comment(ticket.task_id, args.text)
-            print(f"commented on {ticket.reference} (task {ticket.task_id})")
+            print(f"commented on {ticket.board_reference}")
         elif args.command == "move":
             client.move_to_bucket(project_id, view_id, ticket.task_id, args.bucket)
-            print(f"moved {ticket.reference} to {args.bucket}")
+            print(f"moved {ticket.board_reference} to {args.bucket}")
         elif args.command == "close":
             if args.comment_file:
                 client.add_comment(ticket.task_id, _read_html(args.comment_file))
-                print(f"commented on {ticket.reference}")
+                print(f"commented on {ticket.board_reference}")
             client.close_task(ticket.task_id)
-            print(f"closed {ticket.reference} (task {ticket.task_id})")
+            print(f"closed {ticket.board_reference}")
             print(f"description intact: {len(ticket.description_html)} chars")
         elif args.command == "edit":
             client.set_description(ticket.task_id, _read_html(args.desc_file))
-            print(f"updated the description of {ticket.reference}")
+            print(f"updated the description of {ticket.board_reference}")
     except VikunjaError as exc:
         print(f"vikunja error: {exc}", file=sys.stderr)
         return 1

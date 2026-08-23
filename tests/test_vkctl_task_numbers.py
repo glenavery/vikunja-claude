@@ -70,6 +70,90 @@ class TestTheNumberSelector(CliTestCase):
         self.assertEqual(out.strip(), "", "nothing may be printed for a refusal")
 
 
+class TestEveryLineItPrintsNamesTheBoardNumber(CliTestCase):
+    """Not just the line a reviewer happened to look at.
+
+    ``Ticket.reference`` falls back to ``task <row id>`` when a title has no
+    legacy ``#NN`` prefix — and the AI Alpha boards carry none — so every
+    command printed the row id and the first pass of task 660 missed it. The
+    proof it was missed: ``vkctl close`` printed ``closed task 659 (task 659)``
+    for the ticket the board shows as **#658**, which is the sentence that
+    started this ticket, emitted by the tool meant to fix it.
+
+    So this reads what each command actually writes, rather than the one field
+    it is built from.
+    """
+
+    #: Every command that names the task it acted on, and how to invoke it.
+    COMMANDS = {
+        "show": ("show", "--number", str(TRAP_NUMBER)),
+        "comment": ("comment", "--number", str(TRAP_NUMBER), "A note."),
+        "move": ("move", "--number", str(TRAP_NUMBER), "Done"),
+        "close": ("close", "--number", str(TRAP_NUMBER)),
+    }
+
+    def test_no_command_prints_the_row_id(self):
+        for name, argv in self.COMMANDS.items():
+            with self.subTest(command=name):
+                code, out = self.run_vkctl(*argv)
+                self.assertEqual(code, 0, out)
+                self.assertNotIn(
+                    str(TRAP_ROW_ID), out,
+                    f"{name} printed the row id: {out!r}")
+
+    def test_every_command_names_the_board_number(self):
+        for name, argv in self.COMMANDS.items():
+            with self.subTest(command=name):
+                code, out = self.run_vkctl(*argv)
+                self.assertEqual(code, 0, out)
+                self.assertIn(f"#{TRAP_NUMBER}", out, f"{name}: {out!r}")
+
+    def test_a_create_reports_the_number_the_board_will_show(self):
+        """Read from the create reply, not derived — nothing can guess an index."""
+        code, out = self.run_vkctl("create", "A new ticket")
+        self.assertEqual(code, 0, out)
+        self.assertIn("A new ticket", out)
+        self.assertRegex(out, r"created #\d+")
+
+
+class TestATitleWithNoLegacyPrefixIsTheLiveCase(CliTestCase):
+    """The fixture every other test uses cannot catch this one.
+
+    ``Ticket.reference`` is ``#NN`` when the title carries the legacy prefix
+    and falls back to ``task <row id>`` when it does not. Every fixture in this
+    suite carries one — "#34 Version the OpenClaw health-check skill" — so
+    ``reference`` never reaches its fallback and a command printing it looks
+    correct in the tests and prints a row id on the real board, which carries
+    no prefixes at all since 2026-07-26.
+
+    That is not hypothetical: it is how the first pass of task 660 shipped a
+    ``show`` whose headline was the row id, with the whole suite green. A
+    mutation restoring ``reference`` there survived until this class existed.
+    """
+
+    def setUp(self):
+        super().setUp()
+        for tasks in self.vikunja.layout.values():
+            for stored in tasks:
+                # Strip the prefix the live boards no longer carry.
+                stored["title"] = stored["title"].split(" ", 1)[-1]
+
+    def test_show_still_names_the_board_number(self):
+        code, out = self.run_vkctl("show", "--number", str(TRAP_NUMBER))
+        self.assertEqual(code, 0, out)
+        headline = out.splitlines()[0]
+        self.assertIn(f"#{TRAP_NUMBER}", headline, headline)
+        self.assertNotIn(str(TRAP_ROW_ID), headline, headline)
+
+    def test_no_command_falls_back_to_the_row_id(self):
+        for name, argv in TestEveryLineItPrintsNamesTheBoardNumber.COMMANDS.items():
+            with self.subTest(command=name):
+                code, out = self.run_vkctl(*argv)
+                self.assertEqual(code, 0, out)
+                self.assertNotIn(f"task {TRAP_ROW_ID}", out, f"{name}: {out!r}")
+                self.assertIn(f"#{TRAP_NUMBER}", out, f"{name}: {out!r}")
+
+
 class TestTheUsageLeadsWithTheIdentity(unittest.TestCase):
     def test_the_docstring_shows_number_not_a_row_id(self):
         import vkctl
