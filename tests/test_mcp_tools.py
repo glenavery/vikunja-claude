@@ -75,7 +75,6 @@ class TestGetTask(MutationFreeMixin, McpTestCase):
         task = self.service.get_task(8)
         self.assertEqual(task["task_number"], 8)
         self.assertEqual(task["reference"], "#8")
-        self.assertEqual(task["vikunja_task_id"], 9)
         self.assertEqual(task["title"], "#33 Back up Vikunja database")
         self.assertEqual(task["bucket"], "Ready")
         self.assertEqual(task["status"], "open")
@@ -114,7 +113,8 @@ class TestListOpenTasks(MutationFreeMixin, McpTestCase):
     OPEN = {5, 9, 10, 11}
 
     def ids(self, **filters) -> set[int]:
-        return {t["vikunja_task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
+        listed = self.service.list_open_tasks(**filters)["tasks"]
+        return {self.vikunja.id_of(t["task_number"]) for t in listed}
 
     def test_it_returns_every_open_task_on_the_board(self):
         self.assertEqual(self.ids(), self.OPEN)
@@ -130,7 +130,8 @@ class TestListOpenTasks(MutationFreeMixin, McpTestCase):
         self.assertEqual(listed["count"], len(self.OPEN))
 
     def test_every_task_carries_the_fields_a_board_view_needs(self):
-        found = {t["vikunja_task_id"]: t for t in self.service.list_open_tasks()["tasks"]}[9]
+        by_number = {t["task_number"]: t for t in self.service.list_open_tasks()["tasks"]}
+        found = by_number[self.vikunja.number_of(9)]
         self.assertEqual(found["title"], "#33 Back up Vikunja database")
         self.assertEqual(found["task_number"], 8)
         self.assertEqual(found["reference"], "#8")
@@ -160,7 +161,8 @@ class TestListOpenTasks(MutationFreeMixin, McpTestCase):
 
     def test_it_comes_back_through_the_protocol(self):
         listed = self.call_tool("list_open_tasks")["result"]["structuredContent"]
-        self.assertEqual({t["vikunja_task_id"] for t in listed["tasks"]}, self.OPEN)
+        self.assertEqual({t["task_number"] for t in listed["tasks"]},
+                         {self.vikunja.number_of(i) for i in self.OPEN})
 
     def test_it_is_callable_with_no_arguments_at_all(self):
         """"read the open tickets" carries no bucket and no label."""
@@ -205,8 +207,9 @@ class TestListingIsNotOnePageOfEachBucket(McpTestCase):
         listed = self.service.list_open_tasks()
         self.assertEqual(listed["count"], self.BACKLOG + 1)
         self.assertEqual(
-            {t["vikunja_task_id"] for t in listed["tasks"]},
-            {1000 + i for i in range(self.BACKLOG)} | {9},
+            {t["task_number"] for t in listed["tasks"]},
+            {self.vikunja.number_of(i)
+             for i in ({1000 + i for i in range(self.BACKLOG)} | {9})},
         )
 
     def test_a_single_request_really_would_have_been_short(self):
@@ -270,7 +273,8 @@ class TestAVikunjaThatIgnoresTheFilter(McpTestCase):
 
     def test_the_done_task_is_still_excluded(self):
         listed = self.service.list_open_tasks()
-        self.assertEqual({t["vikunja_task_id"] for t in listed["tasks"]}, {5, 9, 10, 11})
+        self.assertEqual({t["task_number"] for t in listed["tasks"]},
+                         {self.vikunja.number_of(i) for i in (5, 9, 10, 11)})
 
     def test_the_server_really_did_hand_over_the_done_task(self):
         """Guards the test above: without this the fake proves nothing."""
@@ -301,7 +305,8 @@ class TestListOpenTaskOrdering(McpTestCase):
     }
 
     def order(self) -> list[int]:
-        return [t["vikunja_task_id"] for t in self.service.list_open_tasks()["tasks"]]
+        listed = self.service.list_open_tasks()["tasks"]
+        return [self.vikunja.id_of(t["task_number"]) for t in listed]
 
     def test_most_urgent_first_then_by_task_id(self):
         self.assertEqual(self.order(), [5, 10, 20, 30, 40])
@@ -338,7 +343,8 @@ class TestListOpenTaskFilters(McpTestCase):
     }
 
     def ids(self, **filters) -> set[int]:
-        return {t["vikunja_task_id"] for t in self.service.list_open_tasks(**filters)["tasks"]}
+        listed = self.service.list_open_tasks(**filters)["tasks"]
+        return {self.vikunja.id_of(t["task_number"]) for t in listed}
 
     def test_a_bucket_filter_narrows_to_that_column(self):
         self.assertEqual(self.ids(bucket="Ready"), {9, 10})
@@ -388,7 +394,8 @@ class TestListOpenTaskFilters(McpTestCase):
     def test_filtering_through_the_protocol_works_the_same(self):
         listed = self.call_tool("list_open_tasks", bucket="Ready", label="S7")
         found = listed["result"]["structuredContent"]
-        self.assertEqual({t["vikunja_task_id"] for t in found["tasks"]}, {9, 10})
+        self.assertEqual({t["task_number"] for t in found["tasks"]},
+                         {self.vikunja.number_of(i) for i in (9, 10)})
 
 
 class TestTheListingCannotWrite(McpTestCase):
@@ -457,28 +464,37 @@ class TestCreateTask(MutationFreeMixin, McpTestCase):
         arguments.update(overrides)
         return self.service.create_task(**arguments)
 
-    def stored(self, task_id: int) -> dict:
+    def stored(self, task_number: int) -> dict:
+        """The stored row the board shows as ``#task_number``.
+
+        Keyed on the number because that is what the answer publishes now
+        (task 660). The row it returns still carries its immutable ``id``, so
+        a test that needs to check the URL can still name the row it points
+        at — it just cannot read that id out of the connector's answer.
+        """
         for tasks in self.vikunja.layout.values():
             for item in tasks:
-                if item["id"] == task_id:
+                if item["index"] == task_number:
                     return item
-        self.fail(f"task {task_id} is not on the board")
+        self.fail(f"#{task_number} is not on the board")
 
     def test_it_creates_the_task_and_returns_its_identity(self):
         result = self.create()
         self.assertTrue(result["created"])
         self.assertEqual(result["project_id"], PROJECT_ID)
-        self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{result['vikunja_task_id']}")
-        self.assertEqual(self.stored(result["vikunja_task_id"])["title"], self.TITLE)
+        row = self.stored(result["task_number"])
+        self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{row['id']}")
+        self.assertEqual(row["title"], self.TITLE)
+        self.assertNotIn("vikunja_task_id", result)
 
     def test_the_stored_description_is_the_one_that_was_asked_for(self):
         result = self.create()
-        stored = self.stored(result["vikunja_task_id"])["description"]
+        stored = self.stored(result["task_number"])["description"]
         self.assertEqual(html_to_text(stored), self.BODY)
 
     def test_the_description_is_escaped_never_interpreted(self):
         result = self.create(description="Watch out for <script>alert(1)</script>")
-        stored = self.stored(result["vikunja_task_id"])["description"]
+        stored = self.stored(result["task_number"])["description"]
         self.assertNotIn("<script>", stored)
         self.assertIn("&lt;script&gt;", stored)
 
@@ -491,7 +507,8 @@ class TestCreateTask(MutationFreeMixin, McpTestCase):
         lines = self.config.ledger_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 1)
         record = json.loads(lines[0])
-        self.assertEqual(record["task_id"], result["vikunja_task_id"])
+        self.assertEqual(record["task_number"], result["task_number"])
+        self.assertEqual(record["task_id"], self.stored(result["task_number"])["id"])
         self.assertEqual(record["title"], self.TITLE)
         self.assertEqual(record["project_id"], PROJECT_ID)
         self.assertTrue(record["created_at"])
@@ -579,7 +596,7 @@ class TestRetriesDoNotDuplicate(McpTestCase):
         second = self.create()
 
         self.assertFalse(second["created"])
-        self.assertEqual(second["vikunja_task_id"], first["vikunja_task_id"])
+        self.assertEqual(second["task_number"], first["task_number"])
         self.assertEqual(self.board_size(), before)
 
     def test_a_retry_after_a_restart_still_does_not_duplicate(self):
@@ -590,13 +607,13 @@ class TestRetriesDoNotDuplicate(McpTestCase):
         second = self.create(service=restarted)
 
         self.assertFalse(second["created"])
-        self.assertEqual(second["vikunja_task_id"], first["vikunja_task_id"])
+        self.assertEqual(second["task_number"], first["task_number"])
 
     def test_a_genuinely_different_ticket_is_created(self):
         first = self.create()
         second = self.service.create_task(PROJECT_ID, self.TITLE, "A different body.")
         self.assertTrue(second["created"])
-        self.assertNotEqual(second["vikunja_task_id"], first["vikunja_task_id"])
+        self.assertNotEqual(second["task_number"], first["task_number"])
 
     def test_whitespace_around_the_same_content_is_the_same_request(self):
         self.assertEqual(
@@ -620,7 +637,10 @@ class TestThroughTheProtocol(McpTestCase):
 
     def test_get_task_comes_back_as_a_tool_result(self):
         response = self.call_tool("get_task", task_number=8)
-        self.assertEqual(response["result"]["structuredContent"]["vikunja_task_id"], 9)
+        content = response["result"]["structuredContent"]
+        self.assertEqual(content["task_number"], 8)
+        self.assertEqual(content["title"], self.vikunja.row(9)["title"])
+        self.assertNotIn("vikunja_task_id", content)
 
     def test_a_refused_create_is_a_visible_error_not_a_silent_success(self):
         response = self.call_tool(
@@ -641,7 +661,9 @@ class TestThroughTheProtocol(McpTestCase):
         )
         created = response["result"]["structuredContent"]
         self.assertTrue(created["created"])
-        self.assertEqual(created["url"], f"http://127.0.0.1:3456/tasks/{created['vikunja_task_id']}")
+        row = next(t for tasks in self.vikunja.layout.values() for t in tasks
+                   if t["index"] == created["task_number"])
+        self.assertEqual(created["url"], f"http://127.0.0.1:3456/tasks/{row['id']}")
 
 
 class TestTheConfiguredIdsAreAuthoritative(unittest.TestCase):
