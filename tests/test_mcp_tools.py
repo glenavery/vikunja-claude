@@ -468,7 +468,7 @@ class TestCreateTask(MutationFreeMixin, McpTestCase):
         """The stored row the board shows as ``#task_number``.
 
         Keyed on the number because that is what the answer publishes now
-        (task 660). The row it returns still carries its immutable ``id``, so
+        (task 659). The row it returns still carries its immutable ``id``, so
         a test that needs to check the URL can still name the row it points
         at — it just cannot read that id out of the connector's answer.
         """

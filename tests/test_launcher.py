@@ -39,7 +39,7 @@ class Launching(ServiceTestCase):
         self.service.work(self.service.get(33))
         argv = self.spawn.calls[0]["argv"]
         self.assertEqual(argv[0], "claude")
-        self.assertIn("TICKET #33", argv[-1])
+        self.assertIn("TICKET #8", argv[-1])
         self.assertFalse(any(TOKEN in str(arg) for arg in argv))
 
     def test_token_reaches_the_child_through_the_environment_only(self):
@@ -68,7 +68,7 @@ class DuplicateLaunchPrevention(ServiceTestCase):
 
         with self.assertRaises(AlreadyRunning) as caught:
             self.service.work(self.service.get(33))
-        self.assertIn("already working #33", str(caught.exception))
+        self.assertIn("already working #8", str(caught.exception))
         self.assertIn("task 9", str(caught.exception))
 
     def test_refusal_does_not_spawn_a_second_process(self):

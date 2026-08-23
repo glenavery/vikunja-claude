@@ -5,7 +5,12 @@ Identify the task the way the board does: ``--number``, the ``#N`` shown on the
 card, resolved against the configured project. ``--task`` (Vikunja's immutable
 ``/tasks/<id>`` number) and ``--ticket`` (the legacy ``#NN`` title prefix) still
 work, because a human with a task URL open and a board still carrying the old
-prefix are both real, but neither is the ticket's identity (task 660).
+prefix are both real, but neither is the ticket's identity (task 659).
+
+**A bare number is valid under all three, so the wrong flag does not fail -- it
+succeeds on a different ticket.** The spaces overlap by a few, so ``--task 660``
+typed for board #660 reached board #659 and closed it. If you were handed a
+number, it is a board number: use ``--number``.
 
 Usage:
     vkctl.py show    --number 658
@@ -48,7 +53,9 @@ def main(argv: list[str] | None = None) -> int:
         group.add_argument(
             "--number", type=int,
             help="the #N the board shows for this task (preferred)")
-        group.add_argument("--task", type=int, help="Vikunja task id")
+        group.add_argument(
+            "--task", type=int,
+            help="Vikunja row id from a /tasks/<id> URL -- NOT a board number")
         group.add_argument("--ticket", type=int, help="#NN title prefix")
         return sub_parser
 
@@ -87,14 +94,14 @@ def main(argv: list[str] | None = None) -> int:
             created = client.create_task(project_id, args.title, description)
             # The number the board will show, read from the create reply.
             # Nothing here can compute the next index, and the row id is not
-            # what a reader will look the ticket up by (task 660).
+            # what a reader will look the ticket up by (task 659).
             index = created.get("index")
             shown = f"#{index}" if index else f"task {created['id']}"
             print(f"created {shown}: {created['title']}")
             return 0
 
         view_id = client.kanban_view_id(project_id)
-        # Three ways in, and the first is the one to use (task 660). A task is
+        # Three ways in, and the first is the one to use (task 659). A task is
         # identified by its board and its number on that board; the other two
         # answer questions a human still asks — "I have a /tasks/<id> URL open"
         # and "this board still carries the legacy #NN title prefix" — and are

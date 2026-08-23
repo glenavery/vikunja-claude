@@ -14,9 +14,10 @@ class PromptGeneration(ServiceTestCase):
         self.ticket = self.service.get(33)
         self.prompt = self.service.prompt_for(self.ticket)
 
-    def test_identifies_the_ticket(self):
-        self.assertIn("TICKET #33: Back up Vikunja database", self.prompt)
-        self.assertIn("Vikunja task id: 9", self.prompt)
+    def test_identifies_the_ticket_by_its_board_number(self):
+        """#8 is this fixture's board index; 33 is a legacy title prefix and 9
+        is its row id. The board number is the ticket (task 659)."""
+        self.assertIn("TICKET #8: Back up Vikunja database", self.prompt)
         self.assertIn("http://127.0.0.1:3456/tasks/9", self.prompt)
 
     def test_includes_the_complete_description(self):
@@ -29,7 +30,7 @@ class PromptGeneration(ServiceTestCase):
         self.assertIn("--- END TICKET DESCRIPTION ---", self.prompt)
 
     def test_limits_work_to_this_ticket(self):
-        self.assertIn("Do only what ticket #33 asks", self.prompt)
+        self.assertIn("Do only what ticket #8 asks", self.prompt)
         self.assertIn("do not start other tickets", self.prompt)
 
     def test_requires_tests(self):
@@ -40,7 +41,7 @@ class PromptGeneration(ServiceTestCase):
         self.assertIn("to make a failure disappear", self.prompt)
 
     def test_requires_a_commit_referencing_the_ticket(self):
-        self.assertIn("(#33)", self.prompt)
+        self.assertIn("(#8)", self.prompt)
         self.assertIn("COMMIT.", self.prompt)
 
     def test_forbids_pushing(self):
@@ -49,11 +50,46 @@ class PromptGeneration(ServiceTestCase):
 
     def test_blocked_path_moves_to_waiting_with_a_comment(self):
         self.assertIn("BLOCKED:", self.prompt)
-        self.assertIn("vkctl.py move --task 9 Waiting", self.prompt)
+        self.assertIn("vkctl.py move --number 8 Waiting", self.prompt)
 
     def test_success_path_moves_to_done_with_a_comment(self):
-        self.assertIn("vkctl.py comment --task 9", self.prompt)
-        self.assertIn("vkctl.py move --task 9 Done", self.prompt)
+        self.assertIn("vkctl.py comment --number 8", self.prompt)
+        self.assertIn("vkctl.py move --number 8 Done", self.prompt)
+
+    def test_the_prompt_hands_the_run_no_row_id_but_the_url(self):
+        """THE DEFECT THIS GUARDS, and it is the one task 659 was filed for.
+
+        The prompt is copied verbatim into every run, so whatever number it
+        names is the number that reaches branches, commit messages and the
+        closing vkctl call. It named the row id in five places -- the TICKET
+        heading, a "Vikunja task id" line, the commit example and both vkctl
+        commands -- which is how this repository's own history carries four
+        commits reading "(vikunja task 660)" for board #659, and how a later
+        session closed the wrong ticket with `--task`.
+
+        The URL is the one deliberate carrier and is exempt by name: it is a
+        locator, /tasks/<id> is Vikunja's only task route, and a link exists to
+        be opened rather than quoted. Everything else must be free of the id.
+        """
+        url = self.ticket.url("http://127.0.0.1:3456")
+        self.assertIn(url, self.prompt)
+        rest = self.prompt.replace(url, " ")
+        self.assertNotIn(str(self.ticket.task_id), rest,
+                         "the prompt names the row id outside the URL")
+        self.assertNotIn("--task", rest)
+        self.assertNotIn("vikunja task", rest)
+
+    def test_a_task_with_no_board_number_says_so_rather_than_inventing_one(self):
+        """The one case where the row id is the only name there is. It must
+        still be labelled, never emitted as a bare number that reads as a board
+        number -- the two spaces overlap, so a bare digit is the ambiguity."""
+        self.vikunja.layout["Ready"].append(
+            task(91, "Indexless", "2026-07-26T07:00:00Z", "body", index=None)
+        )
+        prompt = self.service.prompt_for(self.service.get_task(91))
+        self.assertIn("TICKET task 91 (no project-local number)", prompt)
+        self.assertIn("--task 91", prompt)
+        self.assertNotIn("--number None", prompt)
 
     def test_names_the_repository(self):
         self.assertIn("/home/glen/stacks/investment", self.prompt)

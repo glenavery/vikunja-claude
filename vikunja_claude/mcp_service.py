@@ -377,7 +377,7 @@ class McpService:
         can call again with: a task is identified by its BOARD, and its number
         on that board. Nothing else here is an identifier.
 
-        Vikunja's immutable row id is deliberately absent (task 660). Task 649
+        Vikunja's immutable row id is deliberately absent (task 659). Task 649
         had published it as ``vikunja_task_id`` — named so it could not be
         mistaken for something callable — on the reasoning that debug metadata
         is harmless. It was not: a second number in the answer is a second

@@ -17,7 +17,6 @@ TEMPLATE = """\
 You are working a single ticket from the Vikunja board "{project}".
 
 TICKET {reference}: {summary}
-Vikunja task id: {task_id}
 Vikunja URL: {url}
 Repository: {workdir}
 
@@ -39,22 +38,39 @@ Rules for this run:
    required.
 4. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
    commit local.
-5. REPORT BACK to Vikunja when you stop, using the helper below. It takes the
-   task id, not the #NN prefix. Do not call the Vikunja API directly and do not
-   look for an API token — the helper already has what it needs.
+5. REPORT BACK to Vikunja when you stop, using the helper below. It names the
+   ticket the way the board does — never the number in a /tasks/<id> URL, which
+   is a different number for a different task. Copy the commands as they stand.
+   Do not call the Vikunja API directly and do not look for an API token — the
+   helper already has what it needs.
 
    If you finished the ticket:
-       python3 {vkctl} comment --task {task_id} "<what you changed, which tests you ran, the commit sha>"
-       python3 {vkctl} move --task {task_id} Done
+       python3 {vkctl} comment {selector} "<what you changed, which tests you ran, the commit sha>"
+       python3 {vkctl} move {selector} Done
 
    If you are blocked and cannot finish:
-       python3 {vkctl} comment --task {task_id} "BLOCKED: <what is blocking you and what you need>"
-       python3 {vkctl} move --task {task_id} Waiting
+       python3 {vkctl} comment {selector} "BLOCKED: <what is blocking you and what you need>"
+       python3 {vkctl} move {selector} Waiting
 
    Comment first, then move — the comment is the part a human needs.
 
 Start by reading the repository's CLAUDE.md and the files the ticket names.
 """
+
+
+def _selector(ticket: Ticket) -> str:
+    """How the run should address this ticket on the command line.
+
+    The board number, which is what the ticket IS (task 659). ``--task`` appears
+    only for a task Vikunja reported no index for — the one case where there is
+    no board number to name, and the same case ``board_reference`` falls back
+    on. It is not an alternative spelling of the number: the two spaces overlap,
+    so a board number passed to ``--task`` silently reaches a different real
+    ticket rather than failing.
+    """
+    if ticket.task_number is not None:
+        return f"--number {ticket.task_number}"
+    return f"--task {ticket.task_id}"
 
 
 def build_prompt(
@@ -67,10 +83,10 @@ def build_prompt(
     description = ticket.description.strip() or "(no description on the ticket)"
     return TEMPLATE.format(
         project=project_title,
-        reference=ticket.reference,
+        reference=ticket.board_reference,
         commit_ref=ticket.commit_ref,
         summary=ticket.summary,
-        task_id=ticket.task_id,
+        selector=_selector(ticket),
         url=ticket.url(frontend_url),
         workdir=workdir,
         description=description,

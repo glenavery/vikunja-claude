@@ -1,4 +1,4 @@
-"""vkctl addresses a task the way the board does (task 660).
+"""vkctl addresses a task the way the board does (task 659).
 
 The connector stopped publishing Vikunja's immutable row id, and that left
 ``vkctl`` as the last place a session needed one: it took ``--task <id>`` or
@@ -75,7 +75,7 @@ class TestEveryLineItPrintsNamesTheBoardNumber(CliTestCase):
 
     ``Ticket.reference`` falls back to ``task <row id>`` when a title has no
     legacy ``#NN`` prefix — and the AI Alpha boards carry none — so every
-    command printed the row id and the first pass of task 660 missed it. The
+    command printed the row id and the first pass of task 659 missed it. The
     proof it was missed: ``vkctl close`` printed ``closed task 659 (task 659)``
     for the ticket the board shows as **#658**, which is the sentence that
     started this ticket, emitted by the tool meant to fix it.
@@ -126,7 +126,7 @@ class TestATitleWithNoLegacyPrefixIsTheLiveCase(CliTestCase):
     correct in the tests and prints a row id on the real board, which carries
     no prefixes at all since 2026-07-26.
 
-    That is not hypothetical: it is how the first pass of task 660 shipped a
+    That is not hypothetical: it is how the first pass of task 659 shipped a
     ``show`` whose headline was the row id, with the whole suite green. A
     mutation restoring ``reference`` there survived until this class existed.
     """

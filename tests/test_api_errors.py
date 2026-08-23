@@ -106,7 +106,7 @@ class HttpErrorMapping(ServiceTestCase):
         self.alive_pids.add(4242)
         status, body = self.get("/ticket/33/work", method="POST")
         self.assertEqual(status, 409)
-        self.assertIn("already working #33", body["error"])
+        self.assertIn("already working #8", body["error"])
 
     def test_successful_launch_is_202(self):
         status, body = self.get("/ticket/33/work", method="POST")

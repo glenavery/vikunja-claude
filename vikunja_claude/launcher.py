@@ -168,7 +168,7 @@ class Launcher:
             if existing is not None:
                 raise AlreadyRunning(
                     ticket.task_id,
-                    ticket.reference,
+                    ticket.board_reference,
                     int(existing.get("pid", -1)),
                     str(existing.get("started_at", "unknown")),
                 )
@@ -183,11 +183,11 @@ class Launcher:
             # concurrent requests cannot both reach spawn.
             self._acquire(
                 ticket.task_id,
-                ticket.reference,
+                ticket.board_reference,
                 {
                     "task_id": ticket.task_id,
                     "ticket": ticket.number,
-                    "reference": ticket.reference,
+                    "reference": ticket.board_reference,
                     "pid": os.getpid(),
                     "started_at": started,
                     "log_file": str(log_file),
@@ -221,7 +221,7 @@ class Launcher:
             record = LaunchRecord(
                 task_id=ticket.task_id,
                 ticket=ticket.number,
-                reference=ticket.reference,
+                reference=ticket.board_reference,
                 pid=process.pid,
                 started_at=started,
                 log_file=str(log_file),

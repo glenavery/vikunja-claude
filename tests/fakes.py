@@ -459,7 +459,7 @@ class FakeVikunja:
         """This store's immutable id for the row the board shows as ``#N``.
 
         The inverse of :meth:`number_of`, and the one a test reaches for more
-        often: the connector answers in board numbers now (task 660), while
+        often: the connector answers in board numbers now (task 659), while
         fixtures are written in ids. Mapping back here keeps an expectation
         readable as the row it names, without the answer having to publish an
         id to make it so.

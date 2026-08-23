@@ -137,11 +137,6 @@ class Ticket:
         return TICKET_RE.sub("", self.title).strip()
 
     @property
-    def reference(self) -> str:
-        """How a human refers to this ticket."""
-        return f"#{self.number}" if self.number is not None else f"task {self.task_id}"
-
-    @property
     def board_reference(self) -> str:
         """How the board names this task — what a human sees and types.
 
@@ -149,6 +144,16 @@ class Ticket:
         says which it fell back to: "#647" and "task 647" are different tasks,
         so a bare number with no scheme attached is the ambiguity this whole
         identifier is here to remove.
+
+        **This is the ONLY property that answers "how is this ticket named".**
+        There was a second, `reference`, which preferred the legacy `#NN` title
+        prefix and fell back to the row id — and since no board has carried a
+        prefix since 2026-07-26 it rendered `task <row id>` every time. Task 659
+        moved vkctl and the MCP onto this one and missed `reference`'s four
+        remaining callers, the launcher prompt among them, so every run was
+        still told to name its ticket by row id. Two properties answering one
+        question is how that survived a ticket written to remove it; there is
+        now one.
         """
         if self.task_number is not None:
             return f"#{self.task_number}"
@@ -156,7 +161,16 @@ class Ticket:
 
     @property
     def commit_ref(self) -> str:
-        """What a commit message should carry to link back to the board."""
+        """What a commit message should carry to link back to the board.
+
+        The BOARD number first (task 659). This preferred the legacy title
+        prefix and otherwise emitted the row id, which is how this repository's
+        own history came to carry four commits reading "(vikunja task 660)" for
+        the ticket the board shows as #659 — the exact confusion the ticket
+        those commits implement was filed to end.
+        """
+        if self.task_number is not None:
+            return f"(#{self.task_number})"
         if self.number is not None:
             return f"(#{self.number})"
         return f"(vikunja task {self.task_id})"

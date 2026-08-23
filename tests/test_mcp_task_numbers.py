@@ -51,7 +51,7 @@ class TestANumberResolvesToTheTaskTheBoardShows(McpTestCase):
         read = self.service.get_task(TRAP_NUMBER)
 
         self.assertEqual(read["task_number"], TRAP_NUMBER)
-        # The answer no longer carries a row id (task 660), so "which row did
+        # The answer no longer carries a row id (task 659), so "which row did
         # this reach" is asked of the store rather than read back out of the
         # reply — which is the stronger form of the same question.
         self.assertEqual(self.vikunja.id_of(read["task_number"]), TRAP_TASK_ID)

@@ -53,7 +53,7 @@ class TaskIdRoutes(HttpFlow):
         data = json.loads(body)
         self.assertEqual(status, 200)
         self.assertEqual(data["task_id"], 9)
-        self.assertEqual(data["reference"], "#33")
+        self.assertEqual(data["reference"], "#8")
         self.assertEqual(self.spawn.calls, [])
 
     def test_task_work_launches(self):
@@ -86,7 +86,7 @@ class LaunchPage(HttpFlow):
     def test_launch_page_renders_without_launching_server_side(self):
         status, body, _ = self.fetch("/task/9/launch")
         self.assertEqual(status, 200)
-        self.assertIn("Launching #33", body)
+        self.assertIn("Launching #8", body)
         # The page only *renders*; the browser fires the POST.
         self.assertEqual(self.spawn.calls, [])
 

@@ -72,8 +72,10 @@ class TicketLookup(ServiceTestCase):
         ticket = self.service.get_task(78)
         self.assertIsNone(ticket.number)
         self.assertEqual(ticket.summary, "No ticket prefix at all")
-        self.assertEqual(ticket.reference, "task 78")
-        self.assertEqual(ticket.commit_ref, "(vikunja task 78)")
+        # The board still numbers it, so the board number is still its name --
+        # the legacy prefix was never the identity (task 659).
+        self.assertEqual(ticket.board_reference, "#77")
+        self.assertEqual(ticket.commit_ref, "(#77)")
 
 
 class TaskIdLookup(ServiceTestCase):
@@ -83,7 +85,9 @@ class TaskIdLookup(ServiceTestCase):
         ticket = self.service.get_task(9)
         self.assertEqual(ticket.number, 33)
         self.assertEqual(ticket.summary, "Back up Vikunja database")
-        self.assertEqual(ticket.reference, "#33")
+        # Legacy prefix 33, row id 9, board number 8 -- deliberately all
+        # different, and only one of them names the ticket.
+        self.assertEqual(ticket.board_reference, "#8")
 
     def test_unknown_task_id_is_not_found(self):
         with self.assertRaises(TicketNotFound):

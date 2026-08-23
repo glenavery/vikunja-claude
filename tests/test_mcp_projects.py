@@ -251,7 +251,7 @@ class TestATaskMustBeOnTheBoardThatWasNamed(McpTestCase):
         self.assertEqual(engine["task_number"], SHARED_NUMBER)
         self.assertEqual(trader["task_number"], SHARED_NUMBER)
         # One number, two boards, two rows — asked of each store, since the
-        # answer names the board and the number and nothing else (task 660).
+        # answer names the board and the number and nothing else (task 659).
         self.assertEqual(
             self.vikunja.id_of(engine["task_number"]), ENGINE_SHARED_TASK)
         self.assertEqual(

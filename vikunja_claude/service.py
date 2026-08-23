@@ -53,7 +53,7 @@ class TicketService:
         return {
             "task_id": ticket.task_id,
             "ticket": ticket.number,
-            "reference": ticket.reference,
+            "reference": ticket.board_reference,
             "title": ticket.title,
             "summary": ticket.summary,
             "bucket": ticket.bucket_title,

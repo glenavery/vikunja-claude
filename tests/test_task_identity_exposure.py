@@ -1,4 +1,4 @@
-"""A task is identified by its board and its number on that board (task 660).
+"""A task is identified by its board and its number on that board (task 659).
 
 Task 649 made ``project_id + task_number`` the identifier the tools accept,
 and published Vikunja's immutable row id beside every answer as
@@ -30,7 +30,7 @@ import unittest
 from .fakes import PROJECT_ID
 from .support import McpTestCase
 
-#: The key task 649 published and task 660 removed.
+#: The key task 649 published and task 659 removed.
 RETIRED_KEY = "vikunja_task_id"
 
 
