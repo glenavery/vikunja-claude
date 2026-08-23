@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """Board updates for a Claude run working a ticket.
 
-Identify the task with --task (Vikunja's immutable task id, preferred) or
---ticket (the editable #NN title prefix).
+Identify the task the way the board does: ``--number``, the ``#N`` shown on the
+card, resolved against the configured project. ``--task`` (Vikunja's immutable
+``/tasks/<id>`` number) and ``--ticket`` (the legacy ``#NN`` title prefix) still
+work, because a human with a task URL open and a board still carrying the old
+prefix are both real, but neither is the ticket's identity (task 660).
 
 Usage:
-    vkctl.py show    --task 11
-    vkctl.py comment --task 11 "<text>"
-    vkctl.py move    --task 11 Done          # Backlog|Ready|In Progress|Waiting|Done
-    vkctl.py show    --ticket 35
-    vkctl.py close   --task 11 [--comment-file closing.html]
+    vkctl.py show    --number 658
+    vkctl.py comment --number 658 "<text>"
+    vkctl.py move    --number 658 Done   # Backlog|Ready|In Progress|Waiting|Done
+    vkctl.py close   --number 658 [--comment-file closing.html]
     vkctl.py create  "Title" --desc-file body.html
-    vkctl.py edit    --task 11 --desc-file body.html
+    vkctl.py edit    --number 658 --desc-file body.html
 
 Descriptions are HTML and are passed as files, not as arguments: they are long,
 and shell quoting is its own way to corrupt one.
 
 Closing a ticket goes through the client's read-modify-write path, which checks
-the description survived. Never close one with a bare
-``curl -X POST /tasks/<id> -d '{"done":true}'`` -- that replaces the task and
-blanks every field the body omits.
+the description survived. Never close one with a bare ``curl -X POST
+/tasks/<id> -d '{"done":true}'`` -- that replaces the task and blanks every
+field the body omits.
 
 The Vikunja token is read from the VIKUNJA_API_TOKEN environment variable that
 the launcher puts in this process's environment. It is never a CLI argument.
@@ -43,7 +45,10 @@ def main(argv: list[str] | None = None) -> int:
 
     def with_selector(sub_parser):
         group = sub_parser.add_mutually_exclusive_group(required=True)
-        group.add_argument("--task", type=int, help="Vikunja task id (preferred)")
+        group.add_argument(
+            "--number", type=int,
+            help="the #N the board shows for this task (preferred)")
+        group.add_argument("--task", type=int, help="Vikunja task id")
         group.add_argument("--ticket", type=int, help="#NN title prefix")
         return sub_parser
 
@@ -84,14 +89,21 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         view_id = client.kanban_view_id(project_id)
-        if args.task is not None:
+        # Three ways in, and the first is the one to use (task 660). A task is
+        # identified by its board and its number on that board; the other two
+        # answer questions a human still asks — "I have a /tasks/<id> URL open"
+        # and "this board still carries the legacy #NN title prefix" — and are
+        # kept because both are still asked, not because either is an identity.
+        if args.number is not None:
+            ticket = client.find_by_task_number(args.number, project_id, view_id)
+        elif args.task is not None:
             ticket = client.find_by_task_id(args.task, project_id, view_id)
         else:
             ticket = client.find_ticket(args.ticket, project_id, view_id)
 
         if args.command == "show":
             print(f"{ticket.reference} {ticket.summary}")
-            print(f"bucket: {ticket.bucket_title}  task id: {ticket.task_id}")
+            print(f"bucket: {ticket.bucket_title}  board: {ticket.board_reference}")
             print()
             print(ticket.description)
             _print_comments(client.comment_views(ticket.task_id))

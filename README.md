@@ -110,7 +110,7 @@ There are **three** numbers in play, and only the first two are Vikunja's:
 
 | Number | What it is | Who uses it |
 |---|---|---|
-| task id | global, immutable, `/tasks/<id>` | the launcher, `vkctl.py`, the run lock |
+| task id | global, immutable, `/tasks/<id>` | the launcher and the run lock — internal, never published (task 660) |
 | `index` | per project, rendered `#N` on the card | the MCP boundary (`task_number`) |
 | `#NN` title prefix | editable text at the front of a title | display, commit references |
 
@@ -321,11 +321,42 @@ reads and the two writes cannot drift apart:
   rather than ignored, so a client on the old contract is told what to send
   instead of being silently right about half the time.
 
-Answers carry `task_number` (and `reference`, its `#N` form) as the identifier,
-and the immutable id as `vikunja_task_id` — debug metadata, named so that it
-cannot be mistaken for something to call back with. Listings are ordered on the
-number for the same reason: an order keyed on a field the answer does not
-publish is not an order its reader can read.
+Answers carry `task_number` (and `reference`, its `#N` form) as the identifier.
+Listings are ordered on the number for the same reason: an order keyed on a
+field the answer does not publish is not an order its reader can read.
+
+### The row id is not published at all (task 660)
+
+Task 649 also returned the immutable id beside every answer, as
+`vikunja_task_id` — named so it could not be mistaken for something to call
+back with, on the reasoning that debug metadata is harmless.
+
+It was not. **A second number in the answer is a second number a reader can
+quote**, and one duly did: a branch and a commit message went out naming
+"task 659" for the ticket the board shows as **#658**. Naming a field carefully
+is not the same as not publishing it, and an id the tools refuse to *accept* is
+an id they have no reason to *hand out*.
+
+So the identity is the board and the number on it — `project_id` +
+`task_number`, nothing else. The row id stays internal, where it is
+load-bearing: the resolver binds it, the approval token binds it, and the
+mutation ledger records it. **A row is not an identity.**
+
+One carrier is left, deliberately: `url` is `/tasks/<id>`, because that is
+Vikunja's only task route and a link whose job is to be opened is a locator
+rather than an identifier. It is pinned by name in
+`tests/test_task_identity_exposure.py` so a second carrier cannot arrive
+unnoticed — and that guard asks the stronger question too, walking every
+integer a payload publishes and failing if any of them is that task's own row
+id under any key.
+
+`vkctl.py` came with it. It could only address a task by row id (`--task`) or
+by the legacy `#NN` title prefix (`--ticket`), so once the MCP stopped
+publishing the id, closing a ticket meant reading one off a `/tasks/<id>` URL —
+the exact habit this removes. It takes `--number` now, and the usage text leads
+with it. The other two stay, because "I have this task URL open" and "this
+board still carries the old prefix" are both real questions; neither is the
+ticket's identity.
 
 The board number is per project, so it is only ever resolved together with one:
 `#2` is a real task on both boards and a different one on each. That makes the

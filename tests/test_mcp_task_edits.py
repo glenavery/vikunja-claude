@@ -150,7 +150,7 @@ class TestAnApprovedUpdateIsApplied(EditTestCase):
 
         self.assertTrue(result["applied"])
         self.assertEqual(result["changed_fields"], ["title"])
-        self.assertEqual(result["vikunja_task_id"], TASK)
+        self.assertEqual(self.vikunja.id_of(result["task_number"]), TASK)
         self.assertEqual(result["title"], NEW_TITLE)
         self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{TASK}")
         self.assertEqual(self.stored()["title"], NEW_TITLE)
@@ -395,7 +395,7 @@ class TestUpdateIsIdempotent(EditTestCase):
             task_number=TASK_NUMBER, title=CURRENT_TITLE, description=CURRENT_TEXT
         )
         self.assertIn("nothing to change", result["reason"])
-        self.assertEqual(result["vikunja_task_id"], TASK)
+        self.assertEqual(self.vikunja.id_of(result["task_number"]), TASK)
 
     def test_repeating_an_applied_change_writes_nothing_a_second_time(self):
         self.approved_update(task_number=TASK_NUMBER, title=NEW_TITLE, description=NEW_TEXT)
@@ -435,7 +435,7 @@ class TestComments(EditTestCase):
         self.assertFalse(previewed["added"])
         self.assertTrue(previewed["approval_required"])
         self.assertEqual(previewed["comment"], self.TEXT)
-        self.assertEqual(previewed["vikunja_task_id"], TASK)
+        self.assertEqual(self.vikunja.id_of(previewed["task_number"]), TASK)
         self.assertEqual(previewed["title"], CURRENT_TITLE)
         self.assertEqual(previewed["url"], f"http://127.0.0.1:3456/tasks/{TASK}")
         self.assertEqual(self.comments_on(), [])
@@ -445,7 +445,7 @@ class TestComments(EditTestCase):
         result = self.approved_comment(task_number=TASK_NUMBER, comment=self.TEXT)
 
         self.assertTrue(result["added"])
-        self.assertEqual(result["vikunja_task_id"], TASK)
+        self.assertEqual(self.vikunja.id_of(result["task_number"]), TASK)
         self.assertIsNotNone(result["comment_id"])
         self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{TASK}")
         self.assertEqual(len(self.comments_on()), 1)

@@ -374,18 +374,27 @@ class McpService:
         """How every answer names the task and the board it came from.
 
         One projection, so the identifier a caller reads back is the one they
-        can call again with. ``vikunja_task_id`` is published as debug
-        metadata — it is what a ``/tasks/<id>`` URL and the mutation ledger
-        carry — and it is deliberately *not* named ``task_id``, because the
-        tools no longer accept a field by that name and a key that looks
-        callable would invite exactly the confusion this contract removes.
+        can call again with: a task is identified by its BOARD, and its number
+        on that board. Nothing else here is an identifier.
+
+        Vikunja's immutable row id is deliberately absent (task 660). Task 649
+        had published it as ``vikunja_task_id`` — named so it could not be
+        mistaken for something callable — on the reasoning that debug metadata
+        is harmless. It was not: a second number in the answer is a second
+        number a reader can quote, and one duly reached a branch name and a
+        commit message as "task 659" for the ticket the board shows as #658.
+        Naming it carefully is not the same as not publishing it, and the id
+        the tools refuse to accept is an id they have no reason to hand out.
+
+        It remains internal, where it is load-bearing: the resolver binds it,
+        the approval token binds it, and the mutation ledger records it. Those
+        are rows, not identities.
         """
         return {
             "task_number": ticket.task_number,
             "reference": ticket.board_reference,
             "project": board.title,
             "project_id": board.project_id,
-            "vikunja_task_id": ticket.task_id,
         }
 
     # -- read --------------------------------------------------------------
@@ -826,7 +835,6 @@ class McpService:
                     "title": existing["title"],
                     "project": board.title,
                     "project_id": existing["project_id"],
-                    "vikunja_task_id": existing["task_id"],
                     "url": existing["url"],
                     "created_at": existing["created_at"],
                 }
@@ -861,7 +869,6 @@ class McpService:
             "title": title,
             "project": board.title,
             "project_id": allowed,
-            "vikunja_task_id": task_id,
             "url": url,
         }
 

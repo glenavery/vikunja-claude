@@ -51,14 +51,17 @@ class TestANumberResolvesToTheTaskTheBoardShows(McpTestCase):
         read = self.service.get_task(TRAP_NUMBER)
 
         self.assertEqual(read["task_number"], TRAP_NUMBER)
-        self.assertEqual(read["vikunja_task_id"], TRAP_TASK_ID)
-        self.assertNotEqual(read["vikunja_task_id"], DECOY_TASK_ID)
+        # The answer no longer carries a row id (task 660), so "which row did
+        # this reach" is asked of the store rather than read back out of the
+        # reply — which is the stronger form of the same question.
+        self.assertEqual(self.vikunja.id_of(read["task_number"]), TRAP_TASK_ID)
+        self.assertNotEqual(self.vikunja.id_of(read["task_number"]), DECOY_TASK_ID)
         self.assertIn("OpenClaw", read["title"])
 
     def test_the_decoy_really_is_a_different_task(self):
         """Guards the test above: without this it could be one task twice."""
         decoy = self.service.get_task(8)
-        self.assertEqual(decoy["vikunja_task_id"], DECOY_TASK_ID)
+        self.assertEqual(self.vikunja.id_of(decoy["task_number"]), DECOY_TASK_ID)
         self.assertNotIn("OpenClaw", decoy["title"])
 
     def test_a_write_lands_on_the_task_the_number_names(self):
@@ -100,7 +103,7 @@ class TestAnUnresolvedNumberIsRefusedNotReinterpreted(McpTestCase):
 
     def test_the_id_it_would_have_fallen_back_to_is_really_there(self):
         """Guards every test in this class."""
-        self.assertEqual(self.service.get_task(10)["vikunja_task_id"], 11)
+        self.assertEqual(self.vikunja.id_of(self.service.get_task(10)["task_number"]), 11)
 
     def test_every_task_tool_refuses_it(self):
         for name, extra in TASK_TOOLS.items():
@@ -192,7 +195,7 @@ class TestEveryAnswerNamesTheNumber(McpTestCase):
         read = self.service.get_task(8)
         self.assertEqual(read["task_number"], 8)
         self.assertEqual(read["reference"], "#8")
-        self.assertEqual(read["vikunja_task_id"], 9)
+        self.assertEqual(self.vikunja.id_of(read["task_number"]), 9)
         self.assertNotIn("task_id", read)
 
     def test_a_listing_carries_the_number_for_every_task(self):
@@ -222,10 +225,13 @@ class TestEveryAnswerNamesTheNumber(McpTestCase):
         self.assertTrue(created["created"])
         # Next on this board, not next id: ids run across every project.
         self.assertEqual(created["task_number"], 11)
-        self.assertNotEqual(created["task_number"], created["vikunja_task_id"])
+        self.assertNotEqual(
+            created["task_number"], self.vikunja.id_of(created["task_number"]),
+            "a fixture whose number equals its id cannot catch the confusion")
         self.assertEqual(
-            self.service.get_task(created["task_number"])["vikunja_task_id"],
-            created["vikunja_task_id"],
+            self.vikunja.id_of(
+                self.service.get_task(created["task_number"])["task_number"]),
+            self.vikunja.id_of(created["task_number"]),
         )
 
     def test_a_repeated_create_reports_the_same_number(self):
@@ -313,11 +319,17 @@ class TestTheServerFilterIsAnOptimisationNotTheAnswer(unittest.TestCase):
 
     def test_a_vikunja_that_ignores_the_filter_still_resolves(self):
         service = self.service_over(FilterIgnoringVikunja())
-        self.assertEqual(service.get_task(TRAP_NUMBER)["vikunja_task_id"], TRAP_TASK_ID)
+        self.assertEqual(
+            service.get_task(TRAP_NUMBER)["task_number"],
+            service.client.find_by_task_number(
+                TRAP_NUMBER, PROJECT_ID, VIEW_ID).task_number)
 
     def test_a_filter_matching_nothing_falls_back_to_the_whole_board(self):
         service = self.service_over(FilterMatchingNothingVikunja())
-        self.assertEqual(service.get_task(TRAP_NUMBER)["vikunja_task_id"], TRAP_TASK_ID)
+        self.assertEqual(
+            service.get_task(TRAP_NUMBER)["task_number"],
+            service.client.find_by_task_number(
+                TRAP_NUMBER, PROJECT_ID, VIEW_ID).task_number)
 
     def test_a_task_that_is_genuinely_absent_is_still_absent(self):
         """Guards the two above: the fallback must not answer everything."""
@@ -352,7 +364,7 @@ class TestANumberVikunjaDidNotGiveIsNotInvented(unittest.TestCase):
     def test_it_is_listed_with_a_null_number_rather_than_a_wrong_one(self):
         listed = self.service.list_open_tasks()["tasks"]
         self.assertEqual([t["task_number"] for t in listed], [None])
-        self.assertEqual(listed[0]["vikunja_task_id"], 70)
+        self.assertEqual(self.vikunja.row(70)["title"], listed[0]["title"])
 
     def test_its_reference_says_which_number_it_is_quoting(self):
         listed = self.service.list_open_tasks()["tasks"]

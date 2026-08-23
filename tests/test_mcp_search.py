@@ -77,7 +77,7 @@ class SearchTestCase(McpTestCase):
 class TestWhatItFinds(SearchTestCase):
     def test_a_title_substring_matches(self):
         found = self.search(text="Cloudflare")
-        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [6])
+        self.assertEqual([self.vikunja.id_of(t["task_number"]) for t in found["tasks"]], [6])
         self.assertEqual(found["tasks"][0]["matched_in"], "title")
 
     def test_matching_is_case_insensitive(self):
@@ -86,7 +86,7 @@ class TestWhatItFinds(SearchTestCase):
 
     def test_a_description_substring_matches_and_says_so(self):
         found = self.search(text="authoritative")
-        by_id = {t["vikunja_task_id"]: t for t in found["tasks"]}
+        by_id = {self.vikunja.id_of(t["task_number"]): t for t in found["tasks"]}
         self.assertIn(9, by_id)
         self.assertIn(11, by_id)
         self.assertEqual(by_id[9]["matched_in"], "description")
@@ -119,16 +119,16 @@ class TestStatus(SearchTestCase):
     def test_open_is_the_default_and_excludes_done_tasks(self):
         found = self.search(text="Back up")
         self.assertEqual(found["status"], "open")
-        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [9])
+        self.assertEqual([self.vikunja.id_of(t["task_number"]) for t in found["tasks"]], [9])
 
     def test_done_finds_only_finished_tasks(self):
         found = self.search(text="Back up", status="done")
-        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [1])
+        self.assertEqual([self.vikunja.id_of(t["task_number"]) for t in found["tasks"]], [1])
         self.assertEqual(found["tasks"][0]["status"], "done")
 
     def test_any_finds_both(self):
         found = self.search(text="Back up", status="any")
-        self.assertEqual({t["vikunja_task_id"] for t in found["tasks"]}, {1, 9})
+        self.assertEqual({self.vikunja.id_of(t["task_number"]) for t in found["tasks"]}, {1, 9})
 
     def test_a_status_that_is_not_a_status_is_refused(self):
         """Not silently narrowed: "closed" is not "done", and guessing would lie."""
@@ -221,8 +221,11 @@ class TestItReadsTheWholeBoard(unittest.TestCase):
                 config, VikunjaClient(config.api_url, config.token, transport=vikunja)
             )
             found = service.search_tasks("the needle")
+            # `vikunja`, not `self.vikunja`: the needle is in this block's own
+            # layout, and the default store has no row for it at all.
+            self.assertEqual(
+                [vikunja.id_of(t["task_number"]) for t in found["tasks"]], [999])
 
-        self.assertEqual([t["vikunja_task_id"] for t in found["tasks"]], [999])
         self.assertEqual(found["searched"], 121)
 
 

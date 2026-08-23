@@ -438,6 +438,53 @@ class FakeVikunja:
                     return
         raise VikunjaError(f"no such task {task_id}", status=404)
 
+    def _layout_of(self, project_id: int) -> dict[str, list[dict]]:
+        return self.projects[project_id]["layout"]
+
+    def number_of(self, task_id: int, project_id: int = PROJECT_ID) -> int:
+        """This store's board number for the row with this immutable id.
+
+        Reads the layout the test actually configured, and on the board it
+        names — a project-local number means nothing without its project, so
+        neither does the mapping to one. ``task()`` refuses to default the
+        index, which is what stops a fixture from having the two agree.
+        """
+        for tasks in self._layout_of(project_id).values():
+            for stored in tasks:
+                if stored["id"] == task_id:
+                    return int(stored["index"])
+        raise AssertionError(f"no row with id {task_id} on project {project_id}")
+
+    def id_of(self, task_number: int, project_id: int = PROJECT_ID) -> int:
+        """This store's immutable id for the row the board shows as ``#N``.
+
+        The inverse of :meth:`number_of`, and the one a test reaches for more
+        often: the connector answers in board numbers now (task 660), while
+        fixtures are written in ids. Mapping back here keeps an expectation
+        readable as the row it names, without the answer having to publish an
+        id to make it so.
+        """
+        for tasks in self._layout_of(project_id).values():
+            for stored in tasks:
+                if stored["index"] == task_number:
+                    return int(stored["id"])
+        raise AssertionError(f"no row shown as #{task_number} on project {project_id}")
+
+    def row(self, task_id: int, project_id: int = PROJECT_ID) -> dict | None:
+        """The stored row with this immutable id, or None.
+
+        Task 660 stopped the connector publishing that id, so a test can no
+        longer prove "the number resolved to the right row" by reading it back
+        out of the answer. It asks the store instead, which is the stronger
+        question: not "did the answer echo an id" but "is this the row that
+        was actually read, or written to".
+        """
+        for tasks in self._layout_of(project_id).values():
+            for stored in tasks:
+                if stored["id"] == task_id:
+                    return stored
+        return None
+
     def bucket_of(self, task_id: int, project_id: int = PROJECT_ID) -> str | None:
         for title, tasks in self.projects[project_id]["layout"].items():
             if any(t["id"] == task_id for t in tasks):
@@ -505,3 +552,4 @@ class RecordingSpawn:
             if hasattr(handle, "close"):
                 handle.close()
         return FakeProcess(self.pid)
+

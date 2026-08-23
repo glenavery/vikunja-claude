@@ -848,7 +848,7 @@ class TestTheGrantedSurface(HttpTestCase):
             "tools/call", {"name": "get_task", "arguments": {"task_number": 8}}
         )
         result = json.loads(text)["result"]["structuredContent"]
-        self.assertEqual(result["vikunja_task_id"], 9)
+        self.assertEqual(self.vikunja.id_of(result["task_number"]), 9)
         self.assertIn("Back up Vikunja database", result["title"])
 
     def test_a_valid_token_can_create_a_task(self):
@@ -899,7 +899,7 @@ class TestTheGrantedSurface(HttpTestCase):
         second_result = json.loads(second)["result"]["structuredContent"]
         self.assertTrue(first_result["created"])
         self.assertFalse(second_result["created"])
-        self.assertEqual(second_result["vikunja_task_id"], first_result["vikunja_task_id"])
+        self.assertEqual(second_result["task_number"], first_result["task_number"])
 
     def test_the_unsupported_write_operations_are_still_unavailable(self):
         """Narrowed by task 196: editing and commenting were added deliberately.

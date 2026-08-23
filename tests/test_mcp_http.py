@@ -138,7 +138,8 @@ class TestFraming(HttpTestCase):
             "tools/call", {"name": "get_task", "arguments": {"task_number": 8}}
         )
         self.assertEqual(status, 200)
-        self.assertEqual(json.loads(text)["result"]["structuredContent"]["vikunja_task_id"], 9)
+        content = json.loads(text)["result"]["structuredContent"]
+        self.assertEqual(self.vikunja.id_of(content["task_number"]), 9)
 
 
 class TestMalformedRequests(HttpTestCase):
