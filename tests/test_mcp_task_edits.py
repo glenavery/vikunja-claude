@@ -115,7 +115,8 @@ class TestThePreviewChangesNothing(EditTestCase):
         self.assertEqual(previewed["proposed"]["title"], NEW_TITLE)
         self.assertEqual(previewed["proposed"]["description"], NEW_TEXT)
         self.assertEqual(previewed["changed_fields"], ["title", "description"])
-        self.assertEqual(previewed["url"], f"http://127.0.0.1:3456/tasks/{TASK}")
+        self.assertEqual(self.vikunja.id_of(previewed["task_number"]), TASK)
+        self.assertNotIn("url", previewed)
 
     def test_the_preview_reads_and_does_not_write(self):
         self.preview(task_number=TASK_NUMBER, title=NEW_TITLE)
@@ -152,7 +153,7 @@ class TestAnApprovedUpdateIsApplied(EditTestCase):
         self.assertEqual(result["changed_fields"], ["title"])
         self.assertEqual(self.vikunja.id_of(result["task_number"]), TASK)
         self.assertEqual(result["title"], NEW_TITLE)
-        self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{TASK}")
+        self.assertNotIn("url", result)
         self.assertEqual(self.stored()["title"], NEW_TITLE)
 
     def test_replacing_the_title_keeps_the_description(self):
@@ -437,7 +438,7 @@ class TestComments(EditTestCase):
         self.assertEqual(previewed["comment"], self.TEXT)
         self.assertEqual(self.vikunja.id_of(previewed["task_number"]), TASK)
         self.assertEqual(previewed["title"], CURRENT_TITLE)
-        self.assertEqual(previewed["url"], f"http://127.0.0.1:3456/tasks/{TASK}")
+        self.assertNotIn("url", previewed)
         self.assertEqual(self.comments_on(), [])
         self.assertWroteNothing()
 
@@ -447,7 +448,7 @@ class TestComments(EditTestCase):
         self.assertTrue(result["added"])
         self.assertEqual(self.vikunja.id_of(result["task_number"]), TASK)
         self.assertIsNotNone(result["comment_id"])
-        self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{TASK}")
+        self.assertNotIn("url", result)
         self.assertEqual(len(self.comments_on()), 1)
         self.assertEqual(html_to_text(self.comments_on()[0]["comment"]), self.TEXT)
 

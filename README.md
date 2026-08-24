@@ -110,7 +110,7 @@ There are **three** numbers in play, and only the first two are Vikunja's:
 
 | Number | What it is | Who uses it |
 |---|---|---|
-| task id | global, immutable, `/tasks/<id>` | the launcher and the run lock — internal, never published (task 660) |
+| task id | global, immutable, `/tasks/<id>` | the launcher and the run lock — internal, never published (tasks 659, 663) |
 | `index` | per project, rendered `#N` on the card | the MCP boundary (`task_number`) |
 | `#NN` title prefix | editable text at the front of a title | display, commit references |
 
@@ -342,13 +342,34 @@ So the identity is the board and the number on it — `project_id` +
 load-bearing: the resolver binds it, the approval token binds it, and the
 mutation ledger records it. **A row is not an identity.**
 
-One carrier is left, deliberately: `url` is `/tasks/<id>`, because that is
-Vikunja's only task route and a link whose job is to be opened is a locator
-rather than an identifier. It is pinned by name in
-`tests/test_task_identity_exposure.py` so a second carrier cannot arrive
-unnoticed — and that guard asks the stronger question too, walking every
-integer a payload publishes and failing if any of them is that task's own row
-id under any key.
+**No carrier is left** (task 663). One was, deliberately: `url` was
+`/tasks/<id>`, on the reasoning that Vikunja's only task route is a locator
+rather than an identifier. That reasoning did not survive contact — a locator
+is precisely what a reader copies. On 2026-08-24 a session read `/tasks/663`
+out of a `search_tasks` answer and handed it over as the address of board
+**#662**, which is the same confusion, through the one hole left open on the
+grounds that nobody would quote it.
+
+The argument against the exemption was already in this repository when it was
+granted: `web._ticket_href`, added by the second pass of the very same ticket,
+refuses the row id with "a page that links the row id is a page that teaches
+the row id". Two surfaces, one ticket, two standards, and the looser one
+survived because nothing compared them.
+
+So the id is now absent from every published payload — MCP answers, the
+launcher's preview and launch responses, the rendered pages, and the prompt
+every run is handed, which printed `Vikunja URL: …/tasks/<id>` two lines above
+the rule telling the run never to read a number out of such a URL.
+`Ticket.url()` is deleted rather than left unused, so there is no helper to
+rebuild it with. The guard in `tests/test_task_identity_exposure.py` asks both
+halves: no published **integer** is that task's own row id under any key, and
+no published **string** contains its `/tasks/<id>` route. The string half is
+what the first pass lacked — `url` was a string, so the integer walk went
+straight over the one field that published the id.
+
+The `/tasks/<id>` **routes** are untouched. A browser sitting on Vikunja's own
+task page has only that number and the bookmarklet entry point depends on it;
+this is about what the services hand out, not about which URLs work.
 
 `vkctl.py` came with it. It could only address a task by row id (`--task`) or
 by the legacy `#NN` title prefix (`--ticket`), so once the MCP stopped

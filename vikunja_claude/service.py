@@ -45,16 +45,12 @@ class TicketService:
             ticket,
             workdir=self.config.workdir,
             project_title=self.config.project_title,
-            frontend_url=self.config.frontend_url,
         )
 
     def preview(self, ticket: Ticket) -> dict:
         active = self.launcher.active_launch(ticket.task_id)
         return {
             # The board number and its rendered form, and no row id (task 659).
-            # The URL below is the one deliberate carrier: /tasks/<id> is
-            # Vikunja's only task route, so a link exists to be opened rather
-            # than quoted.
             "number": ticket.task_number,
             "reference": ticket.board_reference,
             "title": ticket.title,
@@ -62,7 +58,6 @@ class TicketService:
             "bucket": ticket.bucket_title,
             "labels": ticket.labels,
             "done": ticket.done,
-            "url": ticket.url(self.config.frontend_url),
             "workdir": str(self.config.workdir),
             "description": ticket.description,
             "prompt": self.prompt_for(ticket),
@@ -91,6 +86,5 @@ class TicketService:
         return {
             "launched": True,
             "moved_to": moved_to,
-            "url": ticket.url(self.config.frontend_url),
             **asdict(record),
         }

@@ -16,11 +16,24 @@ So the id is internal now. It is still load-bearing there — the resolver binds
 it, the approval token binds it, the mutation ledger records it — and that is
 the distinction these tests hold: a row is not an identity.
 
-The remaining carrier is deliberate and named here rather than left implicit:
-``url`` is ``/tasks/<id>``, because that is Vikunja's only task route and a
-link whose job is to be opened is a locator, not an identifier. It is the one
-place a row id still reaches a reader, and the test below pins it to exactly
-that key so a third carrier cannot appear unnoticed.
+THE ``url`` EXEMPTION IS GONE (task 663). The first pass left one carrier and
+named it: ``url`` was ``/tasks/<id>``, on the reasoning that Vikunja's only
+task route is a locator rather than an identifier. That was the implementing
+pass granting itself an exception to an explicit requirement, and the argument
+against it was already written down a few files away — ``web._ticket_href``,
+added by this same ticket's later pass, refuses the row id outright because
+"a page that links the row id is a page that teaches the row id".
+
+It duly bit. On 2026-08-24 a session read ``/tasks/663`` out of a
+``search_tasks`` answer and handed it to the operator as the address of board
+**#662** — the exact confusion the whole scheme exists to prevent, arriving
+through the one hole left open on the grounds that nobody would quote it. A
+locator is what a reader copies.
+
+So there is no exemption now, on any surface, and the guards below ask the
+strong form in BOTH directions: no published integer is the row id, and no
+published string contains ``/tasks/<row id>``. ``Ticket.url()`` is deleted
+rather than left unused, so there is no helper to rebuild it with.
 
 THE SECOND PASS covers the LAUNCHER, which the first missed. The MCP is what a
 connector reads; the launcher at :3460 is what a person reads and what every
@@ -42,6 +55,26 @@ from .support import McpTestCase, ServiceTestCase
 
 #: The key task 649 published and task 659 removed.
 RETIRED_KEY = "vikunja_task_id"
+
+
+def _strings(payload, out=None):
+    """Every string the payload publishes, with the key path that carries it.
+
+    The integer walk below cannot see a row id spelled inside a URL, which is
+    how the exemption survived task 659: ``url`` was a string, so the strong
+    "no published integer is this row's id" guard passed straight over it.
+    """
+    out = [] if out is None else out
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if isinstance(value, (dict, list)):
+                _strings(value, out)
+            elif isinstance(value, str):
+                out.append((key, value))
+    elif isinstance(payload, list):
+        for item in payload:
+            _strings(item, out)
+    return out
 
 
 def _numbers(payload, out=None):
@@ -106,18 +139,33 @@ class TestTheAnswerCarriesNoRowId(McpTestCase):
                         self.assertNotEqual(
                             value, own_id, f"{name}.{key} publishes the row id")
 
-    def test_the_url_is_the_one_place_a_row_id_still_reaches_a_reader(self):
-        """Named, so a second carrier cannot arrive unnoticed.
+    def test_no_answer_spells_the_row_id_inside_a_string(self):
+        """The half task 659 missed: ``url`` was a string, so the integer walk
+        above passed straight over the one field that published the id.
 
-        ``/tasks/<id>`` is Vikunja's only task route, so the alternative to
-        this is no link at all. A locator is not an identifier — but it is the
-        thing a reader copies digits out of, which is how this ticket started,
-        so it is pinned rather than assumed.
+        Asked as "no published string contains this row's ``/tasks/<id>``"
+        rather than "no string contains these digits", because a description or
+        a comment may legitimately mention a number. It is the ROUTE that names
+        a task, and the route is what a reader copies.
         """
-        answer = self.service.get_task(8)
-        row_id = self.vikunja.id_of(answer["task_number"])
-        self.assertEqual(answer["url"], f"http://127.0.0.1:3456/tasks/{row_id}")
-        self.assertNotEqual(answer["task_number"], row_id)
+        for name, answer in self._answers().items():
+            for entry in answer.get("tasks", [answer]):
+                number = entry.get("task_number")
+                if number is None:
+                    continue
+                route = f"/tasks/{self.vikunja.id_of(number)}"
+                for key, value in _strings(entry):
+                    with self.subTest(tool=name, key=key):
+                        self.assertNotIn(
+                            route, value, f"{name}.{key} publishes the row id")
+
+    def test_no_answer_carries_a_url_key_at_all(self):
+        """Stated separately from the substring guard above, which a link to
+        some OTHER task's route would satisfy while still being wrong."""
+        for name, answer in self._answers().items():
+            for entry in answer.get("tasks", [answer]):
+                with self.subTest(tool=name):
+                    self.assertNotIn("url", entry, f"{name} republishes a url")
 
 
 class TestTheIdentityIsTheBoardAndTheNumber(McpTestCase):
@@ -172,7 +220,10 @@ class TestTheLauncherPublishesNoRowId(ServiceTestCase):
 
     def test_the_rendered_pages_address_the_board_number(self):
         """A page that links /task/<row id> is a page that teaches the row id,
-        which is how it kept spreading. The Vikunja link is the exemption."""
+        which is how it kept spreading. No exemption now (task 663): the
+        "open in Vikunja" and "back to Vikunja" links carried the id in their
+        HREF while their visible text said neither, and the href is the half a
+        reader copies."""
         self.alive_pids.add(4242)
         data = self.service.preview(self._ticket())
         self.service.work(self._ticket())
@@ -180,8 +231,7 @@ class TestTheLauncherPublishesNoRowId(ServiceTestCase):
             "ticket_page": web.ticket_page(data),
             "launch_page": web.launch_page(
                 number=8, task_id=self.ROW_ID, reference="#8",
-                summary="Back up Vikunja database",
-                vikunja_url=data["url"]),
+                summary="Back up Vikunja database"),
             "console": web.console(
                 "AI Alpha Engine", "/repo", self.launcher.running(),
                 self.launcher.recent()),
@@ -189,12 +239,34 @@ class TestTheLauncherPublishesNoRowId(ServiceTestCase):
         for name, html in pages.items():
             with self.subTest(page=name):
                 self.assertNotIn(f"/task/{self.ROW_ID}", html)
-                # The one link out is Vikunja's own task route; remove it and
-                # the row id must be gone from the page entirely.
-                rest = html.replace(data["url"], " ")
-                self.assertNotIn(f"task id {self.ROW_ID}", rest)
-                self.assertNotIn(f"task {self.ROW_ID}", rest)
-                self.assertIn("#8", rest, "the page still names the ticket")
+                self.assertNotIn(f"/tasks/{self.ROW_ID}", html)
+                self.assertNotIn(f"task id {self.ROW_ID}", html)
+                self.assertNotIn(f"task {self.ROW_ID}", html)
+                self.assertIn("#8", html, "the page still names the ticket")
+
+    def test_the_preview_payload_publishes_no_url(self):
+        self.assertNotIn("url", self.service.preview(self._ticket()))
+
+    def test_the_launch_response_publishes_no_url(self):
+        self.alive_pids.add(4242)
+        self.assertNotIn("url", self.service.work(self._ticket()))
+
+    def test_the_prompt_every_run_follows_names_no_task_route(self):
+        """The highest-leverage carrier of all: the prompt is copied verbatim
+        into every run, so whatever number it names is the number that reaches
+        branches, commit messages and the closing vkctl call.
+
+        It printed `Vikunja URL: …/tasks/<row id>` two lines above the rule
+        telling the run never to read a number out of a /tasks/<id> URL — the
+        warning and the hazard in one document.
+        """
+        prompt = self.service.prompt_for(self._ticket())
+        self.assertNotIn(f"/tasks/{self.ROW_ID}", prompt)
+        self.assertNotIn("Vikunja URL:", prompt)
+        self.assertIn("#8", prompt, "the prompt still names the ticket")
+        # The rule against reading a number out of that URL stays: the route
+        # is still how a person arrives, it is just not printed here.
+        self.assertIn("/tasks/<id>", prompt)
 
 
 # "One number on two boards is two tasks" is task 649's property and lives in

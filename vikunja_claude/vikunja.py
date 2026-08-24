@@ -175,12 +175,6 @@ class Ticket:
             return f"(#{self.number})"
         return f"(vikunja task {self.task_id})"
 
-    def url(self, frontend_url: str) -> str:
-        # /tasks/:id is Vikunja's task.detail route. /projects/:id/:viewId is a
-        # board view — never a task.
-        return f"{frontend_url.rstrip('/')}/tasks/{self.task_id}"
-
-
 def ticket_number(title: str) -> int | None:
     """Return the #NN ticket number in a title, or None if it has no prefix."""
     match = TICKET_RE.match(title or "")

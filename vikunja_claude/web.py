@@ -95,6 +95,19 @@ def _ticket_href(number) -> str:
     return f"/ticket/{int(number)}" if number is not None else "/"
 
 
+def _view_link(number) -> str:
+    """The ticket's own page on this service, or nothing (task 663).
+
+    This used to be `<a href="…/tasks/<row id>">open in Vikunja</a>`, reading
+    the row id out of the preview payload. The href is where the digits were:
+    the visible text said "Vikunja", and what a reader copied said 663.
+    """
+    return (
+        f'<a href="{escape(_ticket_href(number))}">open this ticket</a>'
+        if number is not None else ""
+    )
+
+
 def console(project: str, workdir: str, running: list[dict], recent: list[dict]) -> str:
     running_html = ""
     if running:
@@ -195,7 +208,7 @@ def ticket_page(data: dict) -> str:
         f"{data['reference']} — Work with Claude",
         f"""
 <h1>{reference} {escape(data['summary'])}</h1>
-<p class="sub"><a href="{escape(data['url'])}">open in Vikunja</a></p>
+<p class="sub">{_view_link(data.get('number'))}</p>
 {warn}
 <table>
   <tr><th>Bucket</th><td>{escape(str(data['bucket']))}</td></tr>
@@ -221,7 +234,6 @@ def ticket_page(data: dict) -> str:
 
 def launch_page(
     number: int | None, task_id: int, reference: str, summary: str,
-    vikunja_url: str
 ) -> str:
     """Auto-launching landing page for the browser button.
 
@@ -241,8 +253,7 @@ def launch_page(
         f"Launching {reference}",
         f"""
 <h1 id="state">Launching {escape(reference)}…</h1>
-<p class="sub">{escape(summary)} &middot;
-<a href="{escape(vikunja_url)}">back to Vikunja</a></p>
+<p class="sub">{escape(summary)}</p>
 <pre id="out">starting…</pre>
 <div class="row">
   <button onclick="location.href='{view}'">View prompt</button>

@@ -80,7 +80,10 @@ class TestGetTask(MutationFreeMixin, McpTestCase):
         self.assertEqual(task["status"], "open")
         self.assertEqual(task["labels"], ["Operations"])
         self.assertEqual(task["created"], "2026-07-26T05:05:50Z")
-        self.assertEqual(task["url"], "http://127.0.0.1:3456/tasks/9")
+        # Resolution is proved against the store, not by the answer echoing an
+        # id back (task 663). 8 is the board number, 9 the row it lives on.
+        self.assertEqual(self.vikunja.id_of(task["task_number"]), 9)
+        self.assertNotIn("url", task)
 
     def test_the_description_arrives_as_readable_text_not_markup(self):
         task = self.service.get_task(8)
@@ -142,7 +145,8 @@ class TestListOpenTasks(MutationFreeMixin, McpTestCase):
         self.assertEqual(found["priority_label"], "unset")
         self.assertEqual(found["created"], "2026-07-26T05:05:50Z")
         self.assertEqual(found["updated"], "2026-07-26T05:05:50Z")
-        self.assertEqual(found["url"], "http://127.0.0.1:3456/tasks/9")
+        self.assertEqual(self.vikunja.id_of(found["task_number"]), 9)
+        self.assertNotIn("url", found)
 
     def test_it_names_the_project_it_listed(self):
         listed = self.service.list_open_tasks()
@@ -483,9 +487,9 @@ class TestCreateTask(MutationFreeMixin, McpTestCase):
         self.assertTrue(result["created"])
         self.assertEqual(result["project_id"], PROJECT_ID)
         row = self.stored(result["task_number"])
-        self.assertEqual(result["url"], f"http://127.0.0.1:3456/tasks/{row['id']}")
         self.assertEqual(row["title"], self.TITLE)
         self.assertNotIn("vikunja_task_id", result)
+        self.assertNotIn("url", result)
 
     def test_the_stored_description_is_the_one_that_was_asked_for(self):
         result = self.create()
@@ -652,7 +656,7 @@ class TestThroughTheProtocol(McpTestCase):
         self.assertTrue(response["result"]["isError"])
         self.assertIn("Nothing was created", response["result"]["content"][0]["text"])
 
-    def test_a_create_comes_back_with_the_authoritative_id_and_url(self):
+    def test_a_create_comes_back_naming_the_row_it_actually_made(self):
         response = self.call_tool(
             "create_task",
             project_id=PROJECT_ID,
@@ -661,9 +665,13 @@ class TestThroughTheProtocol(McpTestCase):
         )
         created = response["result"]["structuredContent"]
         self.assertTrue(created["created"])
+        # Through the protocol, so the projection a connector actually
+        # receives is the one asserted on. The board number it returns must
+        # name a real row; the row's id is not in the answer (task 663).
         row = next(t for tasks in self.vikunja.layout.values() for t in tasks
                    if t["index"] == created["task_number"])
-        self.assertEqual(created["url"], f"http://127.0.0.1:3456/tasks/{row['id']}")
+        self.assertEqual(row["title"], "A ticket")
+        self.assertNotIn("url", created)
 
 
 class TestTheConfiguredIdsAreAuthoritative(unittest.TestCase):
