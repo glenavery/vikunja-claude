@@ -71,8 +71,17 @@ class PromptGeneration(ServiceTestCase):
         read a number out of a /tasks/<id> URL — the warning and the hazard in
         one document, and the hazard is the half that gets copied.
         """
-        self.assertNotIn(str(self.ticket.task_id), self.prompt,
-                         "the prompt names the row id")
+        # Asked as "no form that NAMES a task by its row id", not as "these
+        # digits are absent". The fixture's row id is 9, and a bare "9" occurs
+        # in any path that happens to contain the digit — this test passed in
+        # the main checkout and failed inside a worktree called task-669,
+        # which makes it a test of the directory name rather than of the
+        # prompt. A one-character needle is not an assertion.
+        row = self.ticket.task_id
+        for form in (f"/tasks/{row}", f"--task {row}", f"task {row}",
+                     f"task id {row}", f"TICKET task {row}"):
+            self.assertNotIn(form, self.prompt,
+                             f"the prompt names the row id as {form!r}")
         self.assertNotIn("Vikunja URL:", self.prompt)
         self.assertNotIn("--task", self.prompt)
         self.assertNotIn("vikunja task", self.prompt)

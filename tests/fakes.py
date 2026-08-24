@@ -29,6 +29,15 @@ BUCKETS = [
     {"id": 9, "title": "Done"},
 ]
 
+#: A board whose columns include no "Done". Vikunja then couples nothing, so a
+#: move cannot close a ticket — the condition `set_task_status` reports rather
+#: than returning a success that did half of what it said (task 669).
+BUCKETS_WITHOUT_DONE = [
+    {"id": 10, "title": "Backlog"},
+    {"id": 11, "title": "Ready"},
+    {"id": 12, "title": "In Progress"},
+]
+
 TRADER_BUCKETS = [
     {"id": 20, "title": "Backlog"},
     {"id": 21, "title": "Ready"},
@@ -173,7 +182,19 @@ class FakeVikunja:
         foreign: list[dict] | None = None,
         trader_layout: dict[str, list[dict]] | None = None,
         projects: dict[int, dict] | None = None,
+        couple_done: bool = True,
     ):
+        #: Whether a move into the Done column marks the task done, the way a
+        #: Vikunja with a configured done-bucket does. Turned off to model one
+        #: without: the column exists, the move succeeds, and the ticket stays
+        #: open — which is the condition `set_task_status` reports rather than
+        #: returning a success that did half of what it said (task 669).
+        self.couple_done = couple_done
+        #: A column title every move lands in, whatever was asked for. Models a
+        #: Vikunja that accepts the call and does something else — the only way
+        #: to reach `set_task_status`'s landed-column check, which is otherwise
+        #: a guard no test can fail (task 669).
+        self.misroute_moves_to: str | None = None
         # Copied: moves mutate the layout, and DEFAULT_LAYOUT is module state.
         self.layout = deepcopy(layout if layout is not None else DEFAULT_LAYOUT)
         # Both approved boards are served by default, because that is what the
@@ -428,12 +449,33 @@ class FakeVikunja:
         return item
 
     def _move(self, bucket_id: int, task_id: int, board: dict | None = None) -> None:
+        """Move a task between columns, and keep `done` in step with the move.
+
+        Vikunja couples them through the board's done-bucket: a task dropped
+        into Done is marked done and one dragged out of it is reopened. The
+        fake did not model that, which would have made task 669's status tool
+        untestable against it — the tool reads the move back and refuses a task
+        whose `done` disagrees with the column it landed in, so a fake that
+        left the flag alone would have failed every legitimate close.
+
+        A board with no column named Done (see `BUCKETS_WITHOUT_DONE`) leaves
+        the flag untouched, which is the condition that guard exists to catch.
+        """
         board = board if board is not None else self.projects[PROJECT_ID]
         target = next(b["title"] for b in board["buckets"] if b["id"] == bucket_id)
+        if self.misroute_moves_to is not None:
+            target = self.misroute_moves_to
+        done_title = next(
+            (b["title"] for b in board["buckets"]
+             if b["title"].strip().lower() == "done"),
+            None,
+        )
         for title, tasks in board["layout"].items():
             for item in list(tasks):
                 if item["id"] == task_id:
                     tasks.remove(item)
+                    if done_title is not None and self.couple_done:
+                        item["done"] = target == done_title
                     board["layout"].setdefault(target, []).append(item)
                     return
         raise VikunjaError(f"no such task {task_id}", status=404)

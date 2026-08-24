@@ -371,6 +371,43 @@ The `/tasks/<id>` **routes** are untouched. A browser sitting on Vikunja's own
 task page has only that number and the bookmarklet entry point depends on it;
 this is about what the services hand out, not about which URLs work.
 
+### Finishing a ticket from the connector (tasks 664, 669)
+
+The MCP could file work and comment on it but not finish it. `update_task`
+says so in its own contract — it cannot change status or bucket — and nothing
+else covered them, so the only way to close a ticket was shell access to
+`vkctl` on this host, and a close could not be undone. A ticket closed as the
+last step of finishing it then looked, to someone reading the board, like a
+ticket that had never existed. That is how this pair was filed.
+
+**`set_task_status` is one control, over columns.** Vikunja couples `done` to
+the board's done-bucket: a task moved into Done is marked done, and one moved
+out of it is reopened. That was measured on the live board before the design
+was chosen — `vkctl move` out of Done left `done` False, and `vkctl close`
+left the task sitting in Done without ever naming the column. Publishing a
+bucket knob beside a done knob would let a caller set them against each other,
+which is the shape these reports spent a week removing.
+
+**The coupling is verified, not trusted.** Every move is read back through the
+board's own view, and two things are checked: that the task is in the column it
+was sent to, and that its `done` matches that column. A board with no
+configured done-bucket therefore reports "the column was changed, the closed
+state was not" instead of returning a success that did half of what it said.
+Reaching that check needs a fake that can accept a move and do something else,
+which is why `FakeVikunja` grew `couple_done` and `misroute_moves_to` — without
+them both guards pass every test while being unable to fail one.
+
+**`list_recently_done` is the read half.** `list_open_tasks` never includes a
+done task, `get_task` needs a number and `search_tasks` needs text, so nothing
+enumerated finished work. It is limited where `list_open_tasks` is not, and the
+answer carries `done_total` and `truncated` — "the open queue" is a set with a
+boundary, while "what finished recently" is a window onto one that only grows,
+and a caller that cannot tell a window from the whole set will read the newest
+twenty as all of them.
+
+Comments were never broken. A connector reporting otherwise is holding a tool
+list cached from before task 649, when the mutations took `task_id`.
+
 `vkctl.py` came with it. It could only address a task by row id (`--task`) or
 by the legacy `#NN` title prefix (`--ticket`), so once the MCP stopped
 publishing the id, closing a ticket meant reading one off a `/tasks/<id>` URL —
