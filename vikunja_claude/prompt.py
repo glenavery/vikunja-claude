@@ -17,7 +17,6 @@ TEMPLATE = """\
 You are working a single ticket from the Vikunja board "{project}".
 
 TICKET {reference}: {summary}
-Vikunja URL: {url}
 Repository: {workdir}
 
 --- BEGIN TICKET DESCRIPTION ---
@@ -77,7 +76,6 @@ def build_prompt(
     ticket: Ticket,
     workdir: Path,
     project_title: str,
-    frontend_url: str,
     vkctl_path: Path = VKCTL,
 ) -> str:
     description = ticket.description.strip() or "(no description on the ticket)"
@@ -87,7 +85,6 @@ def build_prompt(
         commit_ref=ticket.commit_ref,
         summary=ticket.summary,
         selector=_selector(ticket),
-        url=ticket.url(frontend_url),
         workdir=workdir,
         description=description,
         vkctl=vkctl_path,

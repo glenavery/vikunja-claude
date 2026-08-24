@@ -18,7 +18,6 @@ class PromptGeneration(ServiceTestCase):
         """#8 is this fixture's board index; 33 is a legacy title prefix and 9
         is its row id. The board number is the ticket (task 659)."""
         self.assertIn("TICKET #8: Back up Vikunja database", self.prompt)
-        self.assertIn("http://127.0.0.1:3456/tasks/9", self.prompt)
 
     def test_includes_the_complete_description(self):
         for fragment in self.ticket.description.splitlines():
@@ -56,7 +55,7 @@ class PromptGeneration(ServiceTestCase):
         self.assertIn("vkctl.py comment --number 8", self.prompt)
         self.assertIn("vkctl.py move --number 8 Done", self.prompt)
 
-    def test_the_prompt_hands_the_run_no_row_id_but_the_url(self):
+    def test_the_prompt_hands_the_run_no_row_id_at_all(self):
         """THE DEFECT THIS GUARDS, and it is the one task 659 was filed for.
 
         The prompt is copied verbatim into every run, so whatever number it
@@ -67,17 +66,19 @@ class PromptGeneration(ServiceTestCase):
         commits reading "(vikunja task 660)" for board #659, and how a later
         session closed the wrong ticket with `--task`.
 
-        The URL is the one deliberate carrier and is exempt by name: it is a
-        locator, /tasks/<id> is Vikunja's only task route, and a link exists to
-        be opened rather than quoted. Everything else must be free of the id.
+        The URL was left as a deliberate exemption and is gone now (task 663).
+        It printed the row id two lines above the rule telling the run never to
+        read a number out of a /tasks/<id> URL — the warning and the hazard in
+        one document, and the hazard is the half that gets copied.
         """
-        url = self.ticket.url("http://127.0.0.1:3456")
-        self.assertIn(url, self.prompt)
-        rest = self.prompt.replace(url, " ")
-        self.assertNotIn(str(self.ticket.task_id), rest,
-                         "the prompt names the row id outside the URL")
-        self.assertNotIn("--task", rest)
-        self.assertNotIn("vikunja task", rest)
+        self.assertNotIn(str(self.ticket.task_id), self.prompt,
+                         "the prompt names the row id")
+        self.assertNotIn("Vikunja URL:", self.prompt)
+        self.assertNotIn("--task", self.prompt)
+        self.assertNotIn("vikunja task", self.prompt)
+        # The RULE against reading a number out of that route stays; only the
+        # printed instance of one is gone.
+        self.assertIn("/tasks/<id>", self.prompt)
 
     def test_a_task_with_no_board_number_says_so_rather_than_inventing_one(self):
         """The one case where the row id is the only name there is. It must

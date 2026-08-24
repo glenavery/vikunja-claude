@@ -426,7 +426,6 @@ class McpService:
             "bucket": ticket.bucket_title,
             "labels": ticket.labels,
             "created": ticket.created,
-            "url": ticket.url(self.config.frontend_url),
             "comments": comments,
         }
 
@@ -514,8 +513,7 @@ class McpService:
                     "labels": ticket.labels,
                     "created": ticket.created,
                     "updated": ticket.updated,
-                    "url": ticket.url(self.config.frontend_url),
-                }
+                        }
                 for ticket in tickets
             ],
         }
@@ -617,7 +615,6 @@ class McpService:
                     ),
                     "created": t.created,
                     "updated": t.updated,
-                    "url": t.url(self.config.frontend_url),
                 }
                 for t in matches
             ],
@@ -835,7 +832,6 @@ class McpService:
                     "title": existing["title"],
                     "project": board.title,
                     "project_id": existing["project_id"],
-                    "url": existing["url"],
                     "created_at": existing["created_at"],
                 }
 
@@ -851,7 +847,6 @@ class McpService:
             # reply. Read rather than derived: nothing here can compute the
             # next index, and guessing one would name a different ticket.
             task_number = task_index(created.get("index"))
-            url = f"{self.config.frontend_url.rstrip('/')}/tasks/{task_id}"
             record = {
                 "created_at": _now(),
                 "key": key,
@@ -859,7 +854,6 @@ class McpService:
                 "task_id": task_id,
                 "task_number": task_number,
                 "title": title,
-                "url": url,
             }
             self._record(record)
 
@@ -869,7 +863,6 @@ class McpService:
             "title": title,
             "project": board.title,
             "project_id": allowed,
-            "url": url,
         }
 
     def _recorded_task_number(
@@ -1076,8 +1069,7 @@ class McpService:
                 **self._identity(ticket, board),
                 "title": ticket.title,
                 "changed_fields": [],
-                "url": ticket.url(self.config.frontend_url),
-            }
+                }
 
         if approval_token is None:
             return {
@@ -1091,8 +1083,7 @@ class McpService:
                 "approval_token": self._issue_approval(
                     CHANGE_UPDATE, ticket.task_id, proposal["before"], proposal["after"]
                 ),
-                "url": ticket.url(self.config.frontend_url),
-                "next_step": (
+                    "next_step": (
                     "Nothing has been changed. Show the user the exact current "
                     "and proposed values above. If they approve that exact "
                     "change, call update_task again with identical arguments "
@@ -1115,7 +1106,6 @@ class McpService:
                     **self._identity(current, board),
                     "title": current.title,
                     "changed_fields": [],
-                    "url": current.url(self.config.frontend_url),
                 }
 
             self._redeem_approval(
@@ -1163,7 +1153,6 @@ class McpService:
             **self._identity(current, board),
             "title": new_title,
             "changed_fields": changed,
-            "url": current.url(self.config.frontend_url),
         }
 
     @staticmethod
@@ -1233,8 +1222,7 @@ class McpService:
                 "approval_token": self._issue_approval(
                     CHANGE_COMMENT, ticket.task_id, (), (text,)
                 ),
-                "url": ticket.url(self.config.frontend_url),
-                "next_step": (
+                    "next_step": (
                     "Nothing has been written. Show the user this exact comment "
                     "and which task it would go on. If they approve it, call "
                     "add_task_comment again with the identical comment plus this "
@@ -1279,7 +1267,6 @@ class McpService:
             **self._identity(ticket, board),
             "title": ticket.title,
             "comment_id": comment_id,
-            "url": ticket.url(self.config.frontend_url),
         }
 
     def _existing_comment(self, task_id: int, text: str) -> dict[str, Any] | None:
@@ -1309,7 +1296,6 @@ class McpService:
             **self._identity(ticket, board),
             "title": ticket.title,
             "comment_id": comment.get("id"),
-            "url": ticket.url(self.config.frontend_url),
         }
 
     # -- tools -------------------------------------------------------------

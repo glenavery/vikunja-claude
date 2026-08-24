@@ -106,9 +106,15 @@ class LaunchPage(HttpFlow):
         self.assertIn("409", body)
         self.assertIn("Already running", body)
 
-    def test_launch_page_links_back_to_vikunja(self):
+    def test_launch_page_links_no_row_id_back_to_vikunja(self):
+        """It carried `<a href=".../tasks/9">back to Vikunja</a>` — the href
+        was the row id, and the visible text hid that (task 663). The reader
+        arrived from Vikunja's own task page, so Back returns there.
+        """
         _, body, _ = self.fetch("/task/9/launch")
-        self.assertIn("http://127.0.0.1:3456/tasks/9", body)
+        self.assertNotIn("http://127.0.0.1:3456/tasks/9", body)
+        self.assertNotIn("/tasks/9", body)
+        self.assertIn("#8", body, "the page still names the ticket")
 
     def test_unknown_task_launch_page_is_404_and_launches_nothing(self):
         status, _, _ = self.fetch("/task/4242/launch")

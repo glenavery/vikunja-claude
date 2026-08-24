@@ -226,7 +226,6 @@ class Handler(BaseHTTPRequestHandler):
                 task_id=ticket.task_id,
                 reference=ticket.board_reference,
                 summary=ticket.summary,
-                vikunja_url=ticket.url(self.service.config.frontend_url),
             ),
         )
 
