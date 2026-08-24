@@ -86,10 +86,19 @@ MAX_TITLE_CHARS = 250
 MAX_DESCRIPTION_CHARS = 20000
 MAX_COMMENT_CHARS = 20000
 
-#: The two changes a token can be issued for. They are kept apart so an
-#: approval for a comment can never be redeemed as an approval for an edit.
+#: The most finished tasks one `list_recently_done` answer will carry. A window
+#: onto a set that only grows needs a ceiling; the answer says when it bit.
+MAX_RECENTLY_DONE = 100
+
+#: What one answer carries when the caller names no limit.
+DEFAULT_RECENTLY_DONE = 20
+
+#: The changes a token can be issued for. They are kept apart so an approval
+#: for a comment can never be redeemed as an approval for an edit, or either as
+#: an approval for a status move.
 CHANGE_UPDATE = "update"
 CHANGE_COMMENT = "comment"
+CHANGE_STATUS = "status"
 
 #: How many previewed-but-uncommitted changes are remembered at once. A preview
 #: costs nothing and a client is free to abandon one, so the table is bounded
@@ -515,6 +524,68 @@ class McpService:
                     "updated": ticket.updated,
                         }
                 for ticket in tickets
+            ],
+        }
+
+    def list_recently_done(
+        self,
+        limit: int | None = None,
+        project_id: int | None = None,
+    ) -> dict[str, Any]:
+        """The tasks most recently finished on one approved board (task 664).
+
+        ``list_open_tasks`` never includes a done task, by contract, and
+        ``get_task`` and ``search_tasks`` both need something already known —
+        a number, or text to match. So nothing answered "what was closed this
+        week", and a ticket closed as the last step of finishing it looked, to
+        someone reading the board, like a ticket that had never existed.
+
+        Newest first, by the timestamp the task last changed, which for a done
+        task is when it was closed or last commented on. Unlike
+        ``list_open_tasks`` this one IS limited and says so in the answer: "the
+        open queue" is a set with a boundary, while "what finished recently" is
+        a window onto one that only grows.
+        """
+        board = self._board(project_id)
+        try:
+            tickets = self.client.list_all_tickets(board.project_id, board.view_id)
+        except VikunjaError as exc:
+            raise ToolError(str(exc)) from exc
+
+        done = [t for t in tickets if t.done]
+        # `updated` is a string timestamp; sorting it lexically is only correct
+        # because Vikunja emits ISO-8601 in UTC. Missing values sort last rather
+        # than crashing the listing.
+        done.sort(key=lambda t: (t.updated or ""), reverse=True)
+        # One place decides the window. `None` means "the caller said nothing"
+        # and takes the default; any number the caller DID say is honoured as
+        # far as the ceiling allows, and floored to one — `limit=0` answering
+        # with twenty is a different answer from the one that was asked for,
+        # and answering with nothing claims the board has no finished work.
+        capped = (DEFAULT_RECENTLY_DONE if limit is None
+                  else max(1, min(int(limit), MAX_RECENTLY_DONE)))
+        shown = done[:capped]
+
+        return {
+            "project": board.title,
+            "project_id": board.project_id,
+            "count": len(shown),
+            # Stated, not implied: a caller that cannot tell a complete answer
+            # from a truncated one will read the newest N as "all of them".
+            "done_total": len(done),
+            "truncated": len(done) > len(shown),
+            "tasks": [
+                {
+                    **self._identity(t, board),
+                    "title": t.title,
+                    "summary": t.summary,
+                    "status": "done",
+                    "bucket": t.bucket_title,
+                    "labels": t.labels,
+                    "created": t.created,
+                    "updated": t.updated,
+                }
+                for t in shown
             ],
         }
 
@@ -1269,6 +1340,157 @@ class McpService:
             "comment_id": comment_id,
         }
 
+    def set_task_status(
+        self,
+        task_number: int,
+        bucket: str,
+        approval_token: str | None = None,
+        project_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Move a task to a board column, which is also how it is closed or reopened.
+
+        ONE ACTION OVER BUCKETS, not a bucket knob beside a done knob (task 669).
+        Vikunja couples them itself through the board's done-bucket: moving into
+        Done marks the task done and moving out of it clears the flag. Measured
+        on the live board before this was designed — `vkctl move` out of Done
+        left `done=False`, and `vkctl close` left the task in the Done column
+        without ever naming it. Publishing two controls for one state would let
+        a caller set them against each other, which is the shape this board has
+        spent a week removing from its reports.
+
+        The coupling is VERIFIED rather than trusted: the move is read back, and
+        a task whose `done` does not match the column it landed in is reported
+        as an error rather than returned as a success. If a board is ever
+        configured without a done-bucket, this says so instead of quietly
+        leaving a "closed" ticket open.
+        """
+        board, ticket = self._own_ticket(task_number, "move", project_id)
+        try:
+            titles = self.client.bucket_titles(board.project_id, board.view_id)
+        except VikunjaError as exc:
+            raise ToolError(f"{exc} Nothing was changed.") from exc
+
+        target = self._resolve_bucket(bucket, titles)
+        current = ticket.bucket_title or ""
+        if target == current:
+            return {
+                "changed": False,
+                "reason": f"the task is already in {target}",
+                **self._identity(ticket, board),
+                "title": ticket.title,
+                "bucket": current,
+                "done": ticket.done,
+            }
+
+        will_be_done = target == self._done_bucket(titles)
+        if approval_token is None:
+            return {
+                "changed": False,
+                "approval_required": True,
+                **self._identity(ticket, board),
+                "title": ticket.title,
+                "current": {"bucket": current, "done": ticket.done},
+                "proposed": {"bucket": target, "done": will_be_done},
+                "approval_token": self._issue_approval(
+                    CHANGE_STATUS, ticket.task_id, (current,), (target,)
+                ),
+                "next_step": (
+                    "Nothing has been changed. Show the user the current and "
+                    "proposed column, and that moving to the done column closes "
+                    "the ticket while moving out of it reopens one. If they "
+                    "approve, call set_task_status again with the identical "
+                    "bucket plus this approval_token."
+                ),
+            }
+
+        with self._write_lock:
+            self._redeem_approval(
+                approval_token, CHANGE_STATUS, ticket, (current,), (target,)
+            )
+            try:
+                self.client.move_to_bucket(
+                    board.project_id, board.view_id, ticket.task_id, target)
+                # Re-read through the board's own view, so the bucket checked
+                # below is the one the board shows rather than one inferred
+                # from the call having not raised.
+                after = self.client.find_by_task_id(
+                    ticket.task_id, board.project_id, board.view_id)
+            except VikunjaError as exc:
+                raise ToolError(f"Vikunja refused the move: {exc}") from exc
+
+            landed = (after.bucket_title or "") if after else ""
+            is_done = bool(after.done) if after else False
+            if landed != target:
+                raise ToolError(
+                    f"the move was accepted but the task is in {landed!r}, not "
+                    f"{target!r}. Read the board before acting on this."
+                )
+            if is_done != will_be_done:
+                raise ToolError(
+                    f"the task is in {target!r} but its done flag is {is_done}, "
+                    f"which does not match that column. This board's done-bucket "
+                    "may not be configured; the column was changed, the closed "
+                    "state was not."
+                )
+
+            self._record_mutation(
+                {
+                    "at": _now(),
+                    "kind": CHANGE_STATUS,
+                    "project_id": board.project_id,
+                    "task_id": ticket.task_id,
+                    "task_number": ticket.task_number,
+                    "from_bucket": current,
+                    "to_bucket": target,
+                    "done": is_done,
+                },
+                f"moved {ticket.board_reference} (task {ticket.task_id}) from "
+                f"{current} to {target} in project {board.project_id}",
+            )
+
+        return {
+            "changed": True,
+            **self._identity(ticket, board),
+            "title": ticket.title,
+            "bucket": target,
+            "done": is_done,
+            "reopened": bool(ticket.done) and not is_done,
+        }
+
+    @staticmethod
+    def _done_bucket(titles: list[str]) -> str | None:
+        """The column that closes a ticket, matched case-insensitively.
+
+        Read from the board's own columns rather than hardcoded, so a board
+        that names it differently is not silently treated as having none.
+        """
+        for title in titles:
+            if title.strip().lower() == "done":
+                return title
+        return None
+
+    @staticmethod
+    def _resolve_bucket(requested: str, titles: list[str]) -> str:
+        """The board column a caller named, or a refusal listing the real ones.
+
+        Case-insensitive, because a column is a human label; never a prefix or
+        fuzzy match, because "In Progress" and "In Review" would both answer to
+        "In" and picking one would be guessing at a write.
+        """
+        wanted = (requested or "").strip()
+        if not wanted:
+            raise ToolError(
+                "bucket is required and cannot be blank. Nothing was changed. "
+                f"This board has: {', '.join(titles)}."
+            )
+        for title in titles:
+            if title.strip().lower() == wanted.lower():
+                return title
+        raise ToolError(
+            f"{wanted!r} is not a column on this board. Nothing was changed. "
+            f"It has: {', '.join(titles)}."
+        )
+
     def _existing_comment(self, task_id: int, text: str) -> dict[str, Any] | None:
         """A comment already on the task with this exact text, if there is one.
 
@@ -1877,6 +2099,118 @@ class McpService:
                         None
                         if arguments.get("label") is None
                         else str(arguments["label"])
+                    ),
+                    project_id=_optional_int(arguments.get("project_id")),
+                ),
+            ),
+            Tool(
+                name="list_recently_done",
+                title="List recently finished Vikunja tasks",
+                description=(
+                    "The tasks most recently finished on one of the AI Alpha "
+                    f"project boards ({self.config.projects_phrase}), newest "
+                    "first. Use this for \"what was closed this week\" or "
+                    "\"what did that run finish\". `list_open_tasks` never "
+                    "includes a done task and `get_task` and `search_tasks` "
+                    "both need something already known, so this is the only "
+                    "way to enumerate finished work. Returns identity, title, "
+                    "bucket, labels and timestamps — no descriptions or "
+                    "comments; read one task with get_task. The answer says "
+                    "how many done tasks exist and whether it was truncated, "
+                    "so a window is never mistaken for the whole set. "
+                    "Read-only."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                "How many to return, newest first. Default "
+                                f"{DEFAULT_RECENTLY_DONE}, maximum "
+                                f"{MAX_RECENTLY_DONE}."
+                            ),
+                        },
+                        "project_id": self._project_property("to list"),
+                    },
+                    "required": [],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.list_recently_done(
+                    # No `or 20` here: the service owns the default, and a
+                    # second one at the call site is how 0 came to mean 20.
+                    limit=_optional_int(arguments.get("limit")),
+                    project_id=_optional_int(arguments.get("project_id")),
+                ),
+            ),
+            Tool(
+                name="set_task_status",
+                title="Move a Vikunja task to a board column",
+                description=(
+                    "Move one task to a column on one of the AI Alpha project "
+                    f"boards ({self.config.projects_phrase}) — which is also "
+                    "how a ticket is CLOSED and REOPENED, because moving into "
+                    "the done column marks it done and moving out of it clears "
+                    "that. One control, because the board couples them: two "
+                    "separate knobs could be set against each other. This is a "
+                    "two-step tool and it writes to a real board. Call it "
+                    "first without approval_token: it changes nothing and "
+                    "returns the current column and done state beside the "
+                    "proposed ones, with an approval_token for that one move. "
+                    "Show the user both, and only once they have explicitly "
+                    "approved it, call again with the identical bucket plus "
+                    "the approval_token. Identify the task by task_number, the "
+                    "#N the board shows beside its title, together with the "
+                    "board it is on — never by the number in a /tasks/<id> "
+                    "URL. Column names are matched case-insensitively and a "
+                    "name the board does not have is refused, listing the "
+                    "real ones, rather than guessed at. It cannot change "
+                    "title, description, labels, assignees, priority or due "
+                    "dates, and it cannot delete anything."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_number": self._task_number_property(),
+                        "bucket": {
+                            "type": "string",
+                            "description": (
+                                "The column to move the task to, as the board "
+                                "spells it (case-insensitive). Moving to the "
+                                "done column closes the ticket; moving out of "
+                                "it reopens one."
+                            ),
+                        },
+                        "approval_token": {
+                            "type": "string",
+                            "description": (
+                                "The token returned by the preview call for "
+                                "this exact move. Omit on the first call."
+                            ),
+                        },
+                        "project_id": self._project_property("the task is on"),
+                    },
+                    "required": ["task_number", "bucket"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.set_task_status(
+                    _task_number_argument(arguments),
+                    bucket=str(arguments.get("bucket") or ""),
+                    approval_token=(
+                        None
+                        if arguments.get("approval_token") is None
+                        else str(arguments["approval_token"])
                     ),
                     project_id=_optional_int(arguments.get("project_id")),
                 ),

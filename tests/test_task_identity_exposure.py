@@ -101,6 +101,9 @@ class TestTheAnswerCarriesNoRowId(McpTestCase):
             "get_task": self.service.get_task(8),
             "list_open_tasks": self.service.list_open_tasks(),
             "search_tasks": self.service.search_tasks("Vikunja", status="any"),
+            "list_recently_done": self.service.list_recently_done(),
+            "set_task_status (preview)": self.service.set_task_status(
+                task_number=8, bucket="Done"),
             "create_task": self.service.create_task(
                 PROJECT_ID, "A ticket", "A body."),
             "update_task (preview)": preview,

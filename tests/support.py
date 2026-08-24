@@ -64,19 +64,21 @@ CONNECTOR_REDIRECT_URI = "https://chatgpt.com/connector/oauth/jFpZaNIKITJA"
 VIKUNJA_TOOLS = {
     "get_task",
     "list_open_tasks",
+    "list_recently_done",
     "search_tasks",
     "create_task",
     "update_task",
     "add_task_comment",
+    "set_task_status",
 }
 
 #: The subset that can change something that already exists. Named separately
 #: because most of the suite's guarantees are about the tools that cannot.
-WRITE_TOOLS = {"update_task", "add_task_comment"}
+WRITE_TOOLS = {"update_task", "add_task_comment", "set_task_status"}
 
 #: The subset that changes nothing at all. `create_task` is in neither set: it
 #: writes, but it can only ever add a task that did not exist.
-READ_TOOLS = {"get_task", "list_open_tasks", "search_tasks"}
+READ_TOOLS = {"get_task", "list_open_tasks", "list_recently_done", "search_tasks"}
 
 #: The operational half (task 138). Advertised only when the investment reads are
 #: configured, so the default surface is ``VIKUNJA_TOOLS`` alone.

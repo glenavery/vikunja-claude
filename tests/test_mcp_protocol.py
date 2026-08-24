@@ -84,7 +84,7 @@ class TestAdvertisedSurface(McpTestCase):
             for verb in forbidden:
                 self.assertNotIn(verb, name)
 
-    def test_the_two_tools_that_can_change_a_task_are_the_two_that_were_approved(self):
+    def test_the_tools_that_can_change_a_task_are_the_ones_that_were_approved(self):
         tools = {
             tool["name"]: tool
             for tool in self.protocol.handle(request("tools/list"))["result"]["tools"]
@@ -94,7 +94,12 @@ class TestAdvertisedSurface(McpTestCase):
             for name, tool in tools.items()
             if not tool["annotations"]["readOnlyHint"]
         }
-        self.assertEqual(writes, {"create_task", "update_task", "add_task_comment"})
+        # `set_task_status` joined on task 669, by operator decision: a
+        # connector could file work and comment on it but not finish it, and
+        # could not undo a close. Pinned as a SET, so a fourth arriving is a
+        # failure rather than a silent widening.
+        self.assertEqual(writes, {"create_task", "update_task",
+                                  "add_task_comment", "set_task_status"})
 
     def test_each_edit_advertises_its_approval_step(self):
         """A model reading the list must see that one call cannot be enough."""

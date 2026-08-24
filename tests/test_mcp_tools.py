@@ -743,8 +743,13 @@ class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
     def annotations(self) -> dict[str, dict]:
         return {tool.name: tool.annotations for tool in self.service.tools()}
 
-    def test_exactly_two_tools_can_change_an_existing_task(self):
-        self.assertEqual(WRITE_TOOLS, {"update_task", "add_task_comment"})
+    def test_exactly_these_tools_can_change_an_existing_task(self):
+        """Three since task 669. The boundary moved by operator decision rather
+        than drifting: a connector could file work and comment on it but not
+        close, reopen or move it, so the only way to finish a ticket was shell
+        access to `vkctl` on the host."""
+        self.assertEqual(WRITE_TOOLS,
+                         {"update_task", "add_task_comment", "set_task_status"})
         self.assertEqual(VIKUNJA_TOOLS - WRITE_TOOLS - {"create_task"}, READ_TOOLS)
 
     def test_every_other_tool_declares_itself_read_only(self):
@@ -765,23 +770,38 @@ class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
         }
         self.assertEqual(destructive, {"update_task"})
 
-    def test_no_write_tool_takes_an_argument_that_closes_moves_or_labels(self):
-        """The writes name the two fields they may change and nothing else.
+    def test_each_write_names_only_the_fields_it_is_allowed_to_change(self):
+        """Every write names its own fields and nothing else.
 
         `list_open_tasks` takes `bucket` and `label` as *filters*, which is why
         this is asked of the writes rather than of the whole surface — and why
         `additionalProperties: false` matters here: an unlisted field is what
         would let one of these carry `done` through to a whole-task replace.
+
+        `set_task_status` is allowed `bucket` and NOTHING else from this list
+        (task 669), which is the point of it being its own tool: the text edits
+        still cannot move a ticket and it still cannot retitle one. It is not
+        allowed `done` either — the column decides that, and two controls for
+        one state is what this design refuses.
         """
         forbidden = {"done", "status", "bucket", "bucket_id", "labels", "label_ids",
                      "assignees", "priority", "due_date", "position"}
+        allowed_extra = {"set_task_status": {"bucket"}}
         writes = [t for t in self.service.tools() if t.name in WRITE_TOOLS]
         self.assertEqual({t.name for t in writes}, WRITE_TOOLS)
         for tool in writes:
             with self.subTest(tool=tool.name):
                 named = set(tool.input_schema.get("properties") or {})
-                self.assertEqual(named & forbidden, set())
+                self.assertEqual(
+                    named & forbidden, allowed_extra.get(tool.name, set()))
                 self.assertFalse(tool.input_schema["additionalProperties"])
+        # The exemption is not a hole: the tool that may move a ticket must not
+        # also be able to edit one.
+        status = next(t for t in writes if t.name == "set_task_status")
+        self.assertEqual(
+            set(status.input_schema["properties"]),
+            {"task_number", "bucket", "approval_token", "project_id"},
+        )
 
     def test_the_board_selector_selects_and_cannot_reproject_a_task(self):
         """`project_id` left the forbidden list when the writes gained it.
