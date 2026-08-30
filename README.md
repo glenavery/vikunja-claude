@@ -75,7 +75,7 @@ can start a Claude run on this host.
 | GET | `/` | Console: ticket input, Preview prompt, Work ticket, Work next Ready |
 | GET | `/health` | Service + Vikunja reachability (`503` when Vikunja is down) |
 | GET | `/task/{id}` | Ticket details and the generated prompt. **Never launches.** |
-| POST | `/task/{id}/work` | Move to In Progress, then launch Claude Code |
+| POST | `/task/{id}/work` | Move to In Progress, then launch Claude Code. `?executor=local` runs it on the approved local model |
 | GET | `/task/{id}/launch` | Landing page for the browser button: launches on load |
 | GET | `/ticket/{n}` | `#NN` convenience lookup; redirects to `/task/{id}` |
 | POST | `/ticket/{n}/work` | Same, by `#NN` |
@@ -224,6 +224,53 @@ text, so it is a second layer and never the primary defence.
 If a description is lost anyway, it is recoverable from orphaned TOAST chunks
 until vacuum reclaims them — tools and method in
 `/home/glen/stacks/vikunja/recovery-tools/`. Act immediately.
+
+## Which model a run drives
+
+A run can execute on the approved **local** model instead of the hosted one.
+That is the only thing the choice changes.
+
+| | |
+|---|---|
+| `claude` (default) | Claude Code as installed, talking to whatever it normally talks to. |
+| `local` | Claude Code, pointed at the approved local coding seat. |
+
+```bash
+curl -s -X POST localhost:3460/ticket/33/work?executor=local | jq
+RUNNER_EXECUTOR=local          # or make it the default for every run
+```
+
+The console and each ticket page carry a **“(local model)”** button beside the
+normal one.
+
+**The harness stays Claude Code either way, and that is the point.** Everything
+the runner leans on the harness for — its worktree mode and the branch it makes,
+running the tests, the commit, reporting back through `vkctl.py` — belongs to
+Claude Code, not to the model behind it. Swapping in a different CLI would take
+all of that away; swapping the model touches none of it. So there is one
+launcher, one lock, one log and one prompt, and an executor is nothing but extra
+environment for the child process.
+
+**Nothing here names a model.** `local` resolves the model from
+`deploy/ollama/models.json` in `CLAUDE_WORKDIR` — the investment repository's
+tracked record of which local models are approved and what job each holds. The
+one entry carrying `"seat": "local_coding"` is the model, and its Modelfile's
+`num_ctx` is the context the run is given (currently 262,144; Claude Code
+assumes 200k for a model it does not recognise and compacts to it, so it has to
+be told). Approving a different model is an edit there and nothing here.
+
+**A local run that cannot be configured is refused, never downgraded.** A
+missing record, no seat, two seats, or a recipe stating no context all give
+`400` and launch nothing. The alternative to a local run is a run against a paid
+frontier model, so falling back would answer “run this locally” with a bill —
+and for the same reason a local run's environment has `ANTHROPIC_API_KEY`
+removed, whatever the service inherited.
+
+`LOCAL_EXECUTOR_BASE_URL` is a **transport shim**, not Ollama itself: Ollama
+refuses any `role: system` message that is not first and Claude Code always
+appends one, so without the shim the two cannot talk at all. It ships in the
+investment repository — `deploy/ollama/anthropic_shim.py`, with its unit and the
+measurements in `deploy/ollama/README.md`.
 
 ## Permissions
 
@@ -1154,6 +1201,7 @@ vikunja_claude/
   vikunja.py      Vikunja client, Ticket, lookup by task id, board number, #NN
   html_text.py    description HTML ↔ plain text
   prompt.py       the prompt template
+  executors.py    which model a run drives, and nothing else
   launcher.py     locks, spawn, logging, reaping
   service.py      order of operations: move, then launch
   web.py          HTML console

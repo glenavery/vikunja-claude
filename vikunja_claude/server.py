@@ -10,10 +10,12 @@ import argparse
 import json
 import re
 import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import web
 from .config import Config, ConfigError
+from .executors import ExecutorError
 from .launcher import AlreadyRunning, LaunchError, Launcher
 from .service import TicketService
 from .vikunja import AmbiguousTicket, TicketNotFound, VikunjaClient, VikunjaError
@@ -115,6 +117,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._fail(409, str(exc))
                 except AlreadyRunning as exc:
                     self._fail(409, str(exc))
+                except ExecutorError as exc:
+                    # 400, not 500: the request named an executor that cannot be
+                    # built, and the caller is the one who can fix it. Never a
+                    # fallback to the default executor — that would answer "run
+                    # this locally" by running it on a paid model.
+                    self._fail(400, str(exc))
                 except VikunjaError as exc:
                     self._fail(502, str(exc))
                 except LaunchError as exc:
@@ -229,14 +237,39 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
+    def _requested_executor(self) -> str | None:
+        """``?executor=<name>``, or None to take the configured default.
+
+        Matched against the executor registry, never used to build anything: an
+        unknown name is a 400 from `ExecutorError`, so no request value reaches
+        an environment or a process. The only other value a request carries is a
+        ticket number, and that stays true.
+        """
+        query = urllib.parse.urlsplit(self.path).query
+        values = urllib.parse.parse_qs(query).get("executor")
+        return values[-1] if values else None
+
     def handle_work_task(self, task_id: str) -> None:
-        self._json(202, self.service.work(self.service.get_task(int(task_id))))
+        self._json(
+            202,
+            self.service.work(
+                self.service.get_task(int(task_id)), self._requested_executor()
+            ),
+        )
 
     def handle_work_ticket(self, number: str) -> None:
-        self._json(202, self.service.work(self.service.get(int(number))))
+        self._json(
+            202,
+            self.service.work(
+                self.service.get(int(number)), self._requested_executor()
+            ),
+        )
 
     def handle_work_next(self) -> None:
-        self._json(202, self.service.work(self.service.next_ready()))
+        self._json(
+            202,
+            self.service.work(self.service.next_ready(), self._requested_executor()),
+        )
 
 
 def build_server(config: Config) -> ThreadingHTTPServer:

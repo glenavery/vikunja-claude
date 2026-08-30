@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 
 from .config import Config
+from .executors import Executor, resolve
 from .launcher import Launcher, LaunchRecord
 from .prompt import build_prompt
 from .vikunja import Ticket, VikunjaClient
@@ -71,8 +72,22 @@ class TicketService:
 
     # -- action ------------------------------------------------------------
 
-    def work(self, ticket: Ticket) -> dict:
+    def executor_for(self, name: str | None) -> Executor:
+        """The executor a request asked for, or the configured default.
+
+        Resolved here, before anything is moved or launched, so a bad executor
+        name or a broken local seat is a refusal that leaves the board alone —
+        rather than a ticket sitting in In Progress with nothing running.
+        """
+        return resolve(
+            name or self.config.executor,
+            workdir=self.config.workdir,
+            local_base_url=self.config.local_executor_base_url,
+        )
+
+    def work(self, ticket: Ticket, executor: str | None = None) -> dict:
         """Move the ticket to In Progress, then launch Claude Code for it."""
+        chosen = self.executor_for(executor)
         prompt = self.prompt_for(ticket)
         moved_to = None
         if ticket.bucket_title != IN_PROGRESS:
@@ -82,7 +97,7 @@ class TicketService:
             )
             moved_to = IN_PROGRESS
 
-        record: LaunchRecord = self.launcher.launch(ticket, prompt)
+        record: LaunchRecord = self.launcher.launch(ticket, prompt, chosen)
         return {
             "launched": True,
             "moved_to": moved_to,

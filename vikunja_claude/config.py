@@ -17,8 +17,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .executors import DEFAULT_EXECUTOR
+
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PACKAGE_ROOT / ".env"
+
+#: Where the transport shim listens. A deployment fact rather than a model fact,
+#: which is why it lives here and not in the approved-model record: moving the
+#: shim's port changes nothing about which model is approved.
+DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11440"
 
 # Shared by both services, so they cannot drift apart: the launcher and the MCP
 # server must talk to the same Vikunja and mean the same project by "project".
@@ -367,6 +374,15 @@ class Config:
     state_dir: Path
     frontend_url: str
     launch_timeout_seconds: int
+    #: Which executor a run uses when the request does not name one. The
+    #: executor decides only which model the launched Claude Code drives; see
+    #: `vikunja_claude/executors.py`.
+    executor: str = DEFAULT_EXECUTOR
+    #: The Anthropic-shaped endpoint the local executor points Claude Code at.
+    #: It is the transport shim rather than Ollama itself — Ollama refuses the
+    #: trailing system message Claude Code always sends, so the two cannot talk
+    #: directly. Unused unless the local executor is selected.
+    local_executor_base_url: str = DEFAULT_LOCAL_BASE_URL
     project_id: int | None = None
     _log_path: Path | None = field(default=None, repr=False)
 
@@ -407,6 +423,10 @@ class Config:
             ).rstrip("/"),
             launch_timeout_seconds=int(
                 os.environ.get("CLAUDE_LAUNCH_TIMEOUT_SECONDS", "10800")
+            ),
+            executor=os.environ.get("RUNNER_EXECUTOR", DEFAULT_EXECUTOR),
+            local_executor_base_url=os.environ.get(
+                "LOCAL_EXECUTOR_BASE_URL", DEFAULT_LOCAL_BASE_URL
             ),
         )
 
