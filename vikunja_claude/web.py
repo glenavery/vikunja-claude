@@ -65,6 +65,7 @@ function num() {
 }
 function preview() { const n = num(); if (n) location.href = '/ticket/' + n; }
 function work()    { const n = num(); if (n) call('POST', '/ticket/' + n + '/work'); }
+function workLocal(){ const n = num(); if (n) call('POST', '/ticket/' + n + '/work?executor=local'); }
 function workNext(){ call('POST', '/next/work'); }
 function showNext(){ location.href = '/next'; }
 """
@@ -153,6 +154,7 @@ def console(project: str, workdir: str, running: list[dict], recent: list[dict])
   <input type="number" id="ticket" min="1" placeholder="33" aria-label="Ticket number">
   <button onclick="preview()">Preview prompt</button>
   <button class="primary" onclick="work()">Work ticket</button>
+  <button onclick="workLocal()">Work ticket (local model)</button>
   <button onclick="workNext()">Work next Ready ticket</button>
   <button onclick="showNext()">Show next Ready</button>
 </div>
@@ -225,6 +227,8 @@ def ticket_page(data: dict) -> str:
 <div class="row">
   <button class="primary" onclick="call('POST','{work}')">
     Work {reference}</button>
+  <button onclick="call('POST','{work}?executor=local')">
+    Work {reference} (local model)</button>
   <button onclick="location.href='/'">Back to console</button>
 </div>
 <pre id="out"></pre>

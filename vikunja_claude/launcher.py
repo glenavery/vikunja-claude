@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config
+from .executors import DEFAULT_EXECUTOR, Executor
 from .vikunja import Ticket
 
 
@@ -65,6 +66,12 @@ class LaunchRecord:
     started_at: str
     log_file: str
     workdir: str
+    #: Which executor ran, and the model it drove (None for the harness's own
+    #: default). Published because "which model wrote this commit" is the first
+    #: question anyone asks of a finished run, and the log is the only place
+    #: that can still answer it afterwards.
+    executor: str = DEFAULT_EXECUTOR
+    model: str | None = None
 
 
 def pid_alive(pid: int) -> bool:
@@ -175,7 +182,18 @@ class Launcher:
 
     # -- launching ---------------------------------------------------------
 
-    def launch(self, ticket: Ticket, prompt: str) -> LaunchRecord:
+    def launch(
+        self, ticket: Ticket, prompt: str, executor: Executor | None = None
+    ) -> LaunchRecord:
+        """One run for one ticket.
+
+        ``executor`` decides only which model the launched Claude Code drives,
+        as extra environment for the child. Everything else about a launch — the
+        binary, the arguments, the working directory, the lock, the log, the
+        reap — is the same whichever model is behind it, which is why there is
+        one launch path rather than one per model.
+        """
+        executor = executor or Executor(name=DEFAULT_EXECUTOR)
         with self._mutex:
             existing = self.active_launch(ticket.task_id)
             if existing is not None:
@@ -204,6 +222,8 @@ class Launcher:
                     "started_at": started,
                     "log_file": str(log_file),
                     "state": "starting",
+                    "executor": executor.name,
+                    "model": executor.model,
                 },
             )
 
@@ -212,7 +232,7 @@ class Launcher:
                 process = self._spawn(
                     [self.config.claude_bin, *self.config.claude_args, prompt],
                     cwd=str(self.config.workdir),
-                    env=self._child_env(ticket),
+                    env=self._child_env(ticket, executor),
                     stdin=subprocess.DEVNULL,
                     stdout=handle,
                     stderr=subprocess.STDOUT,
@@ -237,6 +257,8 @@ class Launcher:
                 started_at=started,
                 log_file=str(log_file),
                 workdir=str(self.config.workdir),
+                executor=executor.name,
+                model=executor.model,
             )
             self._write_lock(ticket.task_id, {**asdict(record), "state": "running"})
             self._log("launched", **asdict(record))
@@ -253,8 +275,11 @@ class Launcher:
     def _write_lock(self, task_id: int, payload: dict) -> None:
         self._lock_path(task_id).write_text(json.dumps(payload), encoding="utf-8")
 
-    def _child_env(self, ticket: Ticket) -> dict[str, str]:
-        env = dict(os.environ)
+    def _child_env(self, ticket: Ticket, executor: Executor) -> dict[str, str]:
+        # The executor is applied FIRST, so what it removes is removed from what
+        # the service inherited, and what the runner sets below cannot be
+        # overwritten by a model's environment.
+        env = executor.apply(dict(os.environ))
         env.update(
             {
                 "VIKUNJA_API_URL": self.config.api_url,
