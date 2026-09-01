@@ -34,7 +34,7 @@ from vikunja_claude.executors import (
     resolve,
 )
 
-from .support import ServiceTestCase, make_config
+from .support import ServiceTestCase, make_config, make_repo
 from .test_browser_flow import HttpFlow
 
 BASE_URL = "http://127.0.0.1:11440"
@@ -64,7 +64,12 @@ RECIPE = "FROM base\nPARAMETER temperature 1\nPARAMETER num_ctx 262144\n"
 
 
 def write_repo(root: Path, manifest=None, recipes=None) -> Path:
-    """A workdir shaped like the investment repository's ollama deployment."""
+    """A workdir shaped like the investment repository's ollama deployment.
+
+    A real git repository as well as the right files, because a launch now
+    creates a worktree in the workdir and refuses if it cannot (task 756).
+    """
+    make_repo(root)
     ollama = root / "deploy" / "ollama"
     ollama.mkdir(parents=True, exist_ok=True)
     (ollama / "models.json").write_text(
@@ -289,9 +294,18 @@ class ThroughTheRunner(ServiceTestCase):
         self.assertEqual(env["VIKUNJA_TASK_NUMBER"], "8")
 
     def test_the_ticket_context_is_the_same_prompt_the_default_executor_gets(self):
-        """No second prompt, and nothing trimmed for being a local model."""
-        expected = self.service.prompt_for(self.service.get_by_task_number(8))
+        """No second prompt, and nothing trimmed for being a local model.
+
+        Built against the run's own worktree, because that is what the launched
+        prompt names: comparing it with a prompt naming the repository root
+        would fail on the directory rather than on the ticket context, which is
+        what this is about.
+        """
         self.work_local()
+        worktree = Path(self.spawn.calls[0]["cwd"])
+        expected = self.service.prompt_for(
+            self.service.get_by_task_number(8), worktree
+        )
         self.assertEqual(self.spawn.calls[0]["argv"][-1], expected)
 
     def test_the_run_records_which_executor_and_model_it_used(self):

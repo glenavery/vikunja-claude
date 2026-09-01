@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 
 from .config import Config
 from .executors import Executor, resolve
@@ -104,10 +105,17 @@ class TicketService:
         project_id, view_id = self._ids()
         return self.client.oldest_ready_ticket(project_id, view_id)
 
-    def prompt_for(self, ticket: Ticket) -> str:
+    def prompt_for(self, ticket: Ticket, workdir: Path | None = None) -> str:
+        """The prompt for this ticket, naming the directory the run will use.
+
+        ``workdir`` is the run's worktree, known only once the launcher has made
+        it. It defaults to the repository root for `preview`, which shows what a
+        run would be told without creating anything: a preview that made a
+        worktree would leave one behind for every look.
+        """
         return build_prompt(
             ticket,
-            workdir=self.config.workdir,
+            workdir=workdir or self.config.workdir,
             project_title=self.config.project_title,
         )
 
@@ -216,7 +224,6 @@ class TicketService:
     def work(self, ticket: Ticket, executor: str | None = None) -> dict:
         """Move the ticket to In Progress, then launch Claude Code for it."""
         chosen = self.executor_for(executor)
-        prompt = self.prompt_for(ticket)
         moved_to = None
         if ticket.bucket_title != IN_PROGRESS:
             project_id, view_id = self._ids()
@@ -225,7 +232,11 @@ class TicketService:
             )
             moved_to = IN_PROGRESS
 
-        record: LaunchRecord = self.launcher.launch(ticket, prompt, chosen)
+        # The prompt is built by the launcher, once it knows the worktree it
+        # made, so the path the run is told is the path it is given (task 756).
+        record: LaunchRecord = self.launcher.launch(
+            ticket, lambda worktree: self.prompt_for(ticket, worktree), chosen
+        )
         return {
             "launched": True,
             "moved_to": moved_to,

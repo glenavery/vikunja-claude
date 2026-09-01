@@ -658,6 +658,61 @@ it does not work comes back as "no run status was read, and nothing was
 changed" — never "nothing was started", which would describe a launch nobody
 asked for.
 
+### Where a run works (task 756)
+
+**Every run gets its own git worktree, made by the runner before the spawn.**
+`.claude/worktrees/task-<board number>` in the configured repository, on branch
+`worktree-task-<board number>`, branched from **local `main`** — never
+`origin/main`, which is only as fresh as the last fetch and would start runs
+from a base that ages silently.
+
+It did not always. `launch` spawned with the repository root as its cwd and
+nothing created anything, so a run was isolated only if the launched model chose
+to isolate itself. Claude Code driving Opus usually did. The local seat did not:
+task 714's run spent an hour and a half editing the main checkout beside a human
+editing the same files, and its uncommitted work could only be told apart from
+theirs by asking. Task 690 already called this "the existing worktree-based
+ticket runner" and `executors.py` still claimed the harness supplied "its
+worktree mode, the branch it makes" — both true only by the model's good
+manners, which is the one thing an executor is supposed not to change.
+
+**The naming deliberately differs from the lock's, and the difference is the
+point.** The lock is keyed by the immutable Vikunja row id, because two runs of
+one ticket must never both hold it — a correctness requirement needing a key
+that cannot change. A worktree is a directory someone will `cd` into and a
+branch someone will merge, so it is named by the **board number**: what the
+board shows, what every worktree already in the investment checkout uses, and
+the only number a person asking "where did #714's run go" actually has. The row
+id appears only for a ticket Vikunja reported no index for, spelled `row-` so
+the two numbering spaces can never be read as one.
+
+Three properties worth keeping:
+
+- **An existing worktree is reused, never recreated.** That is load-bearing
+  rather than an optimisation: a run that was orphaned (task 754) or stopped
+  leaves partial work there, and recreating would start from a clean tree and
+  discard it. Reuse is also what makes a concurrent double request harmless —
+  one creates, the other reuses, and the lock decides which run starts.
+- **A branch that outlived its worktree is attached to, not branched again.**
+  `git worktree remove` keeps the branch; re-branching from `main` would abandon
+  its commits where nothing names them.
+- **A worktree that cannot be made refuses the launch** — lock released,
+  `launch_failed` recorded, no process spawned. There is deliberately no
+  fallback to the repository root, because running in the root is the defect
+  this exists to stop, and a fallback would reintroduce it at exactly the moment
+  nobody is watching.
+
+**The runner does not merge and does not push.** The prompt tells the run which
+branch it is on and not to switch branches, merge into `main`, or make another
+worktree. Merging stays a human step. Cleanup is not this service's either:
+`clean-merged-worktrees` in the investment repository's `deploy/bash_aliases`
+already removes worktrees whose branch is merged and whose tree is clean.
+
+Because the prompt names the directory and the directory does not exist until
+the launch makes it, `Launcher.launch` takes a **prompt builder** rather than a
+prompt. That is why: the path the run is told and the path the child is given
+cannot disagree.
+
 ### Closing out a run this service lost (task 754)
 
 Task 751 could see the orphaned run; it could not end it. Stopping this service

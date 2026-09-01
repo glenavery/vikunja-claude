@@ -6,10 +6,16 @@ Claude Code talk to* — expressed as extra environment for the child process.
 That is the whole abstraction, and it is deliberately this small:
 
 - the **harness stays Claude Code** in every case. Everything the runner relies
-  on the harness for — its worktree mode, the branch it makes, running the
-  tests, the commit, reporting back through ``vkctl.py`` — is a property of that
-  harness, not of the model behind it. Swapping in a different CLI would take
-  those away; swapping the model does not touch them.
+  on the harness for — running the tests, the commit, reporting back through
+  ``vkctl.py`` — is a property of that harness, not of the model behind it.
+  Swapping in a different CLI would take those away; swapping the model does
+  not touch them.
+- the **worktree is NOT one of those things**, and this docstring used to say it
+  was. Nothing created one: a run was isolated only if the model chose to
+  isolate it, which made the guarantee a property of the model after all — the
+  one thing an executor is supposed not to change. The runner now makes the
+  worktree itself, before the spawn, for every executor (task 756,
+  ``vikunja_claude/worktree.py``).
 - so there is no second launcher, no per-model process handling, and nothing
   here that knows about tickets.
 

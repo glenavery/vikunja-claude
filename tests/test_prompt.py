@@ -102,7 +102,7 @@ class PromptGeneration(ServiceTestCase):
         self.assertNotIn("--number None", prompt)
 
     def test_names_the_repository(self):
-        self.assertIn("/home/glen/stacks/investment", self.prompt)
+        self.assertIn(str(self.workdir), self.prompt)
 
     def test_never_contains_the_vikunja_token(self):
         self.assertNotIn(TOKEN, self.prompt)

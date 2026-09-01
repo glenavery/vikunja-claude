@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import PACKAGE_ROOT
 from .vikunja import Ticket
+from .worktree import branch_name
 
 VKCTL = PACKAGE_ROOT / "vkctl.py"
 
@@ -32,12 +33,16 @@ Rules for this run:
 2. TESTS. The change is not finished without tests. Add or extend tests that
    would fail without your change, and run the relevant suite. Never weaken,
    skip or delete an existing test or assertion to make a failure disappear.
-3. COMMIT. Commit your work with a message referencing the ticket, e.g.
+3. WHERE YOU ARE. This directory is a git worktree made for this ticket, on
+   branch {branch}. Work here and commit here. Do not switch branches, do not
+   merge into main, and do not make another worktree. Merging is a human step
+   that happens after this run ends.
+4. COMMIT. Commit your work with a message referencing the ticket, e.g.
    "<type>: <what changed> {commit_ref}". Commit only the files this ticket
    required.
-4. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
+5. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
    commit local.
-5. REPORT BACK to Vikunja when you stop, using the helper below. It names the
+6. REPORT BACK to Vikunja when you stop, using the helper below. It names the
    ticket the way the board does — never the number in a /tasks/<id> URL, which
    is a different number for a different task. Copy the commands as they stand.
    Do not call the Vikunja API directly and do not look for an API token — the
@@ -86,6 +91,7 @@ def build_prompt(
         summary=ticket.summary,
         selector=_selector(ticket),
         workdir=workdir,
+        branch=branch_name(ticket.task_number, ticket.task_id),
         description=description,
         vkctl=vkctl_path,
     )

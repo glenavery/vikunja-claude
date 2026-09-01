@@ -8,6 +8,7 @@ import http.client
 import json
 import secrets
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -149,12 +150,53 @@ def make_oauth_config(**overrides) -> OAuthConfig:
     return OAuthConfig(**defaults)
 
 
+def make_repo(path: Path) -> Path:
+    """A throwaway git repository with a `main` branch and one commit.
+
+    Real git rather than a fake, because what is being tested is that the runner
+    can create a worktree, and a fake `git` would prove only that the runner can
+    call one.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    # Idempotent: some tests build a workdir in layers and call this more than
+    # once for the same root, and a second `commit` with nothing staged fails.
+    if (path / ".git").exists():
+        return path
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main", str(path)], check=True, capture_output=True
+    )
+    for args in (
+        ("config", "user.email", "tests@example.invalid"),
+        ("config", "user.name", "tests"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(path), *args], check=True, capture_output=True
+        )
+    (path / "README.md").write_text("throwaway repo\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(path), "add", "README.md"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "commit", "-qm", "initial"],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
 def make_config(state_dir: Path, **overrides) -> Config:
     defaults = dict(
         api_url="http://127.0.0.1:3456/api/v1",
         token=TOKEN,
         project_title="AI Alpha Engine",
-        workdir=Path("/home/glen/stacks/investment"),
+        # Deliberately not the real checkout. It used to be, harmlessly, while
+        # nothing in a launch wrote to the working directory — task 756 makes a
+        # launch create a git worktree in it, and a suite that did that against
+        # /home/glen/stacks/investment would leave branches in the live
+        # repository. Tests that actually launch get a throwaway repo from
+        # `make_repo`; this default exists so one that forgets fails loudly
+        # rather than quietly finding somewhere real to write.
+        workdir=Path("/nonexistent/vikunja-claude-test-workdir"),
         claude_bin="claude",
         claude_args=["-p", "--permission-mode", "acceptEdits"],
         host="127.0.0.1",
@@ -469,7 +511,9 @@ class ServiceTestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.state_dir = Path(self._tmp.name)
-        self.config = make_config(self.state_dir)
+        # A real repository, because a launch now creates a worktree in it.
+        self.workdir = make_repo(self.state_dir / "repo")
+        self.config = make_config(self.state_dir, workdir=self.workdir)
         self.vikunja = FakeVikunja(
             layout=self.layout, fail=self.vikunja_fail, comments=self.comments
         )

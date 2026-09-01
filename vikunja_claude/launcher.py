@@ -22,6 +22,7 @@ from typing import Callable
 
 from .config import Config
 from .executors import DEFAULT_EXECUTOR, Executor
+from .worktree import WorktreeError, ensure_worktree
 from .vikunja import Ticket
 
 
@@ -468,15 +469,24 @@ class Launcher:
     # -- launching ---------------------------------------------------------
 
     def launch(
-        self, ticket: Ticket, prompt: str, executor: Executor | None = None
+        self,
+        ticket: Ticket,
+        build_prompt: Callable[[Path], str],
+        executor: Executor | None = None,
     ) -> LaunchRecord:
-        """One run for one ticket.
+        """One run for one ticket, in a worktree of its own.
 
         ``executor`` decides only which model the launched Claude Code drives,
         as extra environment for the child. Everything else about a launch — the
         binary, the arguments, the working directory, the lock, the log, the
         reap — is the same whichever model is behind it, which is why there is
         one launch path rather than one per model.
+
+        ``build_prompt`` is a callable rather than the prompt itself because the
+        prompt names the directory the run works in, and that directory does not
+        exist until this method makes it (task 756). Building it here also means
+        the path in the prompt is the path the child is actually given: they
+        cannot disagree.
         """
         executor = executor or Executor(name=DEFAULT_EXECUTOR)
         with self._mutex:
@@ -512,11 +522,33 @@ class Launcher:
                 },
             )
 
+            # Before the spawn and inside the mutex, so a failure here is a
+            # refusal with the lock released rather than a run in the wrong
+            # place. There is deliberately no fallback to the repository root:
+            # that fallback is the defect (task 756).
+            try:
+                workdir = ensure_worktree(
+                    self.config.workdir, ticket.task_number, ticket.task_id
+                )
+            except WorktreeError as exc:
+                self._release(ticket.task_id)
+                self._log(
+                    "launch_failed",
+                    number=ticket.task_number,
+                    reference=ticket.board_reference,
+                    error=str(exc),
+                )
+                raise LaunchError(str(exc)) from exc
+
             try:
                 handle = log_file.open("w", encoding="utf-8")
                 process = self._spawn(
-                    [self.config.claude_bin, *self.config.claude_args, prompt],
-                    cwd=str(self.config.workdir),
+                    [
+                        self.config.claude_bin,
+                        *self.config.claude_args,
+                        build_prompt(workdir),
+                    ],
+                    cwd=str(workdir),
                     env=self._child_env(ticket, executor),
                     stdin=subprocess.DEVNULL,
                     stdout=handle,
@@ -541,7 +573,7 @@ class Launcher:
                 pid=process.pid,
                 started_at=started,
                 log_file=str(log_file),
-                workdir=str(self.config.workdir),
+                workdir=str(workdir),
                 executor=executor.name,
                 model=executor.model,
             )

@@ -7,6 +7,8 @@ import unittest
 
 from vikunja_claude.launcher import AlreadyRunning, LaunchError
 
+from pathlib import Path
+
 from .support import TOKEN, ServiceTestCase
 
 
@@ -29,11 +31,12 @@ class Launching(ServiceTestCase):
         move_calls = [c for c in self.vikunja.calls if c[0] == "POST"]
         self.assertEqual(move_calls, [])
 
-    def test_runs_claude_in_the_configured_repository(self):
+    def test_runs_claude_in_a_worktree_of_the_configured_repository(self):
+        """Not the repository root — that was task 756's whole defect."""
         self.service.work(self.service.get_by_task_number(8))
-        self.assertEqual(
-            self.spawn.calls[0]["cwd"], "/home/glen/stacks/investment"
-        )
+        cwd = Path(self.spawn.calls[0]["cwd"])
+        self.assertEqual(cwd, self.workdir / ".claude" / "worktrees" / "task-8")
+        self.assertNotEqual(cwd, self.workdir)
 
     def test_prompt_is_the_last_argument_and_token_is_not_on_the_command_line(self):
         self.service.work(self.service.get_by_task_number(8))
