@@ -1,11 +1,19 @@
-"""One request to the ticket runner's own work route, and nothing learned.
+"""Two requests to the ticket runner's own routes, and nothing learned.
 
 Task 726: the MCP exposes starting a ticket through the runner as
-``start_task_run``. This module is the *only* runner knowledge the MCP side
-carries — one HTTP verb, the URL shape of the route the runner's launcher
-already builds for its own browser button, and the fact that a refused or
-unreachable request means nothing was launched. Everything the request *starts*
-happens over there: the task lookup, the move to In Progress, the prompt,
+``start_task_run``. Task 751 adds the one question that could not be asked
+afterwards — *what is that run doing* — as a GET beside it, because a launch
+that had gone quiet was indistinguishable from one still working. This module
+is the *only* runner knowledge the MCP side carries — two routes on the
+runner's own launcher, the URL shape it already builds for its browser button,
+and the fact that a refused or unreachable request means nothing happened.
+
+The second route reads; it does not control. There is no pause, kill, retry or
+resume here, and adding one would make this a second place deciding what a run
+does, which is the thing the rest of this docstring exists to prevent.
+
+Everything the launch request *starts* happens over there: the task lookup,
+the move to In Progress, the prompt,
 the executor and model selection (``deploy/ollama/models.json`` is read by
 the runner, not by this side), the per-task lock, the worktree, the tests,
 the commit. So task 726's criterion "changing the approved ``local_coding``
@@ -48,7 +56,22 @@ from typing import Any, Callable
 #: a conversation open.
 DEFAULT_TIMEOUT_SECONDS = 30
 
-Transport = Callable[[str], Any]
+#: The verb travels with the path, so a stand-in for this transport can tell
+#: the two requests apart. It has to: one starts an agent editing a repository
+#: and the other only reads what a run is doing, and a seam that could not
+#: distinguish them could not prove the read path starts nothing.
+Transport = Callable[[str, str], Any]
+
+
+#: What a failed request left behind, said in the terms of what it was for. A
+#: read that fails changed nothing by construction, and saying "nothing was
+#: launched" of it would describe a launch nobody asked for.
+LAUNCH = "Nothing was launched and the ticket was not moved."
+READ = "No run status was read; nothing was changed."
+
+
+def _outcome(method: str) -> str:
+    return LAUNCH if method == "POST" else READ
 
 
 class RunnerError(RuntimeError):
@@ -91,7 +114,7 @@ class RunnerClient:
     ):
         self.runner_url = runner_url.rstrip("/")
         self._timeout = timeout
-        self._transport = transport or self._post
+        self._transport = transport or self._request
 
     def start_run(self, task_id: int, executor: str | None = None) -> dict:
         """Ask the runner to start a run for the row with this id.
@@ -107,51 +130,70 @@ class RunnerClient:
         path = f"/task/{int(task_id)}/work"
         if executor:
             path += f"?executor={urllib.parse.quote(str(executor))}"
-        result = self._transport(path)
-        if not isinstance(result, dict):
-            raise RunnerError(
-                f"The ticket runner answered with {type(result).__name__}, "
-                "not an object. Nothing was launched."
-            )
-        return result
+        return self._object(self._transport(path, "POST"), LAUNCH)
 
-    def _post(self, path: str) -> dict:
+    def run_status(self, task_id: int) -> dict:
+        """What the runner says the last run for this row is doing.
+
+        A GET, and the only other request this side makes. It asks the runner
+        the question rather than reading its state directory, for the reason
+        every other line in this module exists: the runner owns what a run is,
+        and a second reader of its lock files and logs would be a second
+        opinion on that, out of step the day either changes. Nothing here
+        interprets the answer either — ``running``, ``lost`` and the rest are
+        the runner's words, not a state machine kept on this side.
+
+        It starts nothing, and there is no counterpart to it: no pause, no
+        kill, no retry, no resume. Reading is the whole of what it does.
+        """
+        return self._object(self._transport(f"/task/{int(task_id)}/run", "GET"), READ)
+
+    def _request(self, path: str, method: str) -> dict:
         request = urllib.request.Request(
             self.runner_url + path,
-            method="POST",
+            method=method,
             headers={"Accept": "application/json"},
         )
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 raw = response.read()
         except urllib.error.HTTPError as exc:
-            raise RunnerError(self._explain_refusal(exc), status=exc.code) from exc
+            raise RunnerError(
+                self._explain_refusal(exc, _outcome(method)), status=exc.code
+            ) from exc
         except urllib.error.URLError as exc:
             raise RunnerError(
                 f"Cannot reach the ticket runner at {self.runner_url}: "
-                f"{exc.reason}. Nothing was launched and the ticket was not "
-                "moved. Check that the vikunja-claude launcher service is "
-                "running."
+                f"{exc.reason}. {_outcome(method)} Check that the "
+                "vikunja-claude launcher service is running."
             ) from exc
         except TimeoutError as exc:
             raise RunnerError(
                 f"The ticket runner did not answer within {self._timeout}s. "
-                "Nothing was launched and the ticket was not moved."
+                f"{_outcome(method)}"
             ) from exc
 
         if not raw:
             raise RunnerError(
-                "The ticket runner sent an empty body. Nothing was launched."
+                f"The ticket runner sent an empty body. {_outcome(method)}"
             )
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise RunnerError(
-                "The ticket runner sent a non-JSON response. Nothing was "
-                "launched."
+                f"The ticket runner sent a non-JSON response. {_outcome(method)}"
             ) from exc
 
-    def _explain_refusal(self, exc: urllib.error.HTTPError) -> str:
+    @staticmethod
+    def _object(result: Any, outcome: str) -> dict:
+        if not isinstance(result, dict):
+            raise RunnerError(
+                f"The ticket runner answered with {type(result).__name__}, "
+                f"not an object. {outcome}"
+            )
+        return result
+
+    def _explain_refusal(self, exc: urllib.error.HTTPError, outcome: str) -> str:
         """The runner's refusal, with its own reason when it gave one.
 
         The runner answers its refusals as ``{"error": "..."}`` — written for
@@ -163,10 +205,10 @@ class RunnerClient:
         """
         detail = _error_phrase(exc)
         if detail:
-            return f"The ticket runner refused the run ({exc.code}): {detail}"
+            return f"The ticket runner refused the request ({exc.code}): {detail}"
         return (
-            f"The ticket runner refused the run ({exc.code}) without a "
-            "reason. Nothing was launched and the ticket was not moved."
+            f"The ticket runner refused the request ({exc.code}) without a "
+            f"reason. {outcome}"
         )
 
 

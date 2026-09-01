@@ -86,6 +86,7 @@ class Handler(BaseHTTPRequestHandler):
         (re.compile(r"^/launches$"), "launches"),
         (re.compile(r"^/next$"), "next"),
         (re.compile(r"^/task/(\d+)$"), "task"),
+        (re.compile(r"^/task/(\d+)/run$"), "run_status"),
         (re.compile(r"^/task/(\d+)/launch$"), "task_launch_page"),
         (re.compile(r"^/ticket/(\d+)$"), "ticket"),
     )
@@ -205,6 +206,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_task(self, task_id: str) -> None:
         self._preview(self.service.get_task(int(task_id)))
+
+    def handle_run_status(self, task_id: str) -> None:
+        """What the last run for this task is doing. Reads, changes nothing.
+
+        A GET beside the POST that starts a run, and only a GET: there is no
+        route here to pause, kill, retry or resume one. The launcher holds the
+        artifacts a launch already writes, and this publishes what they say.
+        """
+        self._json(200, self.service.launcher.run_status(int(task_id)))
 
     def handle_ticket(self, task_number: str) -> None:
         """The board number: resolve it, then show the canonical task URL.
