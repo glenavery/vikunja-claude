@@ -11,6 +11,37 @@ from .prompt import build_prompt
 from .vikunja import Ticket, VikunjaClient
 
 IN_PROGRESS = "In Progress"
+#: Where a ticket goes when the run that was working it was lost. Back to
+#: waiting, not to done and not to a state of its own: nothing is known about
+#: how far the run got, and the honest position is that it still needs doing.
+READY = "Ready"
+
+
+def _orphan_comment(record: dict) -> str:
+    """What the ticket is told, in the terms of what is actually known.
+
+    It does not say the run failed and it does not say it finished, because
+    neither was observed. It says the run is gone, when it started, what it was
+    on, and that nothing it may have done was reported — which is the only
+    thing a reader can safely act on.
+    """
+    started = record.get("started_at") or "an unknown time"
+    executor = record.get("executor") or "the default executor"
+    model = record.get("model")
+    on = f"{executor} ({model})" if model else executor
+    return (
+        "The Claude Code run for this ticket was lost.\n\n"
+        f"It started at {started} on {on}, and its process is gone without "
+        "having reported anything. The usual cause is the ticket launcher "
+        "service being restarted while the run was in flight, which kills the "
+        "run.\n\n"
+        "Nothing is known about how far it got. It did not report a result, so "
+        "treat any work it may have done as unverified and check the "
+        "repository before starting again. This ticket has been moved back to "
+        "Ready.\n\n"
+        "Posted automatically by the ticket runner when it noticed the run was "
+        "gone."
+    )
 
 
 class TicketService:
@@ -92,6 +123,67 @@ class TicketService:
             # version the human had already moved on from.
             "comments": self.client.comment_views(ticket.task_id),
         }
+
+    # -- reconciliation (task 754) -----------------------------------------
+
+    def reconcile_orphaned_runs(self) -> list[dict]:
+        """Close out the runs this service lost, on disk and on the board.
+
+        Called once at startup. Stopping this service is what orphans a run —
+        the launched process sits in this unit's control group and dies with
+        it, and the thread that would have recorded its ending dies too — so
+        starting is the moment to account for what the last stop destroyed.
+
+        Two halves, deliberately in this order and with different failure
+        rules. The launcher's half is local and always happens: the ending is
+        recorded and the lock released, so the artifacts stop claiming a run is
+        in flight. The board half is a network call to something that may not be
+        up yet, and it is best-effort: a Vikunja that is down must not stop this
+        service from starting, and it must not make the local half conditional
+        on it either.
+
+        Which is why each result says whether the board was actually told.
+        A reconciliation that silently failed to report would leave exactly the
+        condition this exists to end — a ticket sitting In Progress with nothing
+        said on it — and the only difference would be that nothing was left to
+        notice it.
+        """
+        results = []
+        for record in self.launcher.reconcile_orphaned_runs():
+            results.append({**record, "reported": self._report_orphan(record)})
+        return results
+
+    def _report_orphan(self, record: dict) -> bool:
+        """Say on the ticket that its run was lost, and stop it claiming to run.
+
+        The move is guarded on the column the ticket is in *now*. A ticket a
+        human already moved on — closed it, sent it back, picked it up — is one
+        where the board is no longer wrong, and moving it anyway would undo a
+        decision made by someone who knew more than this does.
+        """
+        number = record.get("number")
+        if number is None:
+            return False
+        try:
+            project_id, view_id = self._ids()
+            ticket = self.client.find_by_task_number(number, project_id, view_id)
+            self.client.add_comment(ticket.task_id, _orphan_comment(record))
+            if ticket.bucket_title == IN_PROGRESS:
+                self.client.move_to_bucket(
+                    project_id, view_id, ticket.task_id, READY
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            # Every failure mode here is "the board could not be told", and none
+            # of them is worth refusing to start over. It is logged where the
+            # local record already went, so the miss is visible in the same
+            # place as the reconciliation it belongs to.
+            self.launcher._log(
+                "orphan_report_failed",
+                reference=record.get("reference"),
+                error=str(exc),
+            )
+            return False
 
     # -- action ------------------------------------------------------------
 

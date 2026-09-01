@@ -296,6 +296,20 @@ def build_server(config: Config) -> ThreadingHTTPServer:
         )
     client = VikunjaClient(config.api_url, config.token)
     service = TicketService(config, client, Launcher(config))
+
+    # Starting is when the last stop gets accounted for (task 754). A stop kills
+    # the runs in this unit's control group and the threads that would have
+    # recorded their endings, so without this the launch log keeps an opening
+    # record with no closing one and the ticket sits In Progress forever. Here
+    # rather than in `main` because this is the one place holding both the
+    # launcher and the client, and it must never be the reason the service does
+    # not come up: the per-ticket board write is already best-effort, and this
+    # guard covers the rest.
+    try:
+        service.reconcile_orphaned_runs()
+    except Exception as exc:  # noqa: BLE001
+        print(f"orphan reconciliation failed: {exc}", file=sys.stderr)
+
     handler = type("BoundHandler", (Handler,), {"service": service})
     return ThreadingHTTPServer((config.host, config.port), handler)
 

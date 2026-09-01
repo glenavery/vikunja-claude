@@ -97,6 +97,9 @@ STATUS = {
     "finished_at": None,
     "exit_status": None,
     "timed_out": False,
+    # Task 754: when this run's ending was recorded, having been missed. None
+    # here, because this fixture is a run nobody has reconciled yet.
+    "reconciled_at": None,
     "output_tail": ["[claude-code:unrecognized_model] {\"model\":\"m\"}"],
     "output_truncated": False,
     "output_at": "2026-09-01T14:30:45+0000",
