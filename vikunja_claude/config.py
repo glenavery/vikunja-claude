@@ -635,6 +635,15 @@ class McpConfig:
     #: advertised. Independent of ``investment``: reading the website needs no
     #: credential, and either capability can be switched on without the other.
     public_site_url: str | None = None
+    #: Where ``start_task_run`` sends its one request: the ticket runner. There
+    #: is one runner, so there is one source of truth for where it is:
+    #: :meth:`from_env` resolves this from the SAME variables the launcher
+    #: reads (``VIKUNJA_CLAUDE_HOST``/``VIKUNJA_CLAUDE_PORT``), so moving the
+    #: runner moves it for everyone and the two services cannot name
+    #: different places. The runner is core, not an optional integration like
+    #: ``investment``: the tool is always advertised, and the runner being
+    #: down is a refusal the caller sees, not a capability withheld.
+    runner_url: str = "http://127.0.0.1:3460"
 
     @property
     def default_project(self) -> ProjectRef:
@@ -726,4 +735,11 @@ class McpConfig:
             state_dir=_state_dir(),
             investment=investment,
             public_site_url=_public_site_url(investment),
+            # One request to the runner — read from the launcher's own env vars
+            # with its own defaults (one setting, one meaning).  A moved host/port
+            # moves this route too; neither can point the other somewhere different.
+            runner_url=(
+                f"http://{os.environ.get('VIKUNJA_CLAUDE_HOST', '127.0.0.1')}:"
+                f"{int(os.environ.get('VIKUNJA_CLAUDE_PORT', 3460))}"
+            ),
         )

@@ -94,12 +94,14 @@ class TestAdvertisedSurface(McpTestCase):
             for name, tool in tools.items()
             if not tool["annotations"]["readOnlyHint"]
         }
-        # `set_task_status` joined on task 669, by operator decision: a
-        # connector could file work and comment on it but not finish it, and
-        # could not undo a close. Pinned as a SET, so a fourth arriving is a
-        # failure rather than a silent widening.
+        # `set_task_status` joined on task 669 and `start_task_run` on task
+        # 726, both by operator decision: a connector could file work and
+        # comment on it but not finish it, could not undo a close, and could
+        # not ask for any of it to be worked. Pinned as a SET, so a sixth
+        # arriving is a failure rather than a silent widening.
         self.assertEqual(writes, {"create_task", "update_task",
-                                  "add_task_comment", "set_task_status"})
+                                  "add_task_comment", "set_task_status",
+                                  "start_task_run"})
 
     def test_each_edit_advertises_its_approval_step(self):
         """A model reading the list must see that one call cannot be enough."""
@@ -107,7 +109,7 @@ class TestAdvertisedSurface(McpTestCase):
             tool["name"]: tool
             for tool in self.protocol.handle(request("tools/list"))["result"]["tools"]
         }
-        for name in ("update_task", "add_task_comment"):
+        for name in ("update_task", "add_task_comment", "start_task_run"):
             with self.subTest(tool=name):
                 description = tools[name]["description"].lower()
                 self.assertIn("approval_token", description)
