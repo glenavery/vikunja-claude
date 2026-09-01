@@ -62,8 +62,9 @@ service, no compose file.
 
 Normally you never open this directly — you click the 🤖 button on a Vikunja
 task (see below). The console at <http://127.0.0.1:3460/> is the manual
-fallback: enter a `#NN` ticket number to preview or launch, or use
-`Work next Ready ticket` for the oldest ticket in the **Ready** bucket.
+fallback: enter the **board number** — the `#N` printed on the card — to
+preview or launch, or use `Work next Ready ticket` for the oldest ticket in the
+**Ready** bucket.
 
 Reachable over Tailscale by putting `tailscale serve` in front of it — the
 service itself stays bound to loopback, and generated buttons pick up whichever
@@ -77,8 +78,8 @@ can start a Claude run on this host.
 | GET | `/task/{id}` | Ticket details and the generated prompt. **Never launches.** |
 | POST | `/task/{id}/work` | Move to In Progress, then launch Claude Code. `?executor=local` runs it on the approved local model |
 | GET | `/task/{id}/launch` | Landing page for the browser button: launches on load |
-| GET | `/ticket/{n}` | `#NN` convenience lookup; redirects to `/task/{id}` |
-| POST | `/ticket/{n}/work` | Same, by `#NN` |
+| GET | `/ticket/{n}` | Board-number lookup (`#N` on the card); redirects to `/task/{id}` |
+| POST | `/ticket/{n}/work` | Same, by board number — the path the launch page renders |
 | GET | `/next` | The oldest Ready ticket, same view as `/task/{id}` |
 | POST | `/next/work` | Launch the oldest Ready ticket |
 | GET | `/launches` | Recent launch log as JSON |
@@ -119,10 +120,34 @@ reference. A task with no `#NN` prefix still works; its commit reference becomes
 `(vikunja task <id>)`. It is *not* the same thing as `index`, even though both
 render as `#` and a number, and the AI Alpha boards no longer carry one at all.
 
-`/ticket/{n}` remains as a convenience for humans who think in ticket numbers —
-it resolves the prefix and redirects to the canonical `/task/{id}`. Two tasks
-claiming the same `#NN` is a `409` there, not a coin flip; by task id it is
-never ambiguous at all.
+`/ticket/{n}` remains as a convenience for humans who think in ticket numbers,
+and `{n}` is the **board number** — Vikunja's `index`, the same identifier the
+MCP boundary takes (task 748). It resolves through the same client call, then
+redirects to the canonical `/task/{id}`. Two tasks claiming one board number is
+a `409` there, not a coin flip; by task id it is never ambiguous at all.
+
+#### The button addressed one number and the route resolved another (task 748)
+
+Task 659 moved every link this service renders onto the board number —
+`_ticket_href`, `_work_path`, the console input. The route they all point at
+was not moved with them: `/ticket/{n}` still resolved the `#NN` **title
+prefix**, which no AI Alpha board has carried since 2026-07-26. So the 🤖
+button rendered `/ticket/714/work` for the task the board shows as #714 and got
+`404 No ticket #714 in this project` — a task that plainly exists, reported
+absent, by the one path a reader is meant to use.
+
+Two green tests held the two halves apart: one asserted the launch page emits
+`fetch('/ticket/8/work')`, another posted `/ticket/33/work` — the legacy
+prefix. **Nothing ever posted the path the page actually renders**, so the
+resolver behind it was free to answer a different scheme, and did.
+`OneIdentityFromTheButtonToTheLaunch` closes that by reading the path out of
+the rendered page and following it.
+
+There is deliberately **no fallback** to the prefix when a board number misses.
+The two schemes disagree by a few on a real board, so a retry under the other
+one would usually find a real, plausible, wrong ticket — the same reasoning as
+*never reinterpreted* at the MCP boundary. The prefix lookup survives only
+where a human types which scheme they mean: `vkctl.py --ticket`.
 
 ### Which number is in the URL
 
@@ -1323,12 +1348,13 @@ MCP and OAuth HTTP tests do bind a real socket, on loopback and an ephemeral
 port, and drive the whole authorization flow through it.
 
 Covered: task-id lookup (including that renumbering a title does not change
-which task resolves) and `#NN` lookup (missing, duplicate, unnumbered,
-next-Ready selection); prompt generation (every required clause, and that the
+which task resolves) and board-number lookup (missing, duplicate, unnumbered,
+next-Ready selection, and that a legacy `#NN` prefix is not accepted as one); prompt generation (every required clause, and that the
 token never appears); duplicate launch prevention (live, stale, cross-instance,
 per-task isolation); API error handling (401/500/unreachable/bad bucket and the
-HTTP status each maps to); the browser flow (task routes, `#NN` redirect, the
-launch page's same-origin POST, and that neither generated button will read an
+HTTP status each maps to); the browser flow (task routes, the board-number redirect, the
+launch page's same-origin POST, that the path that page renders actually
+launches the task it names, and that neither generated button will read an
 id from a board-view URL); and the MCP boundary — the exact tool set, the
 project refusal, retry deduplication across a restart, description round-trip,
 `Origin` rejection, and that a refused request reaches Vikunja not at all.

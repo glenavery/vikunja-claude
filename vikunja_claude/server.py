@@ -206,9 +206,13 @@ class Handler(BaseHTTPRequestHandler):
     def handle_task(self, task_id: str) -> None:
         self._preview(self.service.get_task(int(task_id)))
 
-    def handle_ticket(self, number: str) -> None:
-        """#NN is a convenience: resolve it, then show the canonical task URL."""
-        ticket = self.service.get(int(number))
+    def handle_ticket(self, task_number: str) -> None:
+        """The board number: resolve it, then show the canonical task URL.
+
+        ``{n}`` here is Vikunja's ``index`` -- the ``#N`` printed on the card
+        and the number every link this service renders carries (task 748).
+        """
+        ticket = self.service.get_by_task_number(int(task_number))
         if self._wants_json():
             self._json(200, self.service.preview(ticket))
             return
@@ -257,11 +261,13 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
 
-    def handle_work_ticket(self, number: str) -> None:
+    def handle_work_ticket(self, task_number: str) -> None:
+        """Launch by the board number -- the path `web._work_path` renders."""
         self._json(
             202,
             self.service.work(
-                self.service.get(int(number)), self._requested_executor()
+                self.service.get_by_task_number(int(task_number)),
+                self._requested_executor(),
             ),
         )
 

@@ -256,7 +256,7 @@ class ThroughTheRunner(ServiceTestCase):
         self.launcher.config = self.config
 
     def work_local(self):
-        return self.service.work(self.service.get(33), LOCAL_EXECUTOR)
+        return self.service.work(self.service.get_by_task_number(8), LOCAL_EXECUTOR)
 
     def test_a_local_run_uses_the_same_binary_arguments_and_directory(self):
         """The executor chooses a model. It does not choose a launcher.
@@ -266,7 +266,7 @@ class ThroughTheRunner(ServiceTestCase):
         Claude Code, not of the model behind it. A local run that swapped the
         binary would lose all of it silently.
         """
-        self.service.work(self.service.get(33))
+        self.service.work(self.service.get_by_task_number(8))
         default_call = self.spawn.calls[0]
         self.launcher._release(9)
         self.work_local()
@@ -290,7 +290,7 @@ class ThroughTheRunner(ServiceTestCase):
 
     def test_the_ticket_context_is_the_same_prompt_the_default_executor_gets(self):
         """No second prompt, and nothing trimmed for being a local model."""
-        expected = self.service.prompt_for(self.service.get(33))
+        expected = self.service.prompt_for(self.service.get_by_task_number(8))
         self.work_local()
         self.assertEqual(self.spawn.calls[0]["argv"][-1], expected)
 
@@ -300,7 +300,7 @@ class ThroughTheRunner(ServiceTestCase):
         self.assertEqual(result["model"], "qwen38-27b-abl:256k")
 
     def test_a_default_run_records_the_default_executor_and_no_model(self):
-        result = self.service.work(self.service.get(33))
+        result = self.service.work(self.service.get_by_task_number(8))
         self.assertEqual(result["executor"], DEFAULT_EXECUTOR)
         self.assertIsNone(result["model"])
 
@@ -310,7 +310,7 @@ class ThroughTheRunner(ServiceTestCase):
         Two runs of one ticket on two models is still two runs editing one
         checkout, which is the thing the lock exists to prevent.
         """
-        result = self.service.work(self.service.get(33))
+        result = self.service.work(self.service.get_by_task_number(8))
         self.alive_pids.add(result["pid"])
         with self.assertRaises(AlreadyRunning):
             self.work_local()
@@ -321,7 +321,7 @@ class ThroughTheRunner(ServiceTestCase):
         )
         self.service.config = self.config
         self.launcher.config = self.config
-        result = self.service.work(self.service.get(33))
+        result = self.service.work(self.service.get_by_task_number(8))
         self.assertEqual(result["executor"], LOCAL_EXECUTOR)
 
     def test_an_unusable_executor_leaves_the_ticket_where_it_was(self):
@@ -331,7 +331,7 @@ class ThroughTheRunner(ServiceTestCase):
         the board says work is happening that is not.
         """
         with self.assertRaises(ExecutorError):
-            self.service.work(self.service.get(33), "qwen-code")
+            self.service.work(self.service.get_by_task_number(8), "qwen-code")
         self.assertEqual(self.vikunja.bucket_of(9), "Ready")
         self.assertEqual(self.spawn.calls, [])
 
@@ -346,7 +346,7 @@ class DefaultExecutorUnchanged(ServiceTestCase):
         the service's own environment may legitimately carry such keys, and a
         test that forbade them outright would fail for the wrong reason.
         """
-        self.service.work(self.service.get(33))
+        self.service.work(self.service.get_by_task_number(8))
         env = self.spawn.calls[0]["env"]
 
         def model_keys(mapping):
@@ -371,12 +371,12 @@ class OverTheSocket(HttpFlow):
         self.launcher.config = self.config
 
     def test_the_query_parameter_selects_the_local_model(self):
-        status, body, _ = self.fetch("/ticket/33/work?executor=local", method="POST")
+        status, body, _ = self.fetch("/ticket/8/work?executor=local", method="POST")
         self.assertEqual(status, 202, body)
         self.assertEqual(json.loads(body)["model"], "qwen38-27b-abl:256k")
 
     def test_a_work_request_naming_nothing_still_takes_the_default(self):
-        status, body, _ = self.fetch("/ticket/33/work", method="POST")
+        status, body, _ = self.fetch("/ticket/8/work", method="POST")
         self.assertEqual(status, 202, body)
         self.assertEqual(json.loads(body)["executor"], DEFAULT_EXECUTOR)
 
@@ -386,7 +386,7 @@ class OverTheSocket(HttpFlow):
         Answering "run this on the local model" by running it on a paid one is
         the one wrong way to handle this, so the fallback is a refusal.
         """
-        status, body, _ = self.fetch("/ticket/33/work?executor=gpt", method="POST")
+        status, body, _ = self.fetch("/ticket/8/work?executor=gpt", method="POST")
         self.assertEqual(status, 400)
         self.assertIn("Unknown executor", body)
         self.assertEqual(self.spawn.calls, [])

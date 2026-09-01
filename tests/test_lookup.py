@@ -38,31 +38,44 @@ class TicketNumberParsing(unittest.TestCase):
 
 class TicketLookup(ServiceTestCase):
     def test_finds_ticket_by_number(self):
-        ticket = self.service.get(33)
+        ticket = self.service.get_by_task_number(8)
         self.assertEqual(ticket.task_id, 9)
         self.assertEqual(ticket.bucket_title, "Ready")
         self.assertEqual(ticket.summary, "Back up Vikunja database")
 
     def test_description_html_is_flattened(self):
-        ticket = self.service.get(33)
+        ticket = self.service.get_by_task_number(8)
         self.assertIn("authoritative", ticket.description)
         self.assertIn("- cover `vikunja-db`", ticket.description)
         self.assertNotIn("<p>", ticket.description)
 
     def test_labels_are_carried_through(self):
-        self.assertEqual(self.service.get(33).labels, ["Operations"])
+        self.assertEqual(self.service.get_by_task_number(8).labels, ["Operations"])
 
     def test_unknown_ticket_raises_not_found(self):
         with self.assertRaises(TicketNotFound):
-            self.service.get(999)
+            self.service.get_by_task_number(999)
 
     def test_duplicate_numbers_are_ambiguous_not_arbitrary(self):
+        """Two tasks answering to one board number is refused, not resolved."""
         self.vikunja.layout["Backlog"].append(
-            task(77, "#33 A second ticket claiming 33", "2026-07-26T06:00:00Z", index=76)
+            task(77, "A second task claiming board number 8",
+                 "2026-07-26T06:00:00Z", index=8)
         )
         with self.assertRaises(AmbiguousTicket) as caught:
-            self.service.get(33)
-        self.assertIn("#33 matches 2 tasks", str(caught.exception))
+            self.service.get_by_task_number(8)
+        self.assertIn("#8 matches 2 tasks", str(caught.exception))
+
+    def test_a_legacy_title_prefix_is_not_a_board_number(self):
+        """The two schemes are not each other, and this lookup takes one.
+
+        Fixture task 9 is titled ``#33 ...`` and sits at board number 8. Asking
+        for 33 must miss rather than fall back to the prefix: on a real board
+        the numbers disagree by a few, so a fallback would usually return some
+        other real task (task 748).
+        """
+        with self.assertRaises(TicketNotFound):
+            self.service.get_by_task_number(33)
 
     def test_tasks_without_a_number_are_still_usable(self):
         """Identity is the task id, so a missing #NN prefix is not fatal."""
@@ -171,7 +184,7 @@ class ADeepBucketIsStillReachable(ServiceTestCase):
             self.assertEqual(self.service.get_task(item["id"]).task_id, item["id"])
 
     def test_the_hash_prefix_lookup_reaches_it_too(self):
-        ticket = self.service.get(2119)
+        ticket = self.service.get_by_task_number(2118)
         self.assertEqual(ticket.task_id, self.DEEP)
 
     def test_a_genuinely_absent_task_is_still_not_found(self):

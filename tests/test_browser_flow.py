@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import unittest
 import urllib.error
@@ -10,9 +11,11 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 from vikunja_claude import web
+from vikunja_claude.mcp_service import McpService
 from vikunja_claude.server import Handler, bookmarklet_for
 
-from .support import ServiceTestCase
+from .fakes import task
+from .support import ServiceTestCase, make_mcp_config
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -75,12 +78,12 @@ class TaskIdRoutes(HttpFlow):
         self.assertIn("board view", json.loads(body)["error"])
 
     def test_ticket_number_redirects_to_the_canonical_task_url(self):
-        status, _, headers = self.fetch("/ticket/33")
+        status, _, headers = self.fetch("/ticket/8")
         self.assertEqual(status, 302)
         self.assertEqual(headers["Location"], "/task/9")
 
     def test_ticket_number_still_serves_json_directly(self):
-        status, body, _ = self.fetch("/ticket/33", accept="application/json")
+        status, body, _ = self.fetch("/ticket/8", accept="application/json")
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["number"], 8)
 
@@ -172,6 +175,118 @@ class GeneratedButtons(HttpFlow):
         script = web.userscript("http://x", ["http://y"])
         self.assertIn("MutationObserver", script)
         self.assertIn("removeButton", script)
+
+
+class OneIdentityFromTheButtonToTheLaunch(HttpFlow):
+    """Task 748: the path the launch page renders must resolve the ticket it names.
+
+    The defect this pins was split across two green tests. One asserted the
+    page emits ``fetch('/ticket/8/work')``; another posted ``/ticket/33/work``,
+    the legacy title prefix. Nothing ever posted the path the page actually
+    renders, so the resolver behind it could answer a different scheme
+    entirely -- and did. Every link this service renders had moved to the board
+    number (task 659) while `/ticket/{n}` still resolved the ``#NN`` title
+    prefix, and no AI Alpha board has carried one since 2026-07-26. So the
+    button 404ed on every task: ``No ticket #714 in this project`` for the
+    task the board shows as #714.
+    """
+
+    def _launched_rows(self) -> set[int]:
+        """Which rows hold a launch lock. The lock is keyed on the row id, so
+        this says *which task* ran rather than what the answer called it."""
+        return {
+            int(path.stem.removeprefix("task-"))
+            for path in self.config.lock_dir.glob("task-*.json")
+        }
+
+    def _work_path_the_page_renders(self, row_id: int) -> str:
+        _, body, _ = self.fetch(f"/task/{row_id}/launch")
+        match = re.search(r"fetch\('([^']+)'", body)
+        self.assertIsNotNone(match, "the launch page fires no POST at all")
+        return match.group(1)
+
+    def test_the_page_launches_through_the_path_it_renders(self):
+        """The join the suite was missing: render, then follow what was rendered."""
+        path = self._work_path_the_page_renders(9)
+        status, body, _ = self.fetch(path, method="POST", accept="application/json")
+
+        self.assertEqual(status, 202, body)
+        self.assertEqual(json.loads(body)["reference"], "#8")
+        self.assertEqual(self._launched_rows(), {9})
+
+    def test_a_task_carrying_no_legacy_prefix_launches(self):
+        """The live boards' actual shape, and the reported failure.
+
+        Row id 78, board number 77, and no ``#NN`` anywhere in the title -- so
+        a resolver reading the prefix has nothing to find and reports the task
+        absent. This is #714 in miniature.
+        """
+        self.vikunja.layout["Ready"].append(
+            task(78, "Add dependency vulnerability scanning",
+                 "2026-07-26T06:00:00Z", index=77)
+        )
+        path = self._work_path_the_page_renders(78)
+        self.assertEqual(path, "/ticket/77/work")
+
+        status, body, _ = self.fetch(path, method="POST", accept="application/json")
+        self.assertEqual(status, 202, body)
+        self.assertEqual(json.loads(body)["reference"], "#77")
+        self.assertEqual(self._launched_rows(), {78})
+
+    def test_the_number_in_the_path_is_never_read_as_a_row_id(self):
+        """Board number 9 is row 10, and row 9 is board number 8.
+
+        Both exist, which is what the fixture is built for: a resolver falling
+        through to the row id would launch a real, plausible, wrong ticket
+        instead of failing where anyone could see it.
+        """
+        status, body, _ = self.fetch(
+            "/ticket/9/work", method="POST", accept="application/json"
+        )
+        self.assertEqual(status, 202, body)
+        self.assertEqual(json.loads(body)["reference"], "#9")
+        self.assertEqual(self._launched_rows(), {10})
+
+    def test_an_unknown_board_number_is_a_404_that_launches_nothing(self):
+        status, _, _ = self.fetch(
+            "/ticket/4242/work", method="POST", accept="application/json"
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(self._launched_rows(), set())
+
+
+class TheTwoLaunchSurfacesNameTheSameTicket(HttpFlow):
+    """Task 748: the browser button and the MCP runner agree on identity.
+
+    They are reached differently -- the button from a ``/tasks/<id>`` URL the
+    reader already has open, the connector from a ``#N`` read off a card -- and
+    they may resolve differently *on the way in*. What they may not do is
+    disagree about which ticket a board number names.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.mcp = McpService(make_mcp_config(self.state_dir), self.client)
+
+    def test_one_board_number_names_one_task_on_both_surfaces(self):
+        _, body, _ = self.fetch("/ticket/8", accept="application/json")
+        launcher = json.loads(body)
+        connector = self.mcp.get_task(task_number=8)
+
+        self.assertEqual(launcher["number"], connector["task_number"])
+        self.assertEqual(launcher["reference"], connector["reference"])
+        self.assertEqual(launcher["title"], connector["title"])
+
+    def test_the_number_they_agree_on_is_the_board_number_not_the_row_id(self):
+        """Row 9 is board number 8, so agreeing on "9" would be agreeing wrongly."""
+        _, body, _ = self.fetch("/ticket/8", accept="application/json")
+        self.assertEqual(json.loads(body)["number"], 8)
+        self.assertEqual(self.mcp.get_task(task_number=8)["task_number"], 8)
+
+        # And the row id resolves neither surface: 9 is a different ticket on
+        # both, not the same one under another name.
+        _, other, _ = self.fetch("/ticket/9", accept="application/json")
+        self.assertNotEqual(json.loads(other)["title"], json.loads(body)["title"])
 
 
 if __name__ == "__main__":

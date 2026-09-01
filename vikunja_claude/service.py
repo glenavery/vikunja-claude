@@ -32,10 +32,33 @@ class TicketService:
         project_id, view_id = self._ids()
         return self.client.find_by_task_id(task_id, project_id, view_id)
 
-    def get(self, number: int) -> Ticket:
-        """Convenience lookup by the editable #NN title prefix."""
+    def get_by_task_number(self, task_number: int) -> Ticket:
+        """Lookup by the board number: Vikunja's ``index``, the ``#N`` on the card.
+
+        The same identifier the MCP boundary takes, resolved through the same
+        client call, so the two ways of starting a run cannot disagree about
+        which ticket a number names (task 748).
+
+        It used to resolve the legacy ``#NN`` *title prefix* instead, while
+        everything that addresses a ticket here had already moved to the board
+        number: `web._ticket_href`, `web._work_path` and the console input all
+        emit ``/ticket/<board number>`` (task 659). Nothing joined the two --
+        one test asserted the launch page emits ``/ticket/8/work`` and another
+        posted ``/ticket/33/work``, and no test ever posted the path the page
+        actually emits. On a board carrying no title prefix at all, which is
+        every AI Alpha board since 2026-07-26, that made the browser button a
+        404: ``No ticket #714 in this project`` for the task the board shows
+        as #714.
+
+        There is deliberately no fallback to the prefix when the number misses.
+        The two schemes disagree *by a few* on a real board, so a retry under
+        the other one would usually find a real, plausible, wrong ticket --
+        and succeeding is the damage, the same reasoning as "never
+        reinterpreted" at the MCP boundary. The prefix lookup survives where a
+        human types which scheme they mean: ``vkctl.py --ticket``.
+        """
         project_id, view_id = self._ids()
-        return self.client.find_ticket(number, project_id, view_id)
+        return self.client.find_by_task_number(task_number, project_id, view_id)
 
     def next_ready(self) -> Ticket:
         project_id, view_id = self._ids()
