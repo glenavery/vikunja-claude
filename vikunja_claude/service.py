@@ -17,7 +17,7 @@ IN_PROGRESS = "In Progress"
 READY = "Ready"
 
 
-def _orphan_comment(record: dict) -> str:
+def _orphan_comment(record: dict, moved: bool) -> str:
     """What the ticket is told, in the terms of what is actually known.
 
     It does not say the run failed and it does not say it finished, because
@@ -37,8 +37,17 @@ def _orphan_comment(record: dict) -> str:
         "run.\n\n"
         "Nothing is known about how far it got. It did not report a result, so "
         "treat any work it may have done as unverified and check the "
-        "repository before starting again. This ticket has been moved back to "
-        "Ready.\n\n"
+        "repository before starting again.\n\n"
+        # Said only when it happened. The move is guarded on the column the
+        # ticket is in now, so an unconditional sentence here would tell a
+        # ticket somebody had already closed that it was sent back to Ready.
+        + (
+            "This ticket has been moved back to Ready.\n\n"
+            if moved
+            else "This ticket has been left in the column it is in, which is "
+            "not In Progress — something has already moved it on.\n\n"
+        )
+        +
         "Posted automatically by the ticket runner when it noticed the run was "
         "gone."
     )
@@ -167,8 +176,12 @@ class TicketService:
         try:
             project_id, view_id = self._ids()
             ticket = self.client.find_by_task_number(number, project_id, view_id)
-            self.client.add_comment(ticket.task_id, _orphan_comment(record))
-            if ticket.bucket_title == IN_PROGRESS:
+            # Decided before the comment is written, because the comment says
+            # which happened and a comment that describes an intention rather
+            # than an outcome is how the board learns something untrue.
+            moving = ticket.bucket_title == IN_PROGRESS
+            self.client.add_comment(ticket.task_id, _orphan_comment(record, moving))
+            if moving:
                 self.client.move_to_bucket(
                     project_id, view_id, ticket.task_id, READY
                 )
