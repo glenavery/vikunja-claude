@@ -626,8 +626,9 @@ dies with the service. Calling that `finished` would claim an exit nobody
 observed; calling it `failed` would claim a failure the runner never saw. It is
 neither, and from the board it looks like a ticket sitting In Progress with
 nothing reported on it — which is exactly the condition this exists to make
-visible. *(The orphaning itself is a runner lifecycle defect. This reports it;
-it does not fix it.)*
+visible. *(Task 754 closes it out — see below. `lost` is still the state, but
+it is now a recorded, dated fact rather than one inferred forever from a
+missing record.)*
 
 **Nothing new is recorded to answer any of this.** A launch already writes three
 artifacts — the lock naming its process, the append-only launch log, and the
@@ -656,6 +657,60 @@ text rather than as somewhere to go and read it.
 it does not work comes back as "no run status was read, and nothing was
 changed" — never "nothing was started", which would describe a launch nobody
 asked for.
+
+### Closing out a run this service lost (task 754)
+
+Task 751 could see the orphaned run; it could not end it. Stopping this service
+destroys two things at once: the launched Claude Code process, which sits in the
+unit's control group and is the only thing that comments on the board, and the
+thread that would have recorded the ending, which lives in the service process.
+So the ticket stayed In Progress, the lock kept claiming a dead PID was running,
+and the launch log kept an opening record with no closing one.
+
+**Starting is when the last stop gets accounted for.** `build_server` reconciles
+before it serves: for every lock whose PID is dead with no ending recorded, it
+writes one, releases the lock, comments on the ticket and moves it out of In
+Progress. A lock whose process is *alive* is left strictly alone — the point is
+to close what ended, never to disturb what is working.
+
+Two things this deliberately does not do:
+
+- **It does not invent an outcome.** The event it writes is `orphaned`, never
+  `finished` and never `timeout`. Those are *observed* endings written by the
+  thread that watched the process; reusing either would record an exit status or
+  a timeout that nothing measured. So `lost` stays `lost` after reconciliation —
+  what changes is that it becomes closed and dated (`reconciled_at`) instead of
+  an open-ended inference. The comment says the same thing: the run is gone,
+  nothing is known about how far it got, treat any work as unverified.
+- **It does not overrule a human.** The move back to Ready is guarded on the
+  column the ticket is in *now*. Someone who already closed it, sent it back or
+  picked it up knew more than a startup does.
+
+**The two halves fail differently, on purpose.** The local half — record the
+ending, release the lock — always happens, because a Vikunja that is down must
+not leave a lock claiming a live run, and must not stop this service coming up.
+The board half is best-effort, and each result carries whether it succeeded: a
+reconciliation that *silently* failed to report would leave exactly the condition
+this exists to end, with nothing left to notice it. A failure is logged as
+`orphan_report_failed` beside the reconciliation it belongs to.
+
+**There is no scheduler behind this and there must not be one.** Startup is where
+the losses happen. Between startups the same reclaim runs whenever anything reads
+a lock — that reclaim always existed, it just used to release in silence — so a
+run that dies on its own is recorded the next time the launcher looks at it.
+
+**Why not stop killing the run instead?** Measured, not assumed. `KillMode=process`
+does keep the child alive, but leaves it **in the service's own cgroup**: after two
+restarts the unit held three generations of orphaned children, all charged to it,
+none supervised, none ever cleaned up. A transient `systemd-run --scope` isolates
+them properly — but *neither* fixes the reporting, because a new service instance
+has no reaper for a process it did not spawn, so the ending still goes unrecorded.
+Reconciliation is needed either way, and it also covers a host reboot, an OOM kill
+or a plain crash, which no cgroup setting does. Surviving a restart is a separate
+policy question, and not obviously the one you want: a restart usually means the
+launcher just changed, and an agent continuing against the old prompt while
+holding a lock the new instance does not know about is worse than a clean loss
+that gets reported.
 
 **The row id addresses the request and appears in nothing that comes back.**
 The runner's work route is addressed by Vikunja's global id on purpose: ids are

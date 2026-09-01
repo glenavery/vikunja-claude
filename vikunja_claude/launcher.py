@@ -94,6 +94,13 @@ RUN_FAILED = "failed"
 RUN_LOST = "lost"
 RUN_NONE = "none"
 
+#: The event a reconciliation writes for a run nobody saw end (task 754). It is
+#: deliberately not `finished` and not `timeout`: both of those are *observed*
+#: outcomes, written by the thread that watched the process, and reusing either
+#: would record an exit status or a timeout that nothing measured. This one says
+#: only what is actually known — the process is gone and the ending was missed.
+EVENT_ORPHANED = "orphaned"
+
 
 def pid_alive(pid: int) -> bool:
     try:
@@ -137,14 +144,82 @@ class Launcher:
             return None
 
     def active_launch(self, task_id: int) -> dict | None:
-        """The live lock for this task, clearing it if the PID is gone."""
+        """The live lock for this task, reconciling it if the PID is gone.
+
+        The reclaim was always here; what it did not do was say so (task 754).
+        A lock released in silence left the launch log with an opening record
+        and no closing one, which is indistinguishable from a run still going —
+        so the artifact that is supposed to answer "how did this end" answered
+        "it has not". It now records the ending it is reclaiming.
+        """
         lock = self._read_lock(task_id)
         if lock is None:
             return None
         if self._is_alive(int(lock.get("pid", -1))):
             return lock
-        self._release(task_id)
+        self._reconcile(task_id, lock)
         return None
+
+    def _reconcile(self, task_id: int, lock: dict) -> dict | None:
+        """Record that this launch was orphaned, then release its lock.
+
+        Order matters and is the whole of the care here: the event is written
+        *before* the lock goes, so a crash between the two leaves the lock —
+        which is reconcilable again — rather than a released lock whose ending
+        was never recorded, which nothing would ever revisit.
+
+        Returns what was reconciled, or None when the launch already had an
+        ending. That second case is not a no-op for nothing: a lock can outlive
+        a properly reaped run if the release failed, and reconciling it twice
+        would write a second, contradictory ending for a run that finished
+        cleanly.
+        """
+        events = self._events()
+        launched, index = self._last_launch(events, task_id)
+        finished, _, orphaned = self._terminal(events, launched, index)
+        if launched is not None and (finished is not None or orphaned is not None):
+            self._release(task_id)
+            return None
+
+        record = {
+            "number": lock.get("number"),
+            "reference": lock.get("reference"),
+            "pid": lock.get("pid"),
+            "started_at": lock.get("started_at"),
+            "executor": lock.get("executor"),
+            "model": lock.get("model"),
+        }
+        self._log(EVENT_ORPHANED, **record)
+        self._release(task_id)
+        return record
+
+    def reconcile_orphaned_runs(self) -> list[dict]:
+        """Every launch this service lost track of, recorded and released.
+
+        Called once at startup, which is where the losses happen: this service
+        stopping is what kills the runs (they sit in its control group) and what
+        destroys the threads that would have recorded their endings. A run whose
+        lock is still held by a live process is left strictly alone — the point
+        is to close what ended, never to disturb what is working.
+
+        There is no scheduler behind this and there must not be one. Between
+        startups the same reclaim happens whenever anything reads a lock, so a
+        run that dies on its own is recorded the next time the launcher looks
+        at it rather than waiting for a sweep.
+        """
+        reconciled = []
+        for path in sorted(self.config.lock_dir.glob("task-*.json")):
+            try:
+                task_id = int(path.stem.removeprefix("task-"))
+            except ValueError:
+                continue
+            lock = self._read_lock(task_id)
+            if lock is None or self._is_alive(int(lock.get("pid", -1))):
+                continue
+            record = self._reconcile(task_id, lock)
+            if record is not None:
+                reconciled.append(record)
+        return reconciled
 
     def _acquire(self, task_id: int, reference: str, payload: dict) -> None:
         path = self._lock_path(task_id)
@@ -247,7 +322,7 @@ class Launcher:
         """
         events = self._events()
         launched, launch_index = self._last_launch(events, task_id)
-        finished, timed_out = self._terminal(events, launched, launch_index)
+        finished, timed_out, orphaned = self._terminal(events, launched, launch_index)
 
         lock = self._read_lock(task_id)
         alive = lock is not None and self._is_alive(int(lock.get("pid", -1)))
@@ -256,15 +331,24 @@ class Launcher:
             state = RUN_RUNNING
         elif launched is None:
             state = RUN_NONE
-        elif finished is None:
-            # Started, gone, and never reaped. The launch log has an opening
-            # record with no closing one, which is exactly what a restart of
-            # this service leaves behind.
-            state = RUN_LOST
-        elif timed_out or finished.get("exit_status") != 0:
-            state = RUN_FAILED
+        elif finished is not None:
+            # An observed ending always wins over a reconciled one. They should
+            # never both exist — reconciliation refuses to write over an ending
+            # that was actually seen — but if they did, the one somebody watched
+            # is the true account.
+            state = (
+                RUN_FAILED
+                if timed_out or finished.get("exit_status") != 0
+                else RUN_FINISHED
+            )
         else:
-            state = RUN_FINISHED
+            # Started and gone. `lost` either way, and deliberately the same
+            # word whether or not it has been reconciled yet: reconciliation
+            # records the ending, it does not discover what the ending was.
+            # What changes is that it is now a CLOSED fact with a time on it,
+            # rather than an open-ended inference from a missing record
+            # (task 754).
+            state = RUN_LOST
 
         # The lock is the fallback only for the window between claiming the slot
         # and logging the launch; after it, both say the same thing.
@@ -283,6 +367,10 @@ class Launcher:
             "finished_at": finished.get("at") if finished else None,
             "exit_status": finished.get("exit_status") if finished else None,
             "timed_out": timed_out,
+            # When this service noticed the run was gone. Never an exit status:
+            # reconciliation records that an ending was missed, and inventing
+            # one would be the whole thing it exists to avoid.
+            "reconciled_at": orphaned.get("at") if orphaned else None,
             **self._output_tail(record.get("log_file")),
         }
 
@@ -305,21 +393,29 @@ class Launcher:
 
     def _terminal(
         self, events: list[dict], launched: dict | None, launch_index: int
-    ) -> tuple[dict | None, bool]:
-        """How that launch ended, if this service was still here to see it.
+    ) -> tuple[dict | None, bool, dict | None]:
+        """How that launch ended: what was seen, and what was reconciled.
 
         Keyed on the PID, because the closing records carry the reference and
         the PID and not the log file. A timeout is logged *and then* followed by
         a ``finished``, so both are read: the exit status alone cannot tell a
         run that was killed for running too long from one that failed.
+
+        The orphan record is returned separately rather than as a third kind of
+        `finished`, because it is a different claim. `finished` says what a
+        process exited with; this says only that it is gone and nobody saw it
+        go (task 754).
         """
         if launched is None:
-            return None, False
+            return None, False, None
         pid = launched.get("pid")
         after = [r for r in events[launch_index + 1:] if r.get("pid") == pid]
         timed_out = any(r.get("event") == "timeout" for r in after)
         finished = next((r for r in after if r.get("event") == "finished"), None)
-        return finished, timed_out
+        orphaned = next(
+            (r for r in after if r.get("event") == EVENT_ORPHANED), None
+        )
+        return finished, timed_out, orphaned
 
     def _output_tail(self, log_file) -> dict:
         """The end of a run's own output, bounded, with the token taken out."""
