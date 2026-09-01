@@ -247,6 +247,28 @@ class TestWhatReconciliationLeavesAlone(RestartTestCase):
         self.assertEqual(len(self.comments_on()), 1)
         self.assertEqual(self.vikunja.bucket_of(READY_ROW_ID), "Done")
 
+    def test_the_comment_does_not_claim_a_move_that_did_not_happen(self):
+        """Found live on #714, which was already out of In Progress: the
+        comment said "moved back to Ready" of a ticket it had deliberately not
+        moved. The move is conditional, so the sentence describing it has to be
+        — otherwise the guard that protects a human's decision is undone in
+        prose by the same call that honoured it."""
+        self.launch()
+        project_id, view_id = self.service._ids()
+        self.client.move_to_bucket(project_id, view_id, READY_ROW_ID, "Done")
+
+        self.restart().reconcile_orphaned_runs()
+
+        text = self.comments_on()[0]["comment"]
+        self.assertNotIn("moved back to Ready", text)
+        self.assertIn("already moved it on", text)
+
+    def test_the_comment_says_so_when_it_did_move_the_ticket(self):
+        self.launch()
+        self.restart().reconcile_orphaned_runs()
+
+        self.assertIn("moved back to Ready", self.comments_on()[0]["comment"])
+
     def test_nothing_launched_means_nothing_to_reconcile(self):
         self.assertEqual(self.restart().reconcile_orphaned_runs(), [])
         self.assertEqual(self.events(EVENT_ORPHANED), [])
