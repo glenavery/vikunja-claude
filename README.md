@@ -339,6 +339,9 @@ systemctl --user status vikunja-claude       # still running
 | `create_task(project_id, title, description)` | Creates one task on the named approved board and returns its number and URL. `project_id` is **required** here |
 | `update_task(task_number, title?, description?, approval_token?, project_id?)` | Replaces one existing task's title, description or both. Two calls: the first returns the exact current and proposed values with an approval token and writes nothing; the second must carry that token |
 | `add_task_comment(task_number, comment, approval_token?, project_id?)` | Appends one plain-text comment to an existing task, behind the same two-call approval |
+| `set_task_status(task_number, bucket, approval_token?, project_id?)` | Moves one existing task to a column, which is also how it is closed and reopened, behind the same two-call approval |
+| `list_recently_done(limit?, project_id?)` | The tasks finished most recently on one approved board, newest first |
+| `start_task_run(task_number, executor?, approval_token?, project_id?)` | Hands one existing task to the ticket runner, which moves it to In Progress and starts Claude Code on it, behind the same two-call approval. It only *starts* the run |
 
 #### A task is named the way the board names it (task 649)
 
@@ -526,6 +529,66 @@ two to a stricter rule than a name check could.
 filter language. A filter is an expression, and building one out of
 model-supplied text to look for a *literal* is the wrong shape for the job; the
 only filter this boundary ever sends is the constant `done = false`.
+
+### Starting a ticket from the connector (task 726)
+
+`set_task_status` closed the last gap in *bookkeeping*: a connector could file
+work, comment on it, move it and finish it. It still could not ask for any of
+it to be **worked** — starting a run meant a shell on this host, or the
+launcher's own page over the tailnet.
+
+`start_task_run` is that one action, and its whole design is what it does not
+own. **The MCP boundary is an invocation surface, not a second runner.** One
+request goes to the launcher's existing work route and one answer comes back.
+Everything else stays where task 690 put it:
+
+| Owned by the runner | Not here |
+|---|---|
+| Resolving the task it works, and moving it to In Progress | — |
+| The prompt, and everything in it | — |
+| Which executors exist, what each one means, and building one | No executor is resolved on this side |
+| The model, its context size and the approved-model record | No model id, Ollama setting or context size exists in this package |
+| The per-task lock, the worktree, the branch, the tests, the commit, the report | No queue, no scheduler, no second lock |
+
+So **moving the approved `local_coding` seat needs no change here.** The seat
+lives in the investment repository's `deploy/ollama/models.json`, the runner
+reads it, and the model that ends up driving the run is *read back out of the
+runner's answer* rather than named on this side.
+`tests/test_mcp_runner.py` asserts that twice — behaviourally, by answering
+with a different model and reading it back, and by scanning this side's code
+(docstrings and comments removed, because both discuss the seat at length)
+for a model id, a runtime setting or a context size.
+
+**Two-step, like every other tool that changes a task that already exists.**
+The first call starts nothing: it names the ticket, the column it is in and the
+executor asked for, and returns a token for that one launch. Approving `local`
+cannot be redeemed for a run on the default executor — the token binds the
+executor, not just the task. This is the most consequential action on the
+surface, so it is not the one that fires on a single call.
+
+**Refusals are refusals.** A run already in flight, an executor the runner does
+not have, a runner that is not running: each comes back as an error saying
+nothing was started and the ticket was not moved. There is no fallback in
+either direction, and the executor one matters most — the alternative to a
+local run is a paid one, so answering "run this locally" by running it
+elsewhere would turn a typo into a bill.
+
+**The row id addresses the request and appears in nothing that comes back.**
+The runner's work route is addressed by Vikunja's global id on purpose: ids are
+unique across projects, so a task the runner does not work cannot resolve to a
+*different real ticket* the way a board number could. It stays internal, as
+everywhere else (task 663) — the answer is projected rather than passed
+through, which is why the runner's `log_file` (whose name is
+`task-<row id>-<stamp>.log`) and its `pid` are not in it, and why the runner's
+404 is re-framed here instead of republished: that refusal is written for
+someone reading a `/tasks/<id>` URL and spells the id.
+
+**There is no setting that switches it off.** The three optional integrations
+are absent when unconfigured, because a tool that can never succeed reads as a
+capability. The runner is not one of those: it is the process this system
+exists to start, there is one of it, and `runner_url` is resolved from the
+launcher's own `VIKUNJA_CLAUDE_HOST` / `VIKUNJA_CLAUDE_PORT` so the two cannot
+name different places. A launcher that is down is a refusal the caller reads.
 
 ### Rules the reads hold
 
@@ -1208,6 +1271,7 @@ vikunja_claude/
   server.py       routes, status codes, loopback guard
   mcp.py          MCP protocol: JSON-RPC, handshake, fixed tool list
   mcp_service.py  the tools, the approved-project rule, the dedup ledger
+  runner.py       one request to the ticket runner's work route, and no more
   investment.py   read-only client for the three AI Server operational reads
   website.py      anonymous, credential-free fetch of one public page
   paying_page.py  one page read as the server's test paying user (no session here)
@@ -1216,6 +1280,7 @@ vikunja_claude/
   oauth_store.py  clients, codes and tokens as one 0600 JSON file
 vkctl.py          board updates for the launched Claude
 tests/            lookup, prompt, duplicate launches, API errors, MCP, OAuth
+                  test_mcp_runner.py: what starting a run does NOT own
                   test_mcp_task_numbers.py: the board number is the identifier
 systemd/          two user units: launcher, MCP boundary
 browser/          bookmarklet source
@@ -1226,6 +1291,15 @@ and must stay on the tailnet; the MCP boundary holds a write credential and is
 the only thing published to the internet. Neither can start, stop or break the
 other, and `tests/test_mcp_config.py` fails if the launcher ever comes to
 require the MCP boundary's OAuth configuration or vice versa.
+
+Task 726 added the one arrow between them, and it is a request rather than a
+coupling: `start_task_run` POSTs to the launcher's work route over loopback.
+The MCP boundary still starts, serves and refuses without the launcher — a
+launcher that is not running is one tool answering "nothing was started", not a
+boundary that fails — and the launcher does not know this side exists. The
+confinement in `systemd/vikunja-claude-mcp.service` is what makes the direction
+load-bearing: that unit starts no host processes, so a run is started by the
+service that is allowed to start one, never by the one on the internet.
 
 Within the boundary, `mcp_server.py` decides *routing* and `oauth.py` decides
 whether a credential is good. That split is deliberate: "is this token valid"

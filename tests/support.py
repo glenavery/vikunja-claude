@@ -70,11 +70,20 @@ VIKUNJA_TOOLS = {
     "update_task",
     "add_task_comment",
     "set_task_status",
+    "start_task_run",
 }
 
 #: The subset that can change something that already exists. Named separately
 #: because most of the suite's guarantees are about the tools that cannot.
-WRITE_TOOLS = {"update_task", "add_task_comment", "set_task_status"}
+WRITE_TOOLS = {
+    "update_task",
+    "add_task_comment",
+    "set_task_status",
+    # Task 726. It writes nothing here itself — the runner it delegates to
+    # moves the ticket to In Progress — but a call to it changes a task that
+    # already exists, which is what this set is about.
+    "start_task_run",
+}
 
 #: The subset that changes nothing at all. `create_task` is in neither set: it
 #: writes, but it can only ever add a task that did not exist.

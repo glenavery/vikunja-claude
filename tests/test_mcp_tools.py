@@ -744,12 +744,16 @@ class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
         return {tool.name: tool.annotations for tool in self.service.tools()}
 
     def test_exactly_these_tools_can_change_an_existing_task(self):
-        """Three since task 669. The boundary moved by operator decision rather
+        """Four since task 726. The boundary moved by operator decision rather
         than drifting: a connector could file work and comment on it but not
-        close, reopen or move it, so the only way to finish a ticket was shell
-        access to `vkctl` on the host."""
-        self.assertEqual(WRITE_TOOLS,
-                         {"update_task", "add_task_comment", "set_task_status"})
+        finish it, could not undo a close, and could not ask for any of it to
+        be worked. Pinned as a SET, so a fifth arriving is a failure rather
+        than a silent widening."""
+        self.assertEqual(
+            WRITE_TOOLS,
+            {"update_task", "add_task_comment", "set_task_status",
+             "start_task_run"},
+        )
         self.assertEqual(VIKUNJA_TOOLS - WRITE_TOOLS - {"create_task"}, READ_TOOLS)
 
     def test_every_other_tool_declares_itself_read_only(self):
@@ -761,14 +765,26 @@ class TestTheEditsAreTheOnlyThingThatWrites(McpTestCase):
                     f"{name} declares readOnlyHint={annotations['readOnlyHint']}",
                 )
 
-    def test_only_the_edit_declares_itself_destructive(self):
-        """A comment adds; an edit replaces text that was there."""
+    def test_only_these_two_declare_themselves_destructive(self):
+        """A comment adds; an edit replaces text that was there.
+
+        `start_task_run` joined on task 726, and it is the one on this surface
+        whose destructiveness is not about the task at all. The hint is about
+        the tool's *environment*: it sets Claude Code working in a repository,
+        which edits files and commits. That the ticket itself only moves a
+        column is the least of what the call does, and a model reading these
+        hints to decide how carefully to ask should not be told otherwise.
+
+        `set_task_status` is deliberately NOT here even though it can close a
+        ticket: a column move is reversible by the same tool, and this set is
+        the ones that replace something.
+        """
         destructive = {
             name
             for name, annotations in self.annotations().items()
             if annotations.get("destructiveHint")
         }
-        self.assertEqual(destructive, {"update_task"})
+        self.assertEqual(destructive, {"update_task", "start_task_run"})
 
     def test_each_write_names_only_the_fields_it_is_allowed_to_change(self):
         """Every write names its own fields and nothing else.

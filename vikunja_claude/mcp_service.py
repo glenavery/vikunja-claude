@@ -1,7 +1,11 @@
 """The operations the MCP boundary exposes, and the rules around them.
 
-The whole surface is here: reads, one create, and — since task 196 — two ways to
-change a task that already exists: its title/description, and a new comment.
+The whole surface is here: reads, one create, and — since task 196 — the ways to
+change a task that already exists: its title/description, a new comment, its
+column on the board, and (task 726) handing it to the ticket runner to be
+worked. That last one changes nothing here itself; it is an invocation, and
+:mod:`vikunja_claude.runner` is the whole of what this side knows about the
+process it invokes.
 
 Every one of them is scoped to an **approved board**, and the approved set is
 configuration (:attr:`~vikunja_claude.config.McpConfig.projects`), not an
@@ -15,7 +19,7 @@ task, and it reaches Vikunja only through
 :class:`~vikunja_claude.vikunja.VikunjaClient` methods that cannot do those
 things either.
 
-The two edits are **two-step**. A call with no ``approval_token`` writes
+Every one of those four is **two-step**. A call with no ``approval_token`` writes
 nothing: it reads the task and returns the exact current value beside the exact
 proposed one, with a token naming that one change. Only a second call carrying
 that token writes, and it writes only if the submitted text and the task's
@@ -64,6 +68,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import McpConfig
+from .executors import DEFAULT_EXECUTOR, LOCAL_EXECUTOR
 from .html_text import html_to_text, text_to_html
 from .investment import (
     REPOSITORY_NAMES,
@@ -72,6 +77,7 @@ from .investment import (
 )
 from .mcp import Tool, ToolError
 from .paying_page import PayingPageError, PayingSiteClient
+from .runner import RunnerClient, RunnerError
 from .vikunja import (
     AmbiguousTicket,
     Ticket,
@@ -99,6 +105,7 @@ DEFAULT_RECENTLY_DONE = 20
 CHANGE_UPDATE = "update"
 CHANGE_COMMENT = "comment"
 CHANGE_STATUS = "status"
+CHANGE_RUN = "run"
 
 #: How many previewed-but-uncommitted changes are remembered at once. A preview
 #: costs nothing and a client is free to abandon one, so the table is bounded
@@ -217,6 +224,7 @@ class McpService:
         investment: InvestmentStatusClient | None = None,
         site: PublicSiteClient | None = None,
         paying_site: PayingSiteClient | None = None,
+        runner: RunnerClient | None = None,
     ):
         self.config = config
         self.client = client
@@ -262,6 +270,14 @@ class McpService:
             )
         else:
             self.paying_site = None
+        # The runner is not an optional integration like the three above: it is
+        # the process this whole system exists to start, and there is exactly
+        # one of it. So there is no "switched off" state to model — the tool is
+        # always advertised, and a runner that is down is a refusal the caller
+        # reads rather than a capability that quietly was not there.
+        self.runner = runner if runner is not None else RunnerClient(
+            config.runner_url
+        )
 
     @property
     def operational_reads_enabled(self) -> bool:
@@ -1457,6 +1473,239 @@ class McpService:
             "reopened": bool(ticket.done) and not is_done,
         }
 
+    # -- start a run (task 726) --------------------------------------------
+
+    def start_task_run(
+        self,
+        task_number: int,
+        executor: str | None = None,
+        approval_token: str | None = None,
+        project_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Ask the ticket runner to start a run for a task that already exists.
+
+        THE RUNNER IS NOT REIMPLEMENTED HERE, and the list of what it keeps is
+        the list of what this method must never grow: resolving the task it
+        works, assembling the prompt, choosing and building the executor,
+        naming the model, the Claude Code harness and its worktree, branch,
+        tests, commit and closing report, and the per-task lock that decides
+        whether a second run may start. This side sends one request carrying a
+        task and, optionally, an executor *name*, and reads the answer. That is
+        why "changing the approved local_coding seat requires no MCP change" is
+        true by construction rather than by care: there is no seat, model id or
+        context size in this package to change.
+
+        Two-step, like every other tool here that changes a task that already
+        exists. A call with no ``approval_token`` starts nothing: it names the
+        ticket, the column it is in and the executor that was asked for, and
+        returns a token for that one launch. It is the most consequential
+        action on this surface — it moves the ticket and sets an agent working
+        in a repository — so it is not the one write that fires on a single
+        call from a connector.
+
+        The executor is forwarded as a name and is never resolved here. Omitted,
+        nothing is sent and the runner applies its own configured default, which
+        this side deliberately cannot name.
+        """
+        board, ticket = self._own_ticket(task_number, "start a run for", project_id)
+        current = ticket.bucket_title or ""
+        asked = executor or ""
+
+        if approval_token is None:
+            return {
+                "started": False,
+                "approval_required": True,
+                **self._identity(ticket, board),
+                "title": ticket.title,
+                "bucket": current,
+                "status": "done" if ticket.done else "open",
+                "executor": executor,
+                "approval_token": self._issue_approval(
+                    CHANGE_RUN, ticket.task_id, (current,), (asked,)
+                ),
+                "next_step": (
+                    "Nothing has been started. Show the user which ticket this "
+                    "is, that starting it moves the ticket to In Progress and "
+                    "sets Claude Code working in the repository the runner is "
+                    "configured for, and which executor was asked for (omitted "
+                    "means the runner's own default). If they approve, call "
+                    "start_task_run again with the identical task_number and "
+                    "executor plus this approval_token."
+                ),
+            }
+
+        with self._write_lock:
+            self._redeem_approval(
+                approval_token, CHANGE_RUN, ticket, (current,), (asked,)
+            )
+            try:
+                result = self.runner.start_run(ticket.task_id, executor)
+            except RunnerError as exc:
+                raise ToolError(self._runner_refusal(exc)) from exc
+
+            self._record_mutation(
+                {
+                    "at": _now(),
+                    "kind": CHANGE_RUN,
+                    "project_id": board.project_id,
+                    "task_id": ticket.task_id,
+                    "task_number": ticket.task_number,
+                    "from_bucket": current,
+                    "executor": result.get("executor"),
+                    "model": result.get("model"),
+                    "started_at": result.get("started_at"),
+                },
+                f"started a run for {ticket.board_reference} (task "
+                f"{ticket.task_id}) in project {board.project_id} on executor "
+                f"{result.get('executor')!r}",
+            )
+
+        # Projected, never passed through. Two fields of the runner's answer are
+        # deliberately absent: `pid`, which names nothing a caller of this
+        # boundary can act on, and `log_file`, whose filename is `task-<row
+        # id>-<stamp>.log` — a path that spells the id this surface does not
+        # publish (task 663). `executor` and `model` are read back from the
+        # answer rather than echoed from the request, so they say what the
+        # runner actually did.
+        return {
+            "started": result.get("launched") is True,
+            **self._identity(ticket, board),
+            "title": ticket.title,
+            "executor": result.get("executor"),
+            "model": result.get("model"),
+            "started_at": result.get("started_at"),
+            "moved_to": result.get("moved_to"),
+            "workdir": result.get("workdir"),
+            "note": (
+                "The run works on its own from here and reports back on the "
+                "board when it finishes. Nothing else has been done to the "
+                "ticket."
+            ),
+        }
+
+    #: Runner refusals whose own words are surfaced verbatim. Each names the
+    #: ticket by its board number, an executor by name, or the harness binary —
+    #: nothing a caller could mistake for an address. Everything else is
+    #: re-framed below, because the runner resolves tasks by row id internally
+    #: and its lookup failures spell that id, which this surface does not
+    #: publish (task 663).
+    RUNNER_STATUSES_PASSED_THROUGH = (400, 409, 500)
+
+    def _runner_refusal(self, exc: RunnerError) -> str:
+        """The runner's refusal, said so the caller can act on it.
+
+        Never a fallback, in either direction: a refused run is a refusal here
+        too, and a re-framed one is still an error carrying what was refused
+        and why. The only thing withheld is the row id.
+        """
+        if exc.status is None or exc.status in self.RUNNER_STATUSES_PASSED_THROUGH:
+            return str(exc)
+        if exc.status == 404:
+            return (
+                "The ticket runner does not have that task on the board it "
+                "works. It starts runs for one board, and this connection "
+                f"serves {self.config.projects_phrase} — a task on another of "
+                "them cannot be started from here. Nothing was started and the "
+                "ticket was not moved."
+            )
+        return (
+            f"The ticket runner refused to start the run (HTTP {exc.status}). "
+            "Nothing was started and the ticket was not moved."
+        )
+
+    def _runner_tools(self) -> list[Tool]:
+        return [
+            Tool(
+                name="start_task_run",
+                title="Start a Claude Code run for an existing task",
+                description=(
+                    "Hand one existing task on one of the AI Alpha project "
+                    f"boards ({self.config.projects_phrase}) to the ticket "
+                    "runner, which moves it to In Progress and sets Claude Code "
+                    "working on it in the repository that runner is configured "
+                    "for. Only call it when the user has asked for that ticket "
+                    "to be worked. "
+                    "This is a two-step tool and it starts real work on a real "
+                    "machine. Call it first without approval_token: it starts "
+                    "nothing and returns the ticket, the column it is in and "
+                    "the executor asked for, with an approval_token for that "
+                    "one launch. Show the user what it named, and only once "
+                    "they have explicitly approved it, call again with the "
+                    "identical arguments plus the approval_token. "
+                    "It only STARTS the run: the answer comes back long before "
+                    "the work is finished, and the run reports on the board "
+                    "itself. Everything about how the run is performed — the "
+                    "prompt, the model, the branch, the tests, the commit and "
+                    "the report — belongs to the runner, not to this "
+                    "connection. A run already in flight for that task, an "
+                    "executor the runner does not have, or a runner that is not "
+                    "reachable are all refusals: nothing is started and the "
+                    "ticket is not moved."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_number": self._task_number_property(),
+                        "project_id": self._project_property("the task is on"),
+                        "executor": {
+                            "type": "string",
+                            "enum": [DEFAULT_EXECUTOR, LOCAL_EXECUTOR],
+                            "description": (
+                                f'Which of the runner\'s executors runs this: '
+                                f'"{DEFAULT_EXECUTOR}" for Claude Code as '
+                                f'installed, or "{LOCAL_EXECUTOR}" for the '
+                                "model that holds the approved local coding "
+                                "seat. Omit it to take the runner's own "
+                                "configured default. This is forwarded as a "
+                                "NAME: which executors exist, what each one "
+                                "means and which model it drives are the "
+                                "runner's, and an unknown name is refused there "
+                                "rather than interpreted here."
+                            ),
+                        },
+                        "approval_token": {
+                            "type": "string",
+                            "description": (
+                                "The token returned by the preview call for this "
+                                "exact launch. Omit on the first call. Supply it "
+                                "only after the user has approved starting this "
+                                "ticket on the executor the preview named."
+                            ),
+                        },
+                    },
+                    "required": ["task_number"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": False,
+                    # It moves the ticket and sets an agent editing a
+                    # repository. Whatever it does there is not undone by
+                    # calling anything here.
+                    "destructiveHint": True,
+                    # Emphatically not: a second approved call once the first
+                    # run has finished starts a second run. Only a run still in
+                    # flight is refused, and that is the runner's lock, not an
+                    # idempotency guarantee.
+                    "idempotentHint": False,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.start_task_run(
+                    _task_number_argument(arguments),
+                    executor=(
+                        None
+                        if arguments.get("executor") is None
+                        else str(arguments["executor"])
+                    ),
+                    approval_token=(
+                        None
+                        if arguments.get("approval_token") is None
+                        else str(arguments["approval_token"])
+                    ),
+                    project_id=_optional_int(arguments.get("project_id")),
+                ),
+            ),
+        ]
+
     @staticmethod
     def _done_bucket(titles: list[str]) -> str | None:
         """The column that closes a ticket, matched case-insensitively.
@@ -1532,6 +1781,7 @@ class McpService:
         """
         return [
             *self._vikunja_tools(),
+            *self._runner_tools(),
             *self._operational_tools(),
             *self._repository_content_tools(),
             *self._website_tools(),
