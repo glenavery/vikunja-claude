@@ -11,7 +11,7 @@ from .support import TOKEN, ServiceTestCase
 class PromptGeneration(ServiceTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.ticket = self.service.get(33)
+        self.ticket = self.service.get_by_task_number(8)
         self.prompt = self.service.prompt_for(self.ticket)
 
     def test_identifies_the_ticket_by_its_board_number(self):
@@ -112,7 +112,7 @@ class PromptGeneration(ServiceTestCase):
         self.vikunja.layout["Ready"].append(
             task(90, "#90 Bare ticket", "2026-07-26T07:00:00Z", "", index=89)
         )
-        prompt = self.service.prompt_for(self.service.get(90))
+        prompt = self.service.prompt_for(self.service.get_by_task_number(89))
         self.assertIn("(no description on the ticket)", prompt)
 
 

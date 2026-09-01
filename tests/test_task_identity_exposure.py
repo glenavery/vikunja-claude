@@ -194,7 +194,7 @@ class TestTheLauncherPublishesNoRowId(ServiceTestCase):
     ROW_ID = 9
 
     def _ticket(self):
-        return self.service.get(33)
+        return self.service.get_by_task_number(8)
 
     def test_the_preview_payload_carries_no_row_id(self):
         for key, value in _numbers(self.service.preview(self._ticket())):

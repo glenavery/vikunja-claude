@@ -20,7 +20,7 @@ class ClientErrorHandling(ServiceTestCase):
     def test_http_error_from_vikunja_surfaces_as_vikunja_error(self):
         self.vikunja.fail = VikunjaError("HTTP 401: bad token", status=401)
         with self.assertRaises(VikunjaError) as caught:
-            self.service.get(33)
+            self.service.get_by_task_number(8)
         self.assertEqual(caught.exception.status, 401)
 
     def test_unreachable_vikunja_surfaces_as_vikunja_error(self):
@@ -29,7 +29,7 @@ class ClientErrorHandling(ServiceTestCase):
             self.service.next_ready()
 
     def test_a_failed_bucket_move_never_launches_claude(self):
-        ticket = self.service.get(33)
+        ticket = self.service.get_by_task_number(8)
         self.vikunja.fail = VikunjaError("HTTP 500: boom", status=500)
         with self.assertRaises(VikunjaError):
             self.service.work(ticket)
@@ -93,23 +93,23 @@ class HttpErrorMapping(ServiceTestCase):
     def test_unknown_ticket_is_404(self):
         status, body = self.get("/ticket/999")
         self.assertEqual(status, 404)
-        self.assertIn("No ticket #999", body["error"])
+        self.assertIn("No task #999 in this project", body["error"])
 
     def test_vikunja_failure_is_502_not_500(self):
         self.vikunja.fail = VikunjaError("HTTP 401: bad token", status=401)
-        status, body = self.get("/ticket/33")
+        status, body = self.get("/ticket/8")
         self.assertEqual(status, 502)
         self.assertIn("401", body["error"])
 
     def test_duplicate_launch_is_409(self):
-        self.get("/ticket/33/work", method="POST")
+        self.get("/ticket/8/work", method="POST")
         self.alive_pids.add(4242)
-        status, body = self.get("/ticket/33/work", method="POST")
+        status, body = self.get("/ticket/8/work", method="POST")
         self.assertEqual(status, 409)
         self.assertIn("already working #8", body["error"])
 
     def test_successful_launch_is_202(self):
-        status, body = self.get("/ticket/33/work", method="POST")
+        status, body = self.get("/ticket/8/work", method="POST")
         self.assertEqual(status, 202)
         self.assertEqual(body["number"], 8)
 
@@ -118,7 +118,7 @@ class HttpErrorMapping(ServiceTestCase):
         self.assertEqual(status, 404)
 
     def test_non_numeric_ticket_does_not_reach_the_service(self):
-        status, _ = self.get("/ticket/33;rm%20-rf%20~")
+        status, _ = self.get("/ticket/8;rm%20-rf%20~")
         self.assertEqual(status, 404)
         self.assertEqual(self.spawn.calls, [])
 
