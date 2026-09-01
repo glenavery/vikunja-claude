@@ -74,6 +74,27 @@ class LaunchRecord:
     model: str | None = None
 
 
+#: How much of a run's own output a status read hands back. A tail rather than
+#: the log: enough to tell model work from tests, git, a closing report or a
+#: stall, bounded so a status read cannot be used to pull an arbitrary quantity
+#: of a host file through a read surface. Whichever bound bites first wins, so a
+#: run emitting very long lines is bounded too.
+STATUS_TAIL_LINES = 40
+STATUS_TAIL_BYTES = 8000
+
+#: What a run that started can be, once it is no longer running. `lost` is the
+#: one worth naming: the process is gone and the runner never recorded how it
+#: ended, which is what a restart of this service leaves behind, because the
+#: thread that writes the terminal event lives in this process and dies with it.
+#: Reporting that as `finished` would claim an exit nobody observed, and as
+#: `failed` would claim a failure the runner never saw.
+RUN_RUNNING = "running"
+RUN_FINISHED = "finished"
+RUN_FAILED = "failed"
+RUN_LOST = "lost"
+RUN_NONE = "none"
+
+
 def pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -179,6 +200,174 @@ class Launcher:
             except json.JSONDecodeError:
                 continue
         return list(reversed(out))
+
+    def _events(self) -> list[dict]:
+        """Every launch event, oldest first.
+
+        ``recent()`` answers "what happened lately" for a console and caps to a
+        page; this answers "what happened to THIS task", which that cap can push
+        out of reach the moment anything else runs. Same file, read whole.
+        """
+        try:
+            lines = self.config.log_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
+        out = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                out.append(record)
+        return out
+
+    # -- reading one run ---------------------------------------------------
+
+    def run_status(self, task_id: int) -> dict:
+        """What the last run for this task is doing, from what is already kept.
+
+        Nothing new is recorded to answer this. The lock says whether a process
+        is alive, the append-only launch log says how the last run for this task
+        ended, and the run's own log file says what it was doing — three
+        artifacts a launch already writes, read together.
+
+        Read-only in a way the neighbouring reads deliberately are not.
+        ``active_launch()`` reclaims a lock whose PID is gone, which is right
+        when something is about to launch and wrong here: that lock is the
+        evidence that a run was left un-reaped, and a status read that cleared
+        it would erase the very thing it was asked about. So the lock is read
+        and liveness judged here, and the run's history is taken from the launch
+        log, which no read rewrites.
+
+        A run this service never managed to start is not a state here. It has no
+        lock, no log and no process, and it was already refused synchronously to
+        whoever asked for it — ``launch_failed`` is a record of that refusal, not
+        of a run to ask after.
+        """
+        events = self._events()
+        launched, launch_index = self._last_launch(events, task_id)
+        finished, timed_out = self._terminal(events, launched, launch_index)
+
+        lock = self._read_lock(task_id)
+        alive = lock is not None and self._is_alive(int(lock.get("pid", -1)))
+
+        if alive:
+            state = RUN_RUNNING
+        elif launched is None:
+            state = RUN_NONE
+        elif finished is None:
+            # Started, gone, and never reaped. The launch log has an opening
+            # record with no closing one, which is exactly what a restart of
+            # this service leaves behind.
+            state = RUN_LOST
+        elif timed_out or finished.get("exit_status") != 0:
+            state = RUN_FAILED
+        else:
+            state = RUN_FINISHED
+
+        # The lock is the fallback only for the window between claiming the slot
+        # and logging the launch; after it, both say the same thing.
+        record = launched or lock or {}
+        return {
+            "number": record.get("number"),
+            "reference": record.get("reference"),
+            "state": state,
+            "alive": alive,
+            "executor": record.get("executor"),
+            "model": record.get("model"),
+            "started_at": record.get("started_at"),
+            "workdir": record.get("workdir"),
+            "pid": record.get("pid"),
+            "log_file": record.get("log_file"),
+            "finished_at": finished.get("at") if finished else None,
+            "exit_status": finished.get("exit_status") if finished else None,
+            "timed_out": timed_out,
+            **self._output_tail(record.get("log_file")),
+        }
+
+    def _last_launch(self, events: list[dict], task_id: int) -> tuple[dict | None, int]:
+        """The most recent ``launched`` record for this task, and where it sits.
+
+        Matched on the log filename, which is ``task-<id>-<stamp>.log`` and the
+        only field of that record carrying the task. Adding the id to the event
+        itself would be a second way to say the same thing, and this read is not
+        allowed to change what a launch records.
+        """
+        prefix = f"task-{int(task_id)}-"
+        found, index = None, -1
+        for position, record in enumerate(events):
+            if record.get("event") != "launched":
+                continue
+            if Path(str(record.get("log_file", ""))).name.startswith(prefix):
+                found, index = record, position
+        return found, index
+
+    def _terminal(
+        self, events: list[dict], launched: dict | None, launch_index: int
+    ) -> tuple[dict | None, bool]:
+        """How that launch ended, if this service was still here to see it.
+
+        Keyed on the PID, because the closing records carry the reference and
+        the PID and not the log file. A timeout is logged *and then* followed by
+        a ``finished``, so both are read: the exit status alone cannot tell a
+        run that was killed for running too long from one that failed.
+        """
+        if launched is None:
+            return None, False
+        pid = launched.get("pid")
+        after = [r for r in events[launch_index + 1:] if r.get("pid") == pid]
+        timed_out = any(r.get("event") == "timeout" for r in after)
+        finished = next((r for r in after if r.get("event") == "finished"), None)
+        return finished, timed_out
+
+    def _output_tail(self, log_file) -> dict:
+        """The end of a run's own output, bounded, with the token taken out."""
+        empty = {"output_tail": [], "output_truncated": False, "output_at": None}
+        if not log_file:
+            return empty
+        path = Path(str(log_file))
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                if size > STATUS_TAIL_BYTES:
+                    handle.seek(size - STATUS_TAIL_BYTES)
+                raw = handle.read()
+            modified = path.stat().st_mtime
+        except OSError:
+            return empty
+
+        truncated = size > STATUS_TAIL_BYTES
+        text = raw.decode("utf-8", errors="replace")
+        if truncated:
+            # A byte seek lands mid-line. Drop that fragment rather than publish
+            # it as though the run had written a line beginning there.
+            text = text.split("\n", 1)[1] if "\n" in text else ""
+        lines = text.splitlines()
+        if len(lines) > STATUS_TAIL_LINES:
+            lines = lines[-STATUS_TAIL_LINES:]
+            truncated = True
+        return {
+            "output_tail": [self._redact(line) for line in lines],
+            "output_truncated": truncated,
+            "output_at": time.strftime(
+                "%Y-%m-%dT%H:%M:%S%z", time.localtime(modified)
+            ),
+        }
+
+    def _redact(self, line: str) -> str:
+        """The Vikunja token never travels out in a run's output.
+
+        The launched process holds it in its environment, so a traceback, a
+        verbose HTTP log or a dump of the environment could put it in the file
+        this returns. The value is known here exactly, so this is an equality
+        test on the one secret this process holds rather than a guess at what a
+        credential looks like.
+        """
+        token = self.config.token
+        if token and token in line:
+            return line.replace(token, "[redacted]")
+        return line
 
     # -- launching ---------------------------------------------------------
 

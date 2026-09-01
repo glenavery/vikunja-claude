@@ -71,6 +71,7 @@ VIKUNJA_TOOLS = {
     "add_task_comment",
     "set_task_status",
     "start_task_run",
+    "get_task_run_status",
 }
 
 #: The subset that can change something that already exists. Named separately
@@ -87,7 +88,15 @@ WRITE_TOOLS = {
 
 #: The subset that changes nothing at all. `create_task` is in neither set: it
 #: writes, but it can only ever add a task that did not exist.
-READ_TOOLS = {"get_task", "list_open_tasks", "list_recently_done", "search_tasks"}
+READ_TOOLS = {
+    "get_task",
+    "list_open_tasks",
+    "list_recently_done",
+    "search_tasks",
+    # Task 751. It reads the runner rather than the board, but this set is
+    # about what a call can change, and this one changes nothing on either side.
+    "get_task_run_status",
+}
 
 #: The operational half (task 138). Advertised only when the investment reads are
 #: configured, so the default surface is ``VIKUNJA_TOOLS`` alone.

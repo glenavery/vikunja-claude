@@ -77,6 +77,7 @@ can start a Claude run on this host.
 | GET | `/health` | Service + Vikunja reachability (`503` when Vikunja is down) |
 | GET | `/task/{id}` | Ticket details and the generated prompt. **Never launches.** |
 | POST | `/task/{id}/work` | Move to In Progress, then launch Claude Code. `?executor=local` runs it on the approved local model |
+| GET | `/task/{id}/run` | What the last run for that task is doing: state, liveness, executor, model, and a bounded tail of its output. **Reads only** |
 | GET | `/task/{id}/launch` | Landing page for the browser button: launches on load |
 | GET | `/ticket/{n}` | Board-number lookup (`#N` on the card); redirects to `/task/{id}` |
 | POST | `/ticket/{n}/work` | Same, by board number — the path the launch page renders |
@@ -367,6 +368,7 @@ systemctl --user status vikunja-claude       # still running
 | `set_task_status(task_number, bucket, approval_token?, project_id?)` | Moves one existing task to a column, which is also how it is closed and reopened, behind the same two-call approval |
 | `list_recently_done(limit?, project_id?)` | The tasks finished most recently on one approved board, newest first |
 | `start_task_run(task_number, executor?, approval_token?, project_id?)` | Hands one existing task to the ticket runner, which moves it to In Progress and starts Claude Code on it, behind the same two-call approval. It only *starts* the run |
+| `get_task_run_status(task_number, project_id?)` | What the runner's most recent run for that task is doing — `running`, `finished`, `failed`, `lost` or `none` — with a bounded tail of its output. One call, no approval: it reads and changes nothing |
 
 #### A task is named the way the board names it (task 649)
 
@@ -597,6 +599,63 @@ nothing was started and the ticket was not moved. There is no fallback in
 either direction, and the executor one matters most — the alternative to a
 local run is a paid one, so answering "run this locally" by running it
 elsewhere would turn a typo into a bill.
+
+### Reading what a run is doing (task 751)
+
+`start_task_run` answers long before the work is done, and the run reports on
+the board only at the end. Between the two there was nothing to ask. A run
+still thinking, a run in its tests, a run writing its closing report and a run
+whose process died an hour ago were **the same thing from outside**: In
+Progress, no comment. Task 714 spent eight minutes in that state, and finding
+out which one it was meant reading files on the host.
+
+`get_task_run_status` is that read. It reports:
+
+| | |
+|---|---|
+| `running` | The process is alive and working |
+| `finished` | It exited cleanly — which is not by itself a claim that the ticket was completed; what it did is what it reported on the board |
+| `failed` | It exited non-zero, or was stopped for exceeding the runner's time limit |
+| `lost` | It started, its process is gone, and **the runner never recorded how it ended** |
+| `none` | The runner has no record of a run for that task |
+
+**`lost` is the state worth naming**, and the one task 714 was actually in. It
+is what a restart of `vikunja-claude.service` leaves behind: the run dies with
+the unit's control group, and the thread that would have recorded its ending
+dies with the service. Calling that `finished` would claim an exit nobody
+observed; calling it `failed` would claim a failure the runner never saw. It is
+neither, and from the board it looks like a ticket sitting In Progress with
+nothing reported on it — which is exactly the condition this exists to make
+visible. *(The orphaning itself is a runner lifecycle defect. This reports it;
+it does not fix it.)*
+
+**Nothing new is recorded to answer any of this.** A launch already writes three
+artifacts — the lock naming its process, the append-only launch log, and the
+run's own output — and the read puts those three together. The state is decided
+on the runner, once, and passed through: a second derivation on the MCP side
+would be a second answer to "what is this run doing", able to disagree with the
+only place that knows.
+
+**It reads, and there is nothing beside it that controls.** One call, no
+approval token — this surface's two-step flow is for tools that change
+something. There is deliberately no pause, kill, retry or resume, here or
+anywhere on this connection: when a run stops is the runner's to decide.
+`GET /task/{id}/run` answers only that verb; the address refuses a POST.
+
+**Bounded and safe.** The output is the *end* of the run's log, capped by lines
+and by bytes (whichever bites first, so long lines are bounded too), with a
+byte-truncated first line dropped rather than published as a fragment. The
+Vikunja token is removed by exact match — the run holds it in its environment,
+so a traceback or a verbose HTTP log could otherwise carry it out. The `pid`
+and the log's path are withheld for the same reason `start_task_run` withholds
+them: the path is `task-<row id>-<stamp>.log`, which spells the row id this
+surface does not publish (task 663). That is also why the output travels as
+text rather than as somewhere to go and read it.
+
+**A read that fails says so in its own terms.** An unreachable runner or a task
+it does not work comes back as "no run status was read, and nothing was
+changed" — never "nothing was started", which would describe a launch nobody
+asked for.
 
 **The row id addresses the request and appears in nothing that comes back.**
 The runner's work route is addressed by Vikunja's global id on purpose: ids are
@@ -1319,6 +1378,9 @@ require the MCP boundary's OAuth configuration or vice versa.
 
 Task 726 added the one arrow between them, and it is a request rather than a
 coupling: `start_task_run` POSTs to the launcher's work route over loopback.
+Task 751 added a second request on that same arrow and no second arrow —
+`get_task_run_status` GETs the launcher's run-status route. It reads; the
+direction and the confinement below are unchanged by it.
 The MCP boundary still starts, serves and refuses without the launcher — a
 launcher that is not running is one tool answering "nothing was started", not a
 boundary that fails — and the launcher does not know this side exists. The

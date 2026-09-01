@@ -107,6 +107,12 @@ CHANGE_COMMENT = "comment"
 CHANGE_STATUS = "status"
 CHANGE_RUN = "run"
 
+#: What a refused runner request left behind, in the terms of what it was for.
+#: The two are different facts, and one sentence for both would tell the reader
+#: of a failed status read that a launch they never asked for did not happen.
+LAUNCH_OUTCOME = "Nothing was started and the ticket was not moved."
+READ_OUTCOME = "No run status was read, and nothing was changed."
+
 #: How many previewed-but-uncommitted changes are remembered at once. A preview
 #: costs nothing and a client is free to abandon one, so the table is bounded
 #: rather than left to grow; the oldest is dropped, and losing one costs a fresh
@@ -1583,6 +1589,105 @@ class McpService:
             ),
         }
 
+    #: What each run state means, said once. The runner names the state; this
+    #: is the sentence a connector reads out, and `lost` is the one that earns
+    #: its place — a run whose process is gone and whose ending was never
+    #: recorded looks exactly like a finished one from the board, which is how
+    #: a ticket sits In Progress for hours with nobody able to say why.
+    RUN_STATE_NOTES = {
+        "running": (
+            "The run is alive and working. What it is doing right now is in "
+            "recent_output; it reports on the board itself when it finishes."
+        ),
+        "finished": (
+            "The run exited cleanly. What it actually did, and whether it "
+            "committed anything, is what it reported on the board — a clean "
+            "exit is not by itself a claim that the ticket was completed."
+        ),
+        "failed": (
+            "The run ended badly: it exited non-zero, or it was stopped for "
+            "exceeding the runner's time limit. recent_output holds the end of "
+            "what it wrote before that."
+        ),
+        "lost": (
+            "The run started, its process is gone, and the runner never "
+            "recorded how it ended — so it neither finished nor failed as far "
+            "as anything here can tell. The usual cause is the launcher "
+            "service being restarted while the run was in flight, which kills "
+            "the run and the thread that would have recorded its ending. "
+            "Expect the ticket to still be sitting In Progress with nothing "
+            "reported on it."
+        ),
+        "none": (
+            "The runner has no record of a run for this task. Either it was "
+            "never started, or it was started somewhere other than this runner."
+        ),
+    }
+
+    def get_task_run_status(
+        self, task_number: int, project_id: int | None = None
+    ) -> dict[str, Any]:
+        """What the ticket runner's last run for this task is doing.
+
+        The read that ``start_task_run`` left missing. A launch answers long
+        before the work is done and the run reports on the board only at the
+        end, so between the two there was nothing to ask: a run still thinking,
+        a run in its tests, and a run whose process died an hour ago all looked
+        the same from here — In Progress, no comment.
+
+        It reads and it changes nothing, so it is one call with no approval
+        token. That is not a convenience: this surface's two-step flow exists
+        for actions that change something, and there is deliberately no
+        counterpart to this that could pause, kill, retry or resume a run.
+        Execution stays the runner's, and this is a window onto it.
+
+        The state is the runner's word, passed through. Nothing here re-derives
+        it from what came back, which would be a second answer to "what is this
+        run doing" able to disagree with the one place that knows.
+        """
+        board = self._board(project_id)
+        try:
+            ticket = self._resolve(task_number, board)
+        except VikunjaError as exc:
+            raise ToolError(str(exc)) from exc
+
+        try:
+            status = self.runner.run_status(ticket.task_id)
+        except RunnerError as exc:
+            raise ToolError(self._runner_refusal(exc, READ_OUTCOME)) from exc
+
+        # Projected, never passed through — the same two fields `start_task_run`
+        # withholds. `pid` names nothing a caller of this boundary can act on,
+        # and would only be actionable through the execution control this tool
+        # is defined by not having. `log_file` is `task-<row id>-<stamp>.log`, a
+        # path that spells the id this surface does not publish (task 663) —
+        # which is also why the tail of that file is returned as text and never
+        # as somewhere to go and read it.
+        state = str(status.get("state", "none"))
+        return {
+            **self._identity(ticket, board),
+            "title": ticket.title,
+            "bucket": ticket.bucket_title or "",
+            "state": state,
+            "alive": bool(status.get("alive")),
+            "executor": status.get("executor"),
+            "model": status.get("model"),
+            "started_at": status.get("started_at"),
+            "finished_at": status.get("finished_at"),
+            "exit_status": status.get("exit_status"),
+            "timed_out": bool(status.get("timed_out")),
+            "workdir": status.get("workdir"),
+            "recent_output": status.get("output_tail") or [],
+            "recent_output_truncated": bool(status.get("output_truncated")),
+            "recent_output_at": status.get("output_at"),
+            "note": self.RUN_STATE_NOTES.get(
+                state,
+                "The runner reported a run state this connection does not "
+                "have a description for. The state itself is its word, "
+                "unchanged.",
+            ),
+        }
+
     #: Runner refusals whose own words are surfaced verbatim. Each names the
     #: ticket by its board number, an executor by name, or the harness binary —
     #: nothing a caller could mistake for an address. Everything else is
@@ -1591,26 +1696,30 @@ class McpService:
     #: publish (task 663).
     RUNNER_STATUSES_PASSED_THROUGH = (400, 409, 500)
 
-    def _runner_refusal(self, exc: RunnerError) -> str:
+    def _runner_refusal(self, exc: RunnerError, outcome: str = LAUNCH_OUTCOME) -> str:
         """The runner's refusal, said so the caller can act on it.
 
         Never a fallback, in either direction: a refused run is a refusal here
         too, and a re-framed one is still an error carrying what was refused
         and why. The only thing withheld is the row id.
+
+        ``outcome`` is what the failed request left behind, and it differs by
+        request: a read that failed changed nothing by construction, and telling
+        a caller "nothing was started" of it would describe a launch they never
+        asked for.
         """
         if exc.status is None or exc.status in self.RUNNER_STATUSES_PASSED_THROUGH:
             return str(exc)
         if exc.status == 404:
             return (
                 "The ticket runner does not have that task on the board it "
-                "works. It starts runs for one board, and this connection "
-                f"serves {self.config.projects_phrase} — a task on another of "
-                "them cannot be started from here. Nothing was started and the "
-                "ticket was not moved."
+                "works. It runs one board, and this connection serves "
+                f"{self.config.projects_phrase} — a task on another of them "
+                f"has no run here to start or to read. {outcome}"
             )
         return (
-            f"The ticket runner refused to start the run (HTTP {exc.status}). "
-            "Nothing was started and the ticket was not moved."
+            f"The ticket runner refused the request (HTTP {exc.status}). "
+            f"{outcome}"
         )
 
     def _runner_tools(self) -> list[Tool]:
@@ -1701,6 +1810,52 @@ class McpService:
                         if arguments.get("approval_token") is None
                         else str(arguments["approval_token"])
                     ),
+                    project_id=_optional_int(arguments.get("project_id")),
+                ),
+            ),
+            Tool(
+                name="get_task_run_status",
+                title="Read what a task's Claude Code run is doing",
+                description=(
+                    "Report what the ticket runner's most recent run for one "
+                    "task on one of the AI Alpha project boards "
+                    f"({self.config.projects_phrase}) is doing. Use it after "
+                    "start_task_run, when a ticket has been sitting In "
+                    "Progress and the user wants to know whether it is still "
+                    "being worked. "
+                    "It reads and changes nothing, so it takes one call and no "
+                    "approval. "
+                    "It answers with the run's state — running, finished, "
+                    "failed, lost, or none if the runner has no record of one "
+                    "— whether the process is still alive, which executor and "
+                    "model it is on, when it started and finished, and a "
+                    "bounded tail of the run's own recent output, which is "
+                    "what distinguishes a run still thinking from one in its "
+                    "tests, its commit or its closing report. "
+                    "'lost' specifically means the run's process is gone and "
+                    "the runner never recorded how it ended, so the ticket is "
+                    "probably still In Progress with nothing reported on it. "
+                    "This tool CANNOT pause, kill, retry or resume a run, and "
+                    "there is nothing on this connection that can: how a run "
+                    "is performed and when it stops belong to the runner."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "task_number": self._task_number_property(),
+                        "project_id": self._project_property("the task is on"),
+                    },
+                    "required": ["task_number"],
+                    "additionalProperties": False,
+                },
+                annotations={
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+                run=lambda arguments: self.get_task_run_status(
+                    _task_number_argument(arguments),
                     project_id=_optional_int(arguments.get("project_id")),
                 ),
             ),

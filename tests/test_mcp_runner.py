@@ -78,6 +78,31 @@ LAUNCHED = {
 }
 
 
+#: What the runner answers a status read with: `Launcher.run_status`'s shape,
+#: pinned to that method below rather than trusted, so a field this side reads
+#: is a field the runner actually sends. A `lost` run, because that is the one
+#: this fixture exists for.
+STATUS = {
+    "number": READY,
+    "reference": f"#{READY}",
+    "state": "lost",
+    "alive": False,
+    "executor": LOCAL_EXECUTOR,
+    "model": "qwen38-27b-abl:256k",
+    "started_at": "2026-09-01T14:30:42+0000",
+    "workdir": "/home/glen/stacks/investment",
+    # Both of these are the runner's to send and this side's to withhold.
+    "pid": 2918949,
+    "log_file": f"/home/glen/.local/state/vikunja-claude/runs/task-{READY_ROW_ID}-20260901-143042.log",
+    "finished_at": None,
+    "exit_status": None,
+    "timed_out": False,
+    "output_tail": ["[claude-code:unrecognized_model] {\"model\":\"m\"}"],
+    "output_truncated": False,
+    "output_at": "2026-09-01T14:30:45+0000",
+}
+
+
 def _code_without_prose(path: Path) -> str:
     """The module's code with its docstrings and comments removed.
 
@@ -109,18 +134,35 @@ def _code_without_prose(path: Path) -> str:
 
 
 class RecordingRunner:
-    """Stands in for the launcher, recording the paths it was asked for."""
+    """Stands in for the launcher, recording what it was asked for.
 
-    def __init__(self, answer=None, fail: Exception | None = None):
+    The verb is recorded beside the path (task 751) because the seam now
+    carries two requests and the whole claim about the second one is that it
+    starts nothing. A stand-in that saw only paths could not tell a launch from
+    a read, so it could not witness that claim either.
+    """
+
+    def __init__(self, answer=None, fail: Exception | None = None,
+                 status_answer=None):
         self.answer = LAUNCHED if answer is None else answer
+        self.status_answer = STATUS if status_answer is None else status_answer
         self.fail = fail
-        self.paths: list[str] = []
+        self.calls: list[tuple[str, str]] = []
 
-    def __call__(self, path: str):
-        self.paths.append(path)
+    @property
+    def paths(self) -> list[str]:
+        """Just the paths, for the assertions that are about addressing."""
+        return [path for _, path in self.calls]
+
+    @property
+    def methods(self) -> list[str]:
+        return [method for method, _ in self.calls]
+
+    def __call__(self, path: str, method: str):
+        self.calls.append((method, path))
         if self.fail is not None:
             raise self.fail
-        return self.answer
+        return self.status_answer if method == "GET" else self.answer
 
 
 class RunnerTestCase(McpTestCase):
@@ -461,7 +503,7 @@ class TestTheClientCannotBeAimedElsewhere(unittest.TestCase):
 
     def test_the_only_thing_a_caller_varies_is_the_task_and_the_executor(self):
         seen: list[str] = []
-        client = RunnerClient("http://127.0.0.1:3460", lambda path: seen.append(path) or LAUNCHED)
+        client = RunnerClient("http://127.0.0.1:3460", lambda path, method: seen.append(path) or LAUNCHED)
         client.start_run(9, None)
         client.start_run(9, LOCAL_EXECUTOR)
         for path in seen:
@@ -469,7 +511,7 @@ class TestTheClientCannotBeAimedElsewhere(unittest.TestCase):
 
     def test_an_executor_name_is_urlencoded_into_the_query(self):
         seen: list[str] = []
-        client = RunnerClient("http://127.0.0.1:3460", lambda path: seen.append(path) or LAUNCHED)
+        client = RunnerClient("http://127.0.0.1:3460", lambda path, method: seen.append(path) or LAUNCHED)
         client.start_run(9, "a name/with?separators")
         self.assertEqual(seen, ["/task/9/work?executor=a%20name/with%3Fseparators"])
 
@@ -504,13 +546,183 @@ class TestTheClientCannotBeAimedElsewhere(unittest.TestCase):
 
     def test_the_client_has_no_generic_request_method(self):
         """A `post(path)` would have made the one-route discipline meaningless
-        one layer down, the way `get(path)` would for the operational reads."""
+        one layer down, the way `get(path)` would for the operational reads.
+
+        Two since task 751, and the discipline is unchanged: each names one
+        route and takes a task, and neither takes a path. What a caller varies
+        is still which task — never where the request goes.
+        """
         methods = {
             name
             for name in dir(RunnerClient)
             if not name.startswith("_") and callable(getattr(RunnerClient, name))
         }
-        self.assertEqual(methods, {"start_run"})
+        self.assertEqual(methods, {"start_run", "run_status"})
+
+
+class TestReadingWhatARunIsDoing(RunnerTestCase):
+    """The question `start_task_run` left unanswerable (task 751).
+
+    A launch answers long before the work is done, and the run reports on the
+    board only at the end. Between the two there was nothing to ask, so a run
+    still thinking and a run whose process died an hour ago were the same
+    thing from here: In Progress, no comment.
+    """
+
+    def read(self, task_number: int = READY, **kwargs) -> dict:
+        return self.service.get_task_run_status(task_number=task_number, **kwargs)
+
+    def test_one_call_answers_and_no_approval_is_asked_for(self):
+        """Every two-step tool on this surface is two-step because it changes
+        something. This changes nothing, on either side."""
+        result = self.read()
+
+        self.assertNotIn("approval_token", result)
+        self.assertNotIn("approval_required", result)
+        self.assertEqual(result["state"], "lost")
+
+    def test_it_sends_one_get_to_the_runs_read_route(self):
+        self.read()
+        self.assertEqual(
+            self.runner_transport.calls, [("GET", f"/task/{READY_ROW_ID}/run")]
+        )
+
+    def test_reading_a_run_never_starts_one(self):
+        """The whole claim of this tool, witnessed at the seam: the runner is
+        never sent the verb that launches anything."""
+        self.read()
+        self.read()
+        self.assertEqual(self.runner_transport.methods, ["GET", "GET"])
+        self.assertNotIn("/work", "".join(self.runner_transport.paths))
+
+    def test_it_touches_nothing_on_the_board(self):
+        """It looks the ticket up to name it, and that is all it does there."""
+        self.read()
+        writes = [call for call in self.vikunja.calls if call[0] != "GET"]
+        self.assertEqual(writes, [])
+
+    def test_the_state_is_the_runners_word_passed_through(self):
+        """Not re-derived here from the fields that came back. A second answer
+        to "what is this run doing" is one that can disagree with the only
+        place that knows."""
+        for state in ("running", "finished", "failed", "lost", "none"):
+            with self.subTest(state=state):
+                self.runner_transport.status_answer = {**STATUS, "state": state}
+                self.assertEqual(self.read()["state"], state)
+
+    def test_every_state_the_runner_can_report_is_explained(self):
+        """The note is what a connector reads out, so a state with no note
+        would be reported as a bare word nobody can act on."""
+        for state in ("running", "finished", "failed", "lost", "none"):
+            with self.subTest(state=state):
+                self.runner_transport.status_answer = {**STATUS, "state": state}
+                self.assertIn(state, McpService.RUN_STATE_NOTES)
+                self.assertTrue(self.read()["note"].strip())
+
+    def test_a_lost_run_is_explained_as_neither_finished_nor_failed(self):
+        """The case task 714 was actually in. A note that said "the run failed"
+        would assert a failure nothing observed, and one that said it finished
+        would assert an exit nobody saw."""
+        note = self.read()["note"]
+        self.assertIn("never recorded how it ended", note)
+        self.assertIn("In Progress", note)
+
+    def test_an_unknown_state_is_described_as_unknown_not_guessed(self):
+        self.runner_transport.status_answer = {**STATUS, "state": "quiesced"}
+        result = self.read()
+        self.assertEqual(result["state"], "quiesced")
+        self.assertIn("does not have a description", result["note"])
+
+    def test_the_run_is_named_by_the_board_and_carries_the_ticket_title(self):
+        result = self.read()
+        self.assertEqual(result["reference"], f"#{READY}")
+        self.assertEqual(result["project_id"], PROJECT_ID)
+        self.assertTrue(result["title"])
+
+    def test_the_recent_output_travels_as_text(self):
+        result = self.read()
+        self.assertEqual(result["recent_output"], STATUS["output_tail"])
+        self.assertFalse(result["recent_output_truncated"])
+        self.assertEqual(result["recent_output_at"], STATUS["output_at"])
+
+
+class TestTheStatusCarriesNoRowIdAndNoHostLog(RunnerTestCase):
+    """The same two fields `start_task_run` withholds, withheld again.
+
+    A read is where they would come back by accident: the runner sends them,
+    and passing its answer through would publish both.
+    """
+
+    def read(self) -> dict:
+        return self.service.get_task_run_status(task_number=READY)
+
+    def test_the_pid_is_not_republished(self):
+        """It names nothing a caller of this boundary can act on, and the only
+        thing it *could* be acted on through is the execution control this
+        tool is defined by not having."""
+        answer = self.read()
+        self.assertNotIn("pid", answer)
+        self.assertNotIn(STATUS["pid"], list(answer.values()))
+
+    def test_the_log_path_is_not_republished(self):
+        """`task-<row id>-<stamp>.log` spells the id this surface does not
+        publish (task 663) — which is also why the tail of that file comes
+        back as text rather than as somewhere to go and read it."""
+        answer = self.read()
+        self.assertNotIn("log_file", answer)
+        self.assertNotIn(f"task-{READY_ROW_ID}-", json.dumps(answer))
+        self.assertNotIn(".local/state", json.dumps(answer))
+
+    def test_the_row_id_is_in_the_request_and_in_nothing_that_comes_back(self):
+        answer = self.read()
+        self.assertIn(f"/task/{READY_ROW_ID}/run", self.runner_transport.paths[0])
+        self.assertNotIn(f"/tasks/{READY_ROW_ID}", json.dumps(answer))
+        self.assertNotIn(
+            READY_ROW_ID,
+            [value for value in answer.values() if isinstance(value, int)],
+        )
+
+
+class TestAFailedStatusReadSaysNothingWasStarted(RunnerTestCase):
+    """A read that failed changed nothing by construction, and saying "nothing
+    was launched" of it would describe a launch nobody asked for."""
+
+    def test_a_runner_that_is_not_there_is_an_error_about_the_read(self):
+        self.runner_transport.fail = RunnerError(
+            "Cannot reach the ticket runner at http://127.0.0.1:3460: "
+            "Connection refused. No run status was read; nothing was changed."
+        )
+        with self.assertRaises(ToolError) as caught:
+            self.service.get_task_run_status(task_number=READY)
+        self.assertIn("Cannot reach the ticket runner", str(caught.exception))
+        self.assertNotIn("was not moved", str(caught.exception))
+
+    def test_a_task_the_runner_does_not_work_is_explained_without_the_row_id(self):
+        self.runner_transport.fail = RunnerError("spelling task 9", status=404)
+        with self.assertRaises(ToolError) as caught:
+            self.service.get_task_run_status(task_number=READY)
+        message = str(caught.exception)
+        self.assertIn("does not have that task", message)
+        self.assertIn("No run status was read", message)
+        self.assertNotIn("spelling task 9", message)
+
+
+class TestTheStatusFixtureIsTheRunnersOwnShape(unittest.TestCase):
+    def test_the_fixture_carries_exactly_what_run_status_returns(self):
+        """Built from the builder. A fixture invented on this side can assert
+        that a field is read correctly while the runner has stopped sending it.
+        """
+        import tempfile
+
+        from vikunja_claude.launcher import Launcher
+
+        from .support import make_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = Launcher(make_config(Path(tmp)), reap=False)
+            produced = launcher.run_status(READY_ROW_ID)
+
+        self.assertEqual(set(STATUS), set(produced))
 
 
 class TestTheDefaultServiceBuildsItsOwnRunner(unittest.TestCase):
