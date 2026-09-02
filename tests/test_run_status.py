@@ -21,7 +21,11 @@ by what is missing:
   recorded its ending dies with the service too. Calling it `finished` would
   claim an exit nobody saw; calling it `failed` would claim a failure the
   runner never observed. It is neither, and a ticket sitting In Progress with
-  nothing reported on it is what it looks like from the board.
+  nothing reported on it is what it looks like from the board;
+* the same run once the runner has closed it out is **reconciled** (task 757).
+  Still no outcome — the recorded ending says only that one was missed — but
+  the lock is released, the board has been told and nothing further will
+  happen, which is a different thing for a reader to do about it.
 
 And two properties that are not about states at all: the read must not change
 what it reads (a stale lock is the evidence, and reclaiming it is what the
@@ -33,7 +37,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from vikunja_claude.launcher import STATUS_TAIL_BYTES, STATUS_TAIL_LINES
+from vikunja_claude.launcher import (
+    EVENT_ORPHANED,
+    STATUS_TAIL_BYTES,
+    STATUS_TAIL_LINES,
+)
 
 from .support import TOKEN, ServiceTestCase
 
@@ -126,6 +134,34 @@ class TestTheStateOfARun(RunStatusTestCase):
         self.assertFalse(status["alive"])
         self.assertIsNone(status["finished_at"])
         self.assertIsNone(status["exit_status"])
+
+    def test_a_recorded_missed_ending_is_reconciled_not_lost(self):
+        """The one word used to cover both, so a run that had been closed out
+        was reported as one nothing had been done about (task 757).
+
+        What it must NOT gain is an outcome: the record says an ending was
+        missed, so there is still no exit status and still no timeout.
+        """
+        self.launch()
+        self.end(EVENT_ORPHANED)
+
+        status = self.status()
+        self.assertEqual(status["state"], "reconciled")
+        self.assertFalse(status["alive"])
+        self.assertIsNotNone(status["reconciled_at"])
+        self.assertIsNone(status["finished_at"])
+        self.assertIsNone(status["exit_status"])
+        self.assertFalse(status["timed_out"])
+
+    def test_an_observed_ending_beats_a_recorded_one(self):
+        """They should never both exist — reconciliation refuses to write over
+        an ending that was seen — but the one somebody watched is the true
+        account, so the split must not put `reconciled` above it."""
+        self.launch()
+        self.end("finished", exit_status=0)
+        self.end(EVENT_ORPHANED)
+
+        self.assertEqual(self.status()["state"], "finished")
 
     def test_a_task_that_was_never_run_is_none(self):
         status = self.status(task_id=999999)

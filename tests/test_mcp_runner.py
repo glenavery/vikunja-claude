@@ -43,6 +43,7 @@ from pathlib import Path
 from unittest import mock
 
 from vikunja_claude.executors import DEFAULT_EXECUTOR, LOCAL_EXECUTOR
+from vikunja_claude.launcher import RUN_STATES
 from vikunja_claude.mcp import McpProtocol
 from vikunja_claude.mcp_service import CHANGE_COMMENT, CHANGE_RUN, McpService, ToolError
 from vikunja_claude.runner import RunnerClient, RunnerError
@@ -608,15 +609,20 @@ class TestReadingWhatARunIsDoing(RunnerTestCase):
         """Not re-derived here from the fields that came back. A second answer
         to "what is this run doing" is one that can disagree with the only
         place that knows."""
-        for state in ("running", "finished", "failed", "lost", "none"):
+        for state in RUN_STATES:
             with self.subTest(state=state):
                 self.runner_transport.status_answer = {**STATUS, "state": state}
                 self.assertEqual(self.read()["state"], state)
 
     def test_every_state_the_runner_can_report_is_explained(self):
         """The note is what a connector reads out, so a state with no note
-        would be reported as a bare word nobody can act on."""
-        for state in ("running", "finished", "failed", "lost", "none"):
+        would be reported as a bare word nobody can act on.
+
+        Taken from the runner's own vocabulary rather than listed again here,
+        so a state added there without a note fails this rather than arriving
+        at a connector as the unknown-state fallback.
+        """
+        for state in RUN_STATES:
             with self.subTest(state=state):
                 self.runner_transport.status_answer = {**STATUS, "state": state}
                 self.assertIn(state, McpService.RUN_STATE_NOTES)
@@ -629,6 +635,45 @@ class TestReadingWhatARunIsDoing(RunnerTestCase):
         note = self.read()["note"]
         self.assertIn("never recorded how it ended", note)
         self.assertIn("In Progress", note)
+
+    def test_a_reconciled_run_is_not_described_as_unaccounted_for(self):
+        """The other half of the same read, and the defect task 757 names.
+
+        Both states describe a run nobody watched end, so one note covered
+        both — and it told a caller asking about a closed-out run that the
+        ending was never recorded and the ticket was probably still In
+        Progress. Reconciliation is what recorded that ending and what moved
+        the ticket, so the note was false of it in both halves.
+        """
+        self.runner_transport.status_answer = {
+            **STATUS,
+            "state": "reconciled",
+            "reconciled_at": "2026-09-01T15:02:11+0000",
+        }
+        result = self.read()
+
+        note = result["note"]
+        self.assertNotIn("never recorded how it ended", note)
+        self.assertNotIn("In Progress", note)
+        # And still claims no outcome for it, because none was observed.
+        self.assertIn("neither finished nor failed", note)
+        self.assertIsNone(result["exit_status"])
+
+    def test_when_a_lost_run_was_closed_out_travels_with_the_state(self):
+        """A reconciled run has no `finished_at` — nothing watched it end — so
+        this is the only time anybody can put on its ending."""
+        self.runner_transport.status_answer = {
+            **STATUS,
+            "state": "reconciled",
+            "reconciled_at": "2026-09-01T15:02:11+0000",
+        }
+        result = self.read()
+
+        self.assertEqual(result["reconciled_at"], "2026-09-01T15:02:11+0000")
+        self.assertIsNone(result["finished_at"])
+        # And it is absent, not invented, for a run nothing has closed out.
+        self.runner_transport.status_answer = STATUS
+        self.assertIsNone(self.read()["reconciled_at"])
 
     def test_an_unknown_state_is_described_as_unknown_not_guessed(self):
         self.runner_transport.status_answer = {**STATUS, "state": "quiesced"}

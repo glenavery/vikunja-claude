@@ -368,7 +368,7 @@ systemctl --user status vikunja-claude       # still running
 | `set_task_status(task_number, bucket, approval_token?, project_id?)` | Moves one existing task to a column, which is also how it is closed and reopened, behind the same two-call approval |
 | `list_recently_done(limit?, project_id?)` | The tasks finished most recently on one approved board, newest first |
 | `start_task_run(task_number, executor?, approval_token?, project_id?)` | Hands one existing task to the ticket runner, which moves it to In Progress and starts Claude Code on it, behind the same two-call approval. It only *starts* the run |
-| `get_task_run_status(task_number, project_id?)` | What the runner's most recent run for that task is doing — `running`, `finished`, `failed`, `lost` or `none` — with a bounded tail of its output. One call, no approval: it reads and changes nothing |
+| `get_task_run_status(task_number, project_id?)` | What the runner's most recent run for that task is doing — `running`, `finished`, `failed`, `lost`, `reconciled` or `none` — with a bounded tail of its output. One call, no approval: it reads and changes nothing |
 
 #### A task is named the way the board names it (task 649)
 
@@ -616,7 +616,8 @@ out which one it was meant reading files on the host.
 | `running` | The process is alive and working |
 | `finished` | It exited cleanly — which is not by itself a claim that the ticket was completed; what it did is what it reported on the board |
 | `failed` | It exited non-zero, or was stopped for exceeding the runner's time limit |
-| `lost` | It started, its process is gone, and **the runner never recorded how it ended** |
+| `lost` | It started, its process is gone, **the runner never recorded how it ended**, and nothing has been done about that yet |
+| `reconciled` | That same run, closed out: the missed ending is recorded and the lock released — and, when the startup pass is what did it, the ticket commented on and moved back to Ready |
 | `none` | The runner has no record of a run for that task |
 
 **`lost` is the state worth naming**, and the one task 714 was actually in. It
@@ -626,9 +627,22 @@ dies with the service. Calling that `finished` would claim an exit nobody
 observed; calling it `failed` would claim a failure the runner never saw. It is
 neither, and from the board it looks like a ticket sitting In Progress with
 nothing reported on it — which is exactly the condition this exists to make
-visible. *(Task 754 closes it out — see below. `lost` is still the state, but
-it is now a recorded, dated fact rather than one inferred forever from a
-missing record.)*
+visible.
+
+**`reconciled` is that run once task 754 has closed it out** — and the two are
+separate words because they call for different responses (task 757). Neither
+reports an outcome: nobody watched either run end, so both have no exit status
+and are neither finished nor failed. But `lost` is an *open* condition — the
+lock may still be held, nothing has been said on the board, and the next
+startup will act on it — while `reconciled` is a *closed* one, where the ending
+is on the log, the lock is gone, the ticket has been commented on and moved
+back to Ready by the startup pass that closed it, and nothing further will
+happen. Reported as one word, a caller
+asking about a closed-out run was told the ending was never recorded and the
+ticket was probably still In Progress; reconciliation is what recorded that
+ending and what moved the ticket. The state is still derived, not stored — the
+launch log and the lock are the only artifacts, and the read still writes
+nothing.
 
 **Nothing new is recorded to answer any of this.** A launch already writes three
 artifacts — the lock naming its process, the append-only launch log, and the
@@ -733,10 +747,12 @@ Two things this deliberately does not do:
 - **It does not invent an outcome.** The event it writes is `orphaned`, never
   `finished` and never `timeout`. Those are *observed* endings written by the
   thread that watched the process; reusing either would record an exit status or
-  a timeout that nothing measured. So `lost` stays `lost` after reconciliation —
-  what changes is that it becomes closed and dated (`reconciled_at`) instead of
-  an open-ended inference. The comment says the same thing: the run is gone,
-  nothing is known about how far it got, treat any work as unverified.
+  a timeout that nothing measured. So a reconciled run still reports no exit
+  status and no timeout — what changes is that its ending becomes closed and
+  dated (`reconciled_at`), and that the status read says `reconciled` rather
+  than `lost` (task 757), instead of an open-ended inference. The comment says
+  the same thing: the run is gone, nothing is known about how far it got, treat
+  any work as unverified.
 - **It does not overrule a human.** The move back to Ready is guarded on the
   column the ticket is in *now*. Someone who already closed it, sent it back or
   picked it up knew more than a startup does.
