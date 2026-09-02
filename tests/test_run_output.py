@@ -33,7 +33,7 @@ import os
 import shlex
 from unittest import mock
 
-from vikunja_claude.config import DEFAULT_CLAUDE_ARGS
+from vikunja_claude.config import DEFAULT_CLAUDE_ARGS, PACKAGE_ROOT
 from vikunja_claude.run_output import (
     STATUS_LINE_CHARS,
     STATUS_READ_BYTES,
@@ -89,6 +89,25 @@ class TestTheLaunchAsksForOutputAsItHappens(ServiceTestCase):
         args = shlex.split(DEFAULT_CLAUDE_ARGS)
         if "stream-json" in args:
             self.assertIn("--verbose", args)
+
+    def test_the_shipped_env_file_does_not_quietly_undo_the_default(self):
+        """`DEFAULT_CLAUDE_ARGS` is only the default, and the service unit
+        loads `.env` through `EnvironmentFile`. A `CLAUDE_ARGS` there overrides
+        it entirely, so an `.env.example` that people copy from is a second
+        place the launch arguments are decided — and it was left on the old
+        value when the default moved, which made the whole of task 755 inert on
+        the host until somebody noticed. The host's own `.env` is untracked and
+        cannot be asserted here; the example it is copied from can.
+        """
+        example = PACKAGE_ROOT / ".env.example"
+        declared = [
+            line.split("=", 1)[1].strip()
+            for line in example.read_text(encoding="utf-8").splitlines()
+            if line.startswith("CLAUDE_ARGS=")
+        ]
+
+        self.assertEqual(len(declared), 1, "one CLAUDE_ARGS line, or none to compare")
+        self.assertEqual(shlex.split(declared[0]), shlex.split(DEFAULT_CLAUDE_ARGS))
 
     def test_a_launch_hands_those_arguments_to_the_process(self):
         """The default is only worth anything if it reaches the child. It is
