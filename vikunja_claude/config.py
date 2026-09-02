@@ -27,6 +27,12 @@ DEFAULT_ENV_FILE = PACKAGE_ROOT / ".env"
 #: shim's port changes nothing about which model is approved.
 DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11440"
 
+#: Seconds a killed run is given to die before the signal is escalated, and
+#: again before the runner gives up on it. Long enough for a harness that traps
+#: SIGTERM to shut down; short enough that a wedged child does not hold a
+#: reaper thread for a noticeable part of a run's time limit.
+DEFAULT_KILL_GRACE_SECONDS = 30.0
+
 # Shared by both services, so they cannot drift apart: the launcher and the MCP
 # server must talk to the same Vikunja and mean the same project by "project".
 DEFAULT_API_URL = "http://127.0.0.1:3456/api/v1"
@@ -374,6 +380,14 @@ class Config:
     state_dir: Path
     frontend_url: str
     launch_timeout_seconds: int
+    #: How long a run that hit that ceiling is given to die, per signal. The
+    #: reaper sends SIGTERM, waits this long, escalates to SIGKILL and waits
+    #: this long again, so a wedged child costs at most twice this before the
+    #: runner records that it is still alive. Bounded on purpose: an unbounded
+    #: wait would hold the reaper thread and the ticket's lock forever, which is
+    #: the failure this exists to avoid (task 758). It is not the time limit and
+    #: has nothing to say about how long a run may take.
+    kill_grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS
     #: Which executor a run uses when the request does not name one. The
     #: executor decides only which model the launched Claude Code drives; see
     #: `vikunja_claude/executors.py`.
@@ -423,6 +437,11 @@ class Config:
             ).rstrip("/"),
             launch_timeout_seconds=int(
                 os.environ.get("CLAUDE_LAUNCH_TIMEOUT_SECONDS", "10800")
+            ),
+            kill_grace_seconds=float(
+                os.environ.get(
+                    "CLAUDE_KILL_GRACE_SECONDS", str(DEFAULT_KILL_GRACE_SECONDS)
+                )
             ),
             executor=os.environ.get("RUNNER_EXECUTOR", DEFAULT_EXECUTOR),
             local_executor_base_url=os.environ.get(

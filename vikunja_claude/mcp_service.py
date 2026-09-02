@@ -1599,6 +1599,17 @@ class McpService:
             "The run is alive and working. What it is doing right now is in "
             "recent_output; it reports on the board itself when it finishes."
         ),
+        "unkillable": (
+            "The run exceeded the runner's time limit and would not stop: it "
+            "was signalled, escalated to SIGKILL, and its process was still "
+            "alive after that. It is not working and it will not report "
+            "anything on the board. It keeps its ticket's lock on purpose, so "
+            "nothing starts a second run in the working directory it is still "
+            "sitting in, which also means that ticket cannot be started again "
+            "until it is gone. Nothing on this connection can stop it — that "
+            "needs somebody on the host. recent_output holds the end of what "
+            "it wrote."
+        ),
         "finished": (
             "The run exited cleanly. What it actually did, and whether it "
             "committed anything, is what it reported on the board — a clean "
