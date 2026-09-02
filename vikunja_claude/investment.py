@@ -10,8 +10,9 @@ integration may see (``api/operational_reads.py`` in that repository).
 
 Task 279 added three more of the same shape: one tracked file, a literal-text
 search and one commit's diff. Those three and the repository-state read now also
-take a ``repository`` **name** — the AI Alpha Engine checkout or the AI Alpha
-Trader one — which is urlencoded like every other argument. It is a name and
+take a ``repository`` **name** — the AI Alpha Engine checkout, the AI Alpha
+Trader one, or this runner's own checkout (task 763) — which is urlencoded like
+every other argument. It is a name and
 never a path, and which names exist is decided and enforced *there*, by
 ``api/repository_read.resolve_repository``. :data:`REPOSITORY_NAMES` below is a
 copy for the tool schema to publish, not a second gate: this module refuses
@@ -67,7 +68,8 @@ PATH_REPOSITORY_DIFF = "/operational/repository/diff"
 #: valid values are; the application decides and enforces them.
 REPOSITORY_ENGINE = "ai-alpha-engine"
 REPOSITORY_TRADER = "trader"
-REPOSITORY_NAMES = (REPOSITORY_ENGINE, REPOSITORY_TRADER)
+REPOSITORY_VIKUNJA_CLAUDE = "vikunja-claude"
+REPOSITORY_NAMES = (REPOSITORY_ENGINE, REPOSITORY_TRADER, REPOSITORY_VIKUNJA_CLAUDE)
 
 READ_PATHS = (
     PATH_REPOSITORY,

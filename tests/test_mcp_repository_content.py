@@ -555,7 +555,9 @@ class TestTheRepositorySelector(RepositoryContentTestCase):
             argument = schema["properties"]["repository"]
             self.assertEqual(argument["type"], "string", name)
             self.assertEqual(
-                argument["enum"], ["ai-alpha-engine", "trader"], name
+                argument["enum"],
+                ["ai-alpha-engine", "trader", "vikunja-claude"],
+                name,
             )
 
     def test_the_enum_is_the_list_the_client_publishes(self):
@@ -572,11 +574,11 @@ class TestTheRepositorySelector(RepositoryContentTestCase):
             schema = self.descriptors()[name]["inputSchema"]
             self.assertNotIn("repository", schema.get("required", []), name)
 
-    def test_each_description_names_both_repositories_and_the_default(self):
+    def test_each_description_names_every_repository_and_the_default(self):
         for name in sorted(REPOSITORY_CONTENT_TOOLS | {"get_repository_state"}):
             description = self.descriptors()[name]["description"]
-            self.assertIn("ai-alpha-engine", description, name)
-            self.assertIn("trader", description, name)
+            for repository in REPOSITORY_NAMES:
+                self.assertIn(repository, description, f"{name}: {repository}")
             self.assertIn("default", description, name)
 
     def test_the_argument_says_it_is_a_name_and_not_a_path(self):
@@ -587,12 +589,14 @@ class TestTheRepositorySelector(RepositoryContentTestCase):
         self.assertIn("NAME from a fixed list", argument["description"])
         self.assertIn("filesystem path is not accepted", argument["description"])
 
-    def test_no_trader_specific_tool_was_added(self):
+    def test_no_repository_specific_tool_was_added(self):
         """One set of tools, parameterised — not a parallel set per repository."""
         names = {tool.name for tool in self.service.tools()}
-        self.assertFalse(
-            [name for name in names if "trader" in name.lower()], sorted(names)
-        )
+        for repository in ("trader", "vikunja-claude", "vikunja_claude"):
+            self.assertFalse(
+                [name for name in names if repository in name.lower()],
+                f"{repository}: {sorted(names)}",
+            )
 
     # -- what goes on the wire --------------------------------------------
 
@@ -677,8 +681,8 @@ class TestTheRepositoryRefusalTravels(unittest.TestCase):
 
     REFUSAL = (
         b'{"detail": "\'engine\' is not a repository this boundary reads. '
-        b'Valid names: ai-alpha-engine, trader. This takes the NAME of an '
-        b'approved repository, never a filesystem path."}'
+        b'Valid names: ai-alpha-engine, trader, vikunja-claude. This takes the '
+        b'NAME of an approved repository, never a filesystem path."}'
     )
 
     def _refused(self, **arguments) -> str:
@@ -699,7 +703,7 @@ class TestTheRepositoryRefusalTravels(unittest.TestCase):
         message = self._refused(repository="engine")
 
         self.assertIn("not a repository this boundary reads", message)
-        self.assertIn("ai-alpha-engine, trader", message)
+        self.assertIn("ai-alpha-engine, trader, vikunja-claude", message)
         self.assertIn("never a filesystem path", message)
 
     def test_a_path_shaped_name_is_refused_by_the_application_not_swallowed(self):
