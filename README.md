@@ -323,6 +323,10 @@ Decide that consciously; the service will not decide it for you.
   blocks a second launch, and survives a restart of this service. A lock whose
   PID is dead is treated as stale and reclaimed. Keying on the task id means
   renaming a ticket cannot smuggle a second concurrent run past the guard.
+- **A run is not recorded as ended until it has ended.** The reaper sends
+  SIGTERM to a run that hits the time limit, escalates to SIGKILL after
+  `CLAUDE_KILL_GRACE_SECONDS`, and only then writes the ending and releases the
+  lock. One that survives both keeps its lock (task 758).
 - Every launch, failure, timeout and exit is appended as JSON to
   `~/.local/state/vikunja-claude/launches.jsonl`; each run's full output goes to
   `~/.local/state/vikunja-claude/runs/ticket-NN-<timestamp>.log`.
@@ -368,7 +372,7 @@ systemctl --user status vikunja-claude       # still running
 | `set_task_status(task_number, bucket, approval_token?, project_id?)` | Moves one existing task to a column, which is also how it is closed and reopened, behind the same two-call approval |
 | `list_recently_done(limit?, project_id?)` | The tasks finished most recently on one approved board, newest first |
 | `start_task_run(task_number, executor?, approval_token?, project_id?)` | Hands one existing task to the ticket runner, which moves it to In Progress and starts Claude Code on it, behind the same two-call approval. It only *starts* the run |
-| `get_task_run_status(task_number, project_id?)` | What the runner's most recent run for that task is doing — `running`, `finished`, `failed`, `lost`, `reconciled` or `none` — with a bounded tail of its output. One call, no approval: it reads and changes nothing |
+| `get_task_run_status(task_number, project_id?)` | What the runner's most recent run for that task is doing — `running`, `unkillable`, `finished`, `failed`, `lost`, `reconciled` or `none` — with a bounded tail of its output. One call, no approval: it reads and changes nothing |
 
 #### A task is named the way the board names it (task 649)
 
@@ -614,6 +618,7 @@ out which one it was meant reading files on the host.
 | | |
 |---|---|
 | `running` | The process is alive and working |
+| `unkillable` | It ran past the time limit and would not stop: signalled, escalated to SIGKILL, **still alive**. It is not working and will report nothing |
 | `finished` | It exited cleanly — which is not by itself a claim that the ticket was completed; what it did is what it reported on the board |
 | `failed` | It exited non-zero, or was stopped for exceeding the runner's time limit |
 | `lost` | It started, its process is gone, **the runner never recorded how it ended**, and nothing has been done about that yet |
@@ -643,6 +648,16 @@ ticket was probably still In Progress; reconciliation is what recorded that
 ending and what moved the ticket. The state is still derived, not stored — the
 launch log and the lock are the only artifacts, and the read still writes
 nothing.
+
+**`unkillable` is the one that needs a person.** Every other state is
+something the runner has already dealt with or will; this one is a process it
+has done everything it can to and that is still there. Reporting it as
+`running` — which is what it was, before the reaper waited for anything — sends
+a reader away to wait for a report that is never coming, from a run holding a
+lock nobody can see the reason for. It keeps that lock deliberately, so its
+ticket cannot be started again into the worktree it is still sitting in, and
+the lock goes the ordinary way once the process finally does: the next read
+reclaims it and the run is `reconciled`, with no outcome invented for it.
 
 **Nothing new is recorded to answer any of this.** A launch already writes three
 artifacts — the lock naming its process, the append-only launch log, and the
@@ -799,6 +814,55 @@ capability. The runner is not one of those: it is the process this system
 exists to start, there is one of it, and `runner_url` is resolved from the
 launcher's own `VIKUNJA_CLAUDE_HOST` / `VIKUNJA_CLAUDE_PORT` so the two cannot
 name different places. A launcher that is down is a refusal the caller reads.
+
+### Stopping a run that overstayed (task 758)
+
+A run that reaches `CLAUDE_LAUNCH_TIMEOUT_SECONDS` is stopped by the same thread
+that has been watching it. What that thread used to do was send SIGTERM to the
+run's process group, release the ticket's lock and log `finished` — none of
+which waited for anything. **`finished` there meant a signal had been sent**,
+not that a process had been reaped.
+
+A child that does not die on SIGTERM is not a hypothetical: Claude Code inside a
+long tool call is the realistic case. It kept running in the ticket's worktree,
+kept its environment, and kept editing — while the lock was gone, so nothing
+recorded that anything was running and the same ticket could be launched
+straight back into the directory it was still writing to; the status read said
+`failed`, because a timeout implies it; and reconciliation could not help,
+because it acts on locks and this run no longer had one. Never observed — no run
+has hit the three-hour ceiling — found by reading.
+
+**Two orderings, and they are the whole of the fix.**
+
+- **The ending is written before the lock goes**, the way reconciliation already
+  does it, so a crash between the two leaves a lock the next read reclaims
+  rather than a released lock whose ending nothing ever wrote. It was a
+  `finally`, which released on every path including the ones that had recorded
+  nothing.
+- **The lock is not released until the process is dead.** SIGTERM, a grace
+  period, SIGKILL, the same grace again — then the ending. Both waits are
+  bounded, because waiting for a wedged child to die would hold the reaper
+  thread and the lock forever, which is a worse version of the failure being
+  fixed.
+
+**What is logged is what was observed.** The `timeout` record carries
+`escalated` (SIGKILL was needed) and `terminated` (the process is gone), and it
+is written after the attempt rather than before it, because before the attempt
+neither is known. The exit status stays `None` throughout: the status `wait()`
+hands back after a SIGKILL is the signal the runner sent, not an outcome the run
+reached, and a killed run has none.
+
+**A run that survives SIGKILL keeps everything.** No `finished`, no release —
+its lock is what makes the condition visible, refuses a second launch into its
+worktree, and gets reclaimed in the ordinary way when the process finally goes.
+That state is reported as `unkillable`.
+
+`CLAUDE_KILL_GRACE_SECONDS` (default 30) is the grace, per signal. It is not the
+time limit and says nothing about how long a run may take.
+
+The tests drive the real path with a real child that really ignores SIGTERM,
+because a fake that returns from `wait()` cannot be the thing that was wrong —
+`tests/test_launch_timeout.py`.
 
 ### Rules the reads hold
 

@@ -100,6 +100,14 @@ STATUS_TAIL_BYTES = 8000
 #: as one nothing had been done about — and the note read out for it said the
 #: ticket was probably still In Progress, when reconciliation is what moved it.
 RUN_RUNNING = "running"
+#: A run that hit the time limit, was signalled, was escalated to SIGKILL, and
+#: is STILL ALIVE (task 758). Separate from `running` because the two call for
+#: opposite responses: a running run is working and will report on the board
+#: itself, while this one has been told to stop twice, is not going to report
+#: anything, and is holding its ticket's lock precisely so that nothing launches
+#: a second run into the same worktree beside it. The runner has done everything
+#: it can do to this process; what is left is a human with a kill.
+RUN_UNKILLABLE = "unkillable"
 RUN_FINISHED = "finished"
 RUN_FAILED = "failed"
 RUN_LOST = "lost"
@@ -111,6 +119,7 @@ RUN_NONE = "none"
 #: cannot be asked about a state that is not here or miss one that is.
 RUN_STATES = (
     RUN_RUNNING,
+    RUN_UNKILLABLE,
     RUN_FINISHED,
     RUN_FAILED,
     RUN_LOST,
@@ -200,7 +209,7 @@ class Launcher:
         """
         events = self._events()
         launched, index = self._last_launch(events, task_id)
-        finished, _, orphaned = self._terminal(events, launched, index)
+        finished, _, orphaned, _ = self._terminal(events, launched, index)
         if launched is not None and (finished is not None or orphaned is not None):
             self._release(task_id)
             return None
@@ -346,13 +355,20 @@ class Launcher:
         """
         events = self._events()
         launched, launch_index = self._last_launch(events, task_id)
-        finished, timed_out, orphaned = self._terminal(events, launched, launch_index)
+        finished, timed_out, orphaned, unkilled = self._terminal(
+            events, launched, launch_index
+        )
 
         lock = self._read_lock(task_id)
         alive = lock is not None and self._is_alive(int(lock.get("pid", -1)))
 
         if alive:
-            state = RUN_RUNNING
+            # A run that outlived its own kill is not one that is working
+            # (task 758). It keeps its lock — that is what stops a second run
+            # being launched into the worktree it is still sitting in — but
+            # reporting it as `running` would send a reader away to wait for a
+            # report that is never coming.
+            state = RUN_UNKILLABLE if unkilled else RUN_RUNNING
         elif launched is None:
             state = RUN_NONE
         elif finished is not None:
@@ -424,7 +440,7 @@ class Launcher:
 
     def _terminal(
         self, events: list[dict], launched: dict | None, launch_index: int
-    ) -> tuple[dict | None, bool, dict | None]:
+    ) -> tuple[dict | None, bool, dict | None, bool]:
         """How that launch ended: what was seen, and what was reconciled.
 
         Keyed on the PID, because the closing records carry the reference and
@@ -436,17 +452,25 @@ class Launcher:
         `finished`, because it is a different claim. `finished` says what a
         process exited with; this says only that it is gone and nobody saw it
         go (task 754).
+
+        The last value says the timeout record reports a process that did not
+        die (task 758). `terminated` is only ever written by the reaper that
+        watched the kill, so `is False` is read exactly: a timeout record with
+        no such field is one written before the kill was waited for, and a
+        missing observation must not be read as a live process.
         """
         if launched is None:
-            return None, False, None
+            return None, False, None, False
         pid = launched.get("pid")
         after = [r for r in events[launch_index + 1:] if r.get("pid") == pid]
-        timed_out = any(r.get("event") == "timeout" for r in after)
+        timeouts = [r for r in after if r.get("event") == "timeout"]
+        timed_out = bool(timeouts)
+        unkilled = any(r.get("terminated") is False for r in timeouts)
         finished = next((r for r in after if r.get("event") == "finished"), None)
         orphaned = next(
             (r for r in after if r.get("event") == EVENT_ORPHANED), None
         )
-        return finished, timed_out, orphaned
+        return finished, timed_out, orphaned, unkilled
 
     def _output_tail(self, log_file) -> dict:
         """The end of a run's own output, bounded, with the token taken out."""
@@ -645,24 +669,95 @@ class Launcher:
     def _wait_and_log(
         self, task_id: int, reference: str, process: subprocess.Popen
     ) -> None:
-        # The id releases the lock; the reference is what the log says, because
-        # `recent()` is rendered on the console a human reads (task 659).
+        """Watch one run to its end, then record the end and release its slot.
+
+        Two orderings are the whole of the care here, and both used to be the
+        other way round (task 758).
+
+        **The ending is recorded before the lock goes**, the same way
+        reconciliation does it, so that a crash between the two leaves a lock —
+        which the next read reclaims — rather than a released lock whose ending
+        was never written, which nothing would ever revisit. It was a `finally`,
+        which released the lock on every path including the ones that had
+        recorded nothing.
+
+        **And the lock is not released until the process is actually dead.** The
+        timeout path used to send SIGTERM and immediately call the run finished:
+        `finished` meant a signal had been sent, not that anything had been
+        reaped. A child that does not die on SIGTERM — Claude Code inside a long
+        tool call is the realistic case — kept running in the ticket's worktree
+        with nothing recording that it was there, and the same ticket could be
+        launched straight into it again.
+
+        The id releases the lock; the reference is what the log says, because
+        `recent()` is rendered on the console a human reads (task 659).
+        """
         try:
             exit_status = process.wait(timeout=self.config.launch_timeout_seconds)
         except subprocess.TimeoutExpired:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            # Never the status `wait()` hands back below: that is the signal
+            # this method sent, not an outcome the run reached. A killed run has
+            # no exit status, and None stays None.
             exit_status = None
+            escalated, terminated = self._terminate(process)
             self._log(
                 "timeout",
                 reference=reference,
                 pid=process.pid,
                 after_seconds=self.config.launch_timeout_seconds,
+                escalated=escalated,
+                terminated=terminated,
             )
-        finally:
-            self._release(task_id)
+            if not terminated:
+                # It survived SIGKILL. There is nothing further this thread can
+                # do to it and nothing it may claim about it: no `finished`, and
+                # the lock stays, which is what keeps the condition visible and
+                # keeps a second run out of the worktree it is still in. When it
+                # does eventually die, the next read of that lock reconciles it.
+                return
         self._log(
             "finished",
             reference=reference,
             pid=process.pid,
             exit_status=exit_status,
         )
+        self._release(task_id)
+
+    def _terminate(self, process: subprocess.Popen) -> tuple[bool, bool]:
+        """Stop the run's process group, escalating within a bounded grace.
+
+        SIGTERM, a grace period, then SIGKILL and the same grace again. Both
+        waits are bounded on purpose: waiting for a wedged child to die would
+        hold this thread and the ticket's lock forever, which is a worse version
+        of the failure this replaces.
+
+        Returns whether SIGKILL was needed and whether the process is dead —
+        both of which are observations rather than intentions, which is why they
+        are what gets logged.
+        """
+        grace = self.config.kill_grace_seconds
+        self._signal_group(process, signal.SIGTERM)
+        if self._reaped(process, grace):
+            return False, True
+        self._signal_group(process, signal.SIGKILL)
+        return True, self._reaped(process, grace)
+
+    def _signal_group(self, process: subprocess.Popen, number: int) -> None:
+        """Signal the whole group the run was started in.
+
+        The group, not the process: the child is a harness that spawns its own
+        children, and signalling only the leader leaves them. A group that is
+        already gone is not an error — the wait is what establishes that a run
+        ended, and this only asks it to.
+        """
+        try:
+            os.killpg(os.getpgid(process.pid), number)
+        except ProcessLookupError:
+            pass
+
+    def _reaped(self, process: subprocess.Popen, grace: float) -> bool:
+        try:
+            process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
