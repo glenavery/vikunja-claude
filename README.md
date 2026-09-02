@@ -538,8 +538,9 @@ Plus three **tracked-content reads**, present whenever the operational reads are
 | `search_repository_text(query, revision?, path_filter?, case_sensitive?, repository?)` | Where a **literal** string appears in tracked files, with paths and line numbers |
 | `read_repository_commit_diff(revision, path_filter?, repository?)` | What one commit changed, against its first parent — including commits that were never pushed |
 
-Those four take an optional `repository` — `"ai-alpha-engine"` (the default) or
-`"trader"`. See [Which repository is read](#which-repository-is-read).
+Those four take an optional `repository` — `"ai-alpha-engine"` (the default),
+`"trader"` or `"vikunja-claude"`. See
+[Which repository is read](#which-repository-is-read).
 
 Plus one **public page fetch**, present only when it is configured (see
 [Public page fetch](#public-page-fetch-website-review) below):
@@ -1429,17 +1430,23 @@ registered on the admin instance only, so on the public one they do not exist.
 
 #### Which repository is read
 
-Two boards, two repositories. `get_repository_state` and the three
-tracked-content tools each take an optional `repository`:
+Three repositories. `get_repository_state` and the three tracked-content tools
+each take an optional `repository`:
 
 | Name | Repository |
 |---|---|
 | `"ai-alpha-engine"` (default) | the AI Server investment application |
 | `"trader"` | the AI Alpha Trader day-trading project |
+| `"vikunja-claude"` | this ticket runner — the launcher, `vkctl` and this MCP |
 
-**One set of tools, parameterised — there is no Trader-specific tool.** A
-parallel set would be a second place where the refusals are described, and the
-two could come to advertise different rules for the same boundary.
+The third exists because a runner ticket is implemented *here* (task 763):
+without it a review could read the ticket and the run status and not the commit
+that closed them, and a runner commit is local and unpushed until it is merged,
+so no hosted connector can reach it either.
+
+**One set of tools, parameterised — there is no repository-specific tool.** A
+parallel set would be a second place where the refusals are described, and they
+could come to advertise different rules for the same boundary.
 
 It is a **name from a fixed list, never a filesystem path.** Which names exist
 is decided and enforced by `api/repository_read.py` in the investment
@@ -1448,11 +1455,11 @@ it was given and refuses nothing, so an unknown one comes back with the
 application's own reason naming the valid values. The enum in the tool schemas
 is a copy for a model to read, not a second gate.
 
-Everything above holds for both: the same denial list, the same redaction, the
-same revision grammar, the same limits, and unpushed local commits working in
-either. Reachability is per repository — a commit id from one does not exist in
-the other — so the diff tool asks for the repository the commit is in, and every
-response names the repository it resolved.
+Everything above holds for all of them: the same denial list, the same
+redaction, the same revision grammar, the same limits, and unpushed local
+commits working in each. Reachability is per repository — a commit id from one
+does not exist in another — so the diff tool asks for the repository the commit
+is in, and every response names the repository it resolved.
 
 ### Reading the site as the test paying user
 

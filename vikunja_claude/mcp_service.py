@@ -1988,11 +1988,14 @@ class McpService:
         "enum": list(REPOSITORY_NAMES),
         "description": (
             'Which repository to read: "ai-alpha-engine" for the AI Server '
-            'investment application (the default when omitted), or "trader" '
-            "for the AI Alpha Trader day-trading project. Both are read the "
-            "same way and under the same refusals. This is a NAME from a fixed "
-            "list - a filesystem path is not accepted and is refused as an "
-            "unknown name. Every response says which repository it resolved."
+            'investment application (the default when omitted), "trader" '
+            'for the AI Alpha Trader day-trading project, or "vikunja-claude" '
+            "for this ticket runner itself - the launcher, vkctl and this MCP "
+            "boundary, which is where a runner ticket is implemented. All are "
+            "read the same way and under the same refusals. This is a NAME "
+            "from a fixed list - a filesystem path is not accepted and is "
+            "refused as an unknown name. Every response says which repository "
+            "it resolved."
         ),
     }
 
@@ -2014,21 +2017,22 @@ class McpService:
         # a path it can have or a path it cannot.
         source_note = (
             "Results come from tracked Git content at a resolved commit in one "
-            "of two repositories — the AI Server investment repository "
-            '("ai-alpha-engine", the default) or the AI Alpha Trader project '
-            '("trader") — chosen with the `repository` argument and named back '
-            "in every response — not from arbitrary server filesystem access. "
+            "of three repositories — the AI Server investment repository "
+            '("ai-alpha-engine", the default), the AI Alpha Trader project '
+            '("trader") or this ticket runner ("vikunja-claude") — chosen with '
+            "the `repository` argument and named back in every response — not "
+            "from arbitrary server filesystem access. "
             "Uncommitted edits, untracked files and files outside the "
             "repository are invisible here, and .env files, credentials, keys, "
             "certificates, databases, backups, logs, uploads and run artefacts "
-            "are refused by path, in both repositories alike. Secret-looking "
+            "are refused by path, in every repository alike. Secret-looking "
             "values are redacted before anything is returned. Read-only."
         )
         revision_note = (
             "A commit id (7-40 hex characters) that some local branch reaches "
             "**in the repository you named**. Omit it for that repository's "
             "current HEAD. Local commits that were never pushed work fine — "
-            "that is what this is for, and it holds for both repositories. "
+            "that is what this is for, and it holds for every repository. "
             "Branch names, tags and Git revision expressions ('HEAD~3', "
             "'main^', '@{yesterday}') are refused; resolve those yourself and "
             "pass the id."
@@ -2040,10 +2044,12 @@ class McpService:
                 title="Read one tracked file from an approved repository",
                 description=(
                     "Read one tracked text file by repository-relative path, at "
-                    "HEAD or at a commit you name, from either approved "
+                    "HEAD or at a commit you name, from any approved "
                     "repository — for example "
-                    '"api/repository_read.py" in "ai-alpha-engine", or '
-                    '"docs/architecture.md" in "trader". Use it to inspect the '
+                    '"api/repository_read.py" in "ai-alpha-engine", '
+                    '"docs/architecture.md" in "trader", or '
+                    '"vikunja_claude/mcp_service.py" in "vikunja-claude". '
+                    "Use it to inspect the "
                     "actual implementation behind a ticket's completion claim "
                     "rather "
                     "than taking the claim at face value. Supply start_line and "
@@ -2325,11 +2331,12 @@ class McpService:
                     "at: branch, commit hash, the commit's subject and "
                     "timestamp, and whether the working tree is clean. Name the "
                     '`repository` — "ai-alpha-engine" (the default) to know '
-                    'what code is deployed, or "trader" for the AI Alpha '
-                    "Trader project. The response says which one it resolved. "
+                    'what code is deployed, "trader" for the AI Alpha '
+                    'Trader project, or "vikunja-claude" for this ticket '
+                    "runner. The response says which one it resolved. "
                     "Counts of changed and untracked files are returned, not "
                     "filenames. Read-only; it runs no commands you name and "
-                    "cannot write to either repository."
+                    "cannot write to any repository."
                 ),
                 input_schema={
                     "type": "object",
