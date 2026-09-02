@@ -23,7 +23,7 @@ from typing import Callable
 from .config import Config
 from .executors import DEFAULT_EXECUTOR, Executor
 from .run_output import tail as output_tail
-from .worktree import WorktreeError, ensure_worktree
+from .worktree import WorktreeError, ensure_worktree, run_name
 from .vikunja import Ticket
 
 
@@ -57,9 +57,16 @@ class LaunchRecord:
     The row id is deliberately NOT here (task 659). This record is spread
     straight into the `work` response and into `/launches`, and it was the last
     payload handing a caller the immutable `/tasks/<id>` number beside the board
-    number that identifies the ticket. The id is still the lock key and the log
-    filename — internal, where it is load-bearing — and `running()` recovers it
-    from the lock's own filename rather than from its contents.
+    number that identifies the ticket. The id is still the lock key — internal,
+    where it is load-bearing — and `running()` recovers it from the lock's own
+    filename rather than from its contents.
+
+    `log_file` was the hole in that (task 762). The record does not carry the
+    row id as a number, but it carried the path of a file NAMED from it, and a
+    path is the most quotable form there is: `/launches` and the console print
+    it, and the run for board #714 published `task-715-<stamp>.log`. The name
+    now comes from `worktree.run_name`, so what this publishes agrees with the
+    worktree and the branch, and there is one number in it.
     """
 
     number: int | None
@@ -131,6 +138,15 @@ RUN_STATES = (
 #: would record an exit status or a timeout that nothing measured. This one says
 #: only what is actually known — the process is gone and the ending was missed.
 EVENT_ORPHANED = "orphaned"
+
+#: Fields the launch log keeps for this service's own use and `recent()` does
+#: not publish. `task_id` is the row id, and it is in the ledger because a
+#: `launched` record has to be findable from the id its lock is keyed by
+#: (`_last_launch`) once the lock itself is gone. It used to be readable off the
+#: log filename, which is exactly what task 762 stopped: the filename is what a
+#: person reads, so it names the board, and the correlation key is written down
+#: as a field instead of smuggled through a name that has another job.
+INTERNAL_FIELDS = frozenset({"task_id"})
 
 
 def pid_alive(pid: int) -> bool:
@@ -295,6 +311,15 @@ class Launcher:
             handle.write(json.dumps(record) + "\n")
 
     def recent(self, limit: int = 25) -> list[dict]:
+        """What happened lately, for a console — with the correlation key gone.
+
+        The launch log is this service's own ledger and it records the row id
+        (see `_log`); this is the one place that ledger is PUBLISHED, to
+        `/launches` and to the console a person reads, so it projects rather
+        than passing through. Dropped by name here rather than filtered at each
+        renderer: one place decides what leaves the ledger, and a field added
+        to the ledger later is not published by forgetting about it.
+        """
         try:
             lines = self.config.log_path.read_text(encoding="utf-8").splitlines()
         except FileNotFoundError:
@@ -302,9 +327,12 @@ class Launcher:
         out = []
         for line in lines[-limit:]:
             try:
-                out.append(json.loads(line))
+                record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(record, dict):
+                record = {k: v for k, v in record.items() if k not in INTERNAL_FIELDS}
+            out.append(record)
         return list(reversed(out))
 
     def _events(self) -> list[dict]:
@@ -422,17 +450,24 @@ class Launcher:
     def _last_launch(self, events: list[dict], task_id: int) -> tuple[dict | None, int]:
         """The most recent ``launched`` record for this task, and where it sits.
 
-        Matched on the log filename, which is ``task-<id>-<stamp>.log`` and the
-        only field of that record carrying the task. Adding the id to the event
-        itself would be a second way to say the same thing, and this read is not
-        allowed to change what a launch records.
+        Matched on the record's own ``task_id``, which is the key its caller
+        holds: `run_status` and `_reconcile` are both reached from a lock, and
+        the lock is keyed by the row id.
+
+        It used to be matched on the log filename, back when that filename was
+        built from the row id. That coupling was the defect task 762 fixed from
+        the other end — a name a person reads was doing double duty as an
+        internal key, so it could not be corrected without breaking this read.
+        A record written before that change carries no ``task_id`` and is not
+        matched, which is right: those runs died when the service restarted, and
+        an unmatched launch is reconciled as an ending nobody saw rather than
+        reported as an outcome.
         """
-        prefix = f"task-{int(task_id)}-"
         found, index = None, -1
         for position, record in enumerate(events):
             if record.get("event") != "launched":
                 continue
-            if Path(str(record.get("log_file", ""))).name.startswith(prefix):
+            if record.get("task_id") == int(task_id):
                 found, index = record, position
         return found, index
 
@@ -530,7 +565,11 @@ class Launcher:
                 "%Y-%m-%dT%H:%M:%S%z", time.localtime(self._clock())
             )
             stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(self._clock()))
-            log_file = self.config.run_log_dir / f"task-{ticket.task_id}-{stamp}.log"
+            # Named for the BOARD, like the worktree and the branch it belongs
+            # to (task 762). This is a path `/launches`, the console and the
+            # `work` response all print.
+            name = run_name(ticket.task_number, ticket.task_id)
+            log_file = self.config.run_log_dir / f"{name}-{stamp}.log"
 
             # Placeholder lock: claims the slot before the process exists, so two
             # concurrent requests cannot both reach spawn.
@@ -605,14 +644,16 @@ class Launcher:
                 model=executor.model,
             )
             self._write_lock(ticket.task_id, {**asdict(record), "state": "running"})
-            self._log("launched", **asdict(record))
+            # `task_id` is the ledger's correlation key, not part of the record:
+            # `recent()` drops it, and nothing else publishes this file.
+            self._log("launched", task_id=ticket.task_id, **asdict(record))
 
         if self._reap:
             threading.Thread(
                 target=self._wait_and_log,
                 args=(ticket.task_id, ticket.board_reference, process),
                 daemon=True,
-                name=f"reaper-task-{ticket.task_id}",
+                name=f"reaper-{name}",
             ).start()
         return record
 

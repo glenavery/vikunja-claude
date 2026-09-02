@@ -46,11 +46,13 @@ nothing. Same rule, same walk, applied to those surfaces.
 
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from vikunja_claude import web
 
-from .fakes import PROJECT_ID
+from .fakes import PROJECT_ID, task
 from .support import McpTestCase, ServiceTestCase
 
 #: The key task 649 published and task 659 removed.
@@ -270,6 +272,134 @@ class TestTheLauncherPublishesNoRowId(ServiceTestCase):
         # The rule against reading a number out of that URL stays: the route
         # is still how a person arrives, it is just not printed here.
         self.assertIn("/tasks/<id>", prompt)
+
+
+class TestARunIsNamedForTheBoardAndKeyedByTheRow(ServiceTestCase):
+    """A run has one human name, and the row id is not in it (task 762).
+
+    The launcher stopped publishing the row id as a NUMBER at task 659, but the
+    run's log file was still *named* from it — and a path is the most quotable
+    form there is: `work` returns it, `/launches` carries it and the console
+    prints it. So board ticket #714's output went to `task-715-<stamp>.log`, a
+    filename naming a different, real ticket, sitting one directory away from
+    the `task-714` worktree the very same run was working in. Two spellings of
+    one run is how a reader quotes the wrong number.
+
+    What did NOT change is the lock. The row id is immutable and the board
+    number is editable, so the key that must never collide keeps the id — which
+    is the distinction these tests hold from both ends: the name a person reads
+    is the board's, the key the runner locks on is the row's, and asking for one
+    by the other finds nothing.
+
+    Fixture task: row id 9, board number 8. Different numbers, so a name built
+    from the wrong one cannot pass by coincidence.
+    """
+
+    ROW_ID = 9
+    NUMBER = 8
+    #: The fake serves this one with no project-local index — the only case with
+    #: no board number to name a run with.
+    NUMBERLESS = 91
+
+    def work(self) -> dict:
+        self.alive_pids.add(4242)
+        return self.service.work(self.service.get_by_task_number(self.NUMBER))
+
+    def test_the_run_log_is_named_for_the_board_number(self):
+        name = Path(self.work()["log_file"]).name
+        self.assertTrue(name.startswith(f"task-{self.NUMBER}-"), name)
+        self.assertTrue(name.endswith(".log"), name)
+
+    def test_the_run_log_is_named_like_the_worktree_it_is_the_log_of(self):
+        """One function names both (`worktree.run_name`), so a run cannot end up
+        called one thing in the checkout and another in the log directory —
+        which is exactly what #714 saw."""
+        record = self.work()
+        self.assertTrue(
+            Path(record["log_file"]).name.startswith(
+                Path(record["workdir"]).name + "-"
+            ),
+            f'{record["log_file"]} is not the log of {record["workdir"]}',
+        )
+
+    def test_no_surface_a_person_reads_spells_a_run_named_from_the_row_id(self):
+        """Asked as "no surface carries that NAME", not "these digits do not
+        appear": the row id is a small integer and the timestamp is full of
+        digits, so a substring test on `9` alone could not fail for the right
+        reason. Both spellings are refused — `task-9-` is what the launcher
+        wrote, and `row-9` is what the numberless fallback would spell.
+        """
+        record = self.work()
+        surfaces = {
+            "work": json.dumps(record),
+            "running": json.dumps(self.launcher.running()),
+            "launches": json.dumps(self.launcher.recent()),
+            "run_status": json.dumps(self.launcher.run_status(self.ROW_ID)),
+            "console": web.console(
+                "AI Alpha Engine", "/repo",
+                self.launcher.running(), self.launcher.recent()),
+        }
+        for surface, blob in surfaces.items():
+            with self.subTest(surface=surface):
+                self.assertNotIn(f"task-{self.ROW_ID}-", blob)
+                self.assertNotIn(f"row-{self.ROW_ID}", blob)
+
+    def test_the_lock_is_still_keyed_by_the_row_id(self):
+        """Unchanged, and deliberately so. Two runs of one ticket must never
+        both hold it, which needs a key that cannot be edited on the board."""
+        self.work()
+        self.assertTrue(
+            (self.config.lock_dir / f"task-{self.ROW_ID}.json").exists())
+        self.assertFalse(
+            (self.config.lock_dir / f"task-{self.NUMBER}.json").exists())
+
+    def test_the_ledger_records_the_row_id_and_the_published_view_drops_it(self):
+        """The correlation key moved out of the filename and into a field.
+
+        It has to live somewhere: a `launched` record is found again from the id
+        its lock is keyed by, long after the lock is gone. So the launch log —
+        this service's own ledger — records it, and `recent()`, the one place
+        that ledger is published, projects it away.
+        """
+        self.work()
+        events = [
+            json.loads(line)
+            for line in self.config.log_path.read_text(
+                encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(
+            [r.get("task_id") for r in events if r.get("event") == "launched"],
+            [self.ROW_ID],
+        )
+        for record in self.launcher.recent():
+            with self.subTest(event=record.get("event")):
+                self.assertNotIn("task_id", record)
+
+    def test_a_status_read_asks_by_the_row_and_the_board_number_finds_nothing(self):
+        """The filename used to BE the correlation key, so renaming it could
+        have lost the run this read is asked about — silently, as `none`.
+
+        The second half is the distinction stated the other way: 8 and 9 are
+        both real numbers here, and only one of them addresses this run.
+        """
+        self.work()
+        status = self.launcher.run_status(self.ROW_ID)
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(status["number"], self.NUMBER)
+        self.assertEqual(self.launcher.run_status(self.NUMBER)["state"], "none")
+
+    def test_a_ticket_with_no_board_number_is_spelled_row(self):
+        """The fallback cannot be a bare `task-<id>`: the two numbering spaces
+        overlap, so that is a different, real ticket's name."""
+        self.vikunja.layout["Ready"].append(
+            task(self.NUMBERLESS, "Indexless", "2026-07-26T07:00:00Z", "body",
+                 index=None)
+        )
+        record = self.service.work(self.service.get_task(self.NUMBERLESS))
+        self.assertTrue(
+            Path(record["log_file"]).name.startswith(f"row-{self.NUMBERLESS}-"),
+            record["log_file"],
+        )
 
 
 # "One number on two boards is two tasks" is task 649's property and lives in

@@ -340,7 +340,8 @@ that is not JSON through untouched.
   lock. One that survives both keeps its lock (task 758).
 - Every launch, failure, timeout and exit is appended as JSON to
   `~/.local/state/vikunja-claude/launches.jsonl`; each run's full output goes to
-  `~/.local/state/vikunja-claude/runs/ticket-NN-<timestamp>.log`.
+  `~/.local/state/vikunja-claude/runs/task-<board number>-<timestamp>.log` —
+  the same name as its worktree and its branch (task 762).
 
 ## The MCP boundary (ChatGPT)
 
@@ -689,9 +690,11 @@ byte-truncated first line dropped rather than published as a fragment. The
 Vikunja token is removed by exact match — the run holds it in its environment,
 so a traceback or a verbose HTTP log could otherwise carry it out. The `pid`
 and the log's path are withheld for the same reason `start_task_run` withholds
-them: the path is `task-<row id>-<stamp>.log`, which spells the row id this
-surface does not publish (task 663). That is also why the output travels as
-text rather than as somewhere to go and read it.
+them: a host path is not something this boundary hands out, and neither is a
+process to signal. That is also why the output travels as text rather than as
+somewhere to go and read it. The path no longer spells the row id (task 762),
+which is what it was originally withheld for (task 663) — it is still withheld,
+now on the narrower grounds that remain.
 
 **A read that fails says so in its own terms.** An unreachable runner or a task
 it does not work comes back as "no run status was read, and nothing was
@@ -725,6 +728,16 @@ board shows, what every worktree already in the investment checkout uses, and
 the only number a person asking "where did #714's run go" actually has. The row
 id appears only for a ticket Vikunja reported no index for, spelled `row-` so
 the two numbering spaces can never be read as one.
+
+**One function names all three — the worktree, the branch and the run log**
+(`worktree.run_name`, task 762). The log was the last artifact still named from
+the row id, so board #714's output went to `task-715-<stamp>.log`: a filename
+naming a different, real ticket, one directory away from the `task-714`
+worktree the same run was working in. `/launches`, the console and the `work`
+response all print that path, which makes it the most quotable form the row id
+had left. The launch log keeps the id as a field instead — that is how a
+`launched` record is found again from the lock's key once the lock is gone —
+and `recent()`, the one place that ledger is published, drops it by name.
 
 Three properties worth keeping:
 
@@ -814,10 +827,9 @@ The runner's work route is addressed by Vikunja's global id on purpose: ids are
 unique across projects, so a task the runner does not work cannot resolve to a
 *different real ticket* the way a board number could. It stays internal, as
 everywhere else (task 663) — the answer is projected rather than passed
-through, which is why the runner's `log_file` (whose name is
-`task-<row id>-<stamp>.log`) and its `pid` are not in it, and why the runner's
-404 is re-framed here instead of republished: that refusal is written for
-someone reading a `/tasks/<id>` URL and spells the id.
+through, which is why the runner's `log_file` and its `pid` are not in it, and
+why the runner's 404 is re-framed here instead of republished: that refusal is
+written for someone reading a `/tasks/<id>` URL and spells the id.
 
 **There is no setting that switches it off.** The three optional integrations
 are absent when unconfigured, because a tool that can never succeed reads as a
