@@ -7,6 +7,7 @@ import hashlib
 import http.client
 import json
 import secrets
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from vikunja_claude.config import (
     Config,
+    DEFAULT_CLAUDE_ARGS,
     InvestmentConfig,
     McpConfig,
     OAuthConfig,
@@ -198,7 +200,10 @@ def make_config(state_dir: Path, **overrides) -> Config:
         # rather than quietly finding somewhere real to write.
         workdir=Path("/nonexistent/vikunja-claude-test-workdir"),
         claude_bin="claude",
-        claude_args=["-p", "--permission-mode", "acceptEdits"],
+        # The production default, split the way the config splits it. Copied
+        # out by hand this drifted from what a real launch is given the
+        # moment the default changed (task 755).
+        claude_args=shlex.split(DEFAULT_CLAUDE_ARGS),
         host="127.0.0.1",
         port=3460,
         state_dir=state_dir,

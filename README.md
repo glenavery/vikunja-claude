@@ -300,7 +300,9 @@ measurements in `deploy/ollama/README.md`.
 
 ## Permissions
 
-The default `CLAUDE_ARGS` is `-p --permission-mode acceptEdits`: file edits are
+The default `CLAUDE_ARGS` is
+`-p --verbose --output-format stream-json --permission-mode acceptEdits`: file
+edits are
 accepted, but **bash commands are denied in headless mode**, so a run cannot
 actually execute tests or `git commit`. That default is deliberately the safe
 one. To let unattended runs finish, either allowlist the commands you want in
@@ -308,10 +310,19 @@ one. To let unattended runs finish, either allowlist the commands you want in
 it means — set:
 
 ```env
-CLAUDE_ARGS=-p --dangerously-skip-permissions
+CLAUDE_ARGS=-p --verbose --output-format stream-json --dangerously-skip-permissions
 ```
 
 Decide that consciously; the service will not decide it for you.
+
+`--output-format stream-json` is what makes a run observable while it runs, and
+`--verbose` is what Claude Code demands beside it — it refuses the pair without
+it. With the default `text` format a run prints once, at the end, so
+`get_task_run_status` can prove a process started and nothing more; that is what
+#714 looked like from outside (task 755). Keep both flags in any `CLAUDE_ARGS`
+you set. Nothing else reads the run log, so the format is free to be JSON:
+`vikunja_claude/run_output.py` renders it back to lines, and passes any line
+that is not JSON through untouched.
 
 ## Safety properties
 

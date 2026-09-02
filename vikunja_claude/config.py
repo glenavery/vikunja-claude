@@ -33,6 +33,27 @@ DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11440"
 #: reaper thread for a noticeable part of a run's time limit.
 DEFAULT_KILL_GRACE_SECONDS = 30.0
 
+#: How a run is asked to report on itself while it works (task 755).
+#:
+#: ``-p`` and the permission mode are what a ticket run has always needed. The
+#: output format is the part that was missing, and it was missing on the *write*
+#: side: ``-p`` with the default ``text`` format prints once, at the end, so
+#: through the whole of a run the log a status read exists to read held nothing
+#: but Claude Code's startup warnings on stderr. #714 is what that looks like
+#: from outside — a live, working process and a status surface that could prove
+#: only that it had started.
+#:
+#: ``stream-json`` writes one JSON object per line as the run happens, and
+#: ``--verbose`` is not optional decoration: Claude Code refuses the pair
+#: without it ("output-format=stream-json requires --verbose"). Nothing else
+#: about a launch changes — same binary, same worktree, same prompt, same
+#: executor environment — and ``vikunja_claude/run_output.py`` renders what
+#: arrives. A ``CLAUDE_ARGS`` that overrides this back to the text format is
+#: still read and still shown; it just has nothing to show until the run ends.
+DEFAULT_CLAUDE_ARGS = (
+    "-p --verbose --output-format stream-json --permission-mode acceptEdits"
+)
+
 # Shared by both services, so they cannot drift apart: the launcher and the MCP
 # server must talk to the same Vikunja and mean the same project by "project".
 DEFAULT_API_URL = "http://127.0.0.1:3456/api/v1"
@@ -427,7 +448,7 @@ class Config:
             ),
             claude_bin=os.environ.get("CLAUDE_BIN", "claude"),
             claude_args=shlex.split(
-                os.environ.get("CLAUDE_ARGS", "-p --permission-mode acceptEdits")
+                os.environ.get("CLAUDE_ARGS", DEFAULT_CLAUDE_ARGS)
             ),
             host=os.environ.get("VIKUNJA_CLAUDE_HOST", "127.0.0.1"),
             port=int(os.environ.get("VIKUNJA_CLAUDE_PORT", "3460")),

@@ -37,8 +37,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from vikunja_claude.launcher import (
-    EVENT_ORPHANED,
+from vikunja_claude.launcher import EVENT_ORPHANED
+from vikunja_claude.run_output import (
+    STATUS_READ_BYTES,
     STATUS_TAIL_BYTES,
     STATUS_TAIL_LINES,
 )
@@ -276,13 +277,18 @@ class TestTheOutputItHandsBack(RunStatusTestCase):
         )
         self.assertTrue(status["output_truncated"])
 
-    def test_a_line_cut_in_half_by_the_byte_bound_is_dropped(self):
+    def test_a_line_cut_in_half_by_the_read_window_is_dropped(self):
         """A byte seek lands mid-line. Publishing that fragment would show a
         line the run never wrote, beginning where the reader happened to land.
+
+        Built from `STATUS_READ_BYTES`, which is how far back the reader looks,
+        and no longer from the bound on what it returns: those became two
+        numbers when a single stream-json event turned out to be bigger than
+        the whole of an answer (task 755).
         """
         self.launch()
         self.log_file().write_text(
-            "PREFIX" + "y" * STATUS_TAIL_BYTES + "\ncomplete line\n",
+            "PREFIX" + "y" * STATUS_READ_BYTES + "\ncomplete line\n",
             encoding="utf-8",
         )
 

@@ -22,6 +22,7 @@ from typing import Callable
 
 from .config import Config
 from .executors import DEFAULT_EXECUTOR, Executor
+from .run_output import tail as output_tail
 from .worktree import WorktreeError, ensure_worktree
 from .vikunja import Ticket
 
@@ -75,13 +76,10 @@ class LaunchRecord:
     model: str | None = None
 
 
-#: How much of a run's own output a status read hands back. A tail rather than
-#: the log: enough to tell model work from tests, git, a closing report or a
-#: stall, bounded so a status read cannot be used to pull an arbitrary quantity
-#: of a host file through a read surface. Whichever bound bites first wins, so a
-#: run emitting very long lines is bounded too.
-STATUS_TAIL_LINES = 40
-STATUS_TAIL_BYTES = 8000
+# How a run's own output is read back, and how far it is bounded, lives in
+# `run_output` with the rendering it is inseparable from (task 755). The
+# launcher owns launching; what one run wrote, and how much of it may travel
+# out, is one job and it is that module's.
 
 #: What a run that started can be, once it is no longer running. Two of these
 #: name a run whose ending nobody watched, and neither reports an outcome:
@@ -473,38 +471,13 @@ class Launcher:
         return finished, timed_out, orphaned, unkilled
 
     def _output_tail(self, log_file) -> dict:
-        """The end of a run's own output, bounded, with the token taken out."""
-        empty = {"output_tail": [], "output_truncated": False, "output_at": None}
-        if not log_file:
-            return empty
-        path = Path(str(log_file))
-        try:
-            size = path.stat().st_size
-            with path.open("rb") as handle:
-                if size > STATUS_TAIL_BYTES:
-                    handle.seek(size - STATUS_TAIL_BYTES)
-                raw = handle.read()
-            modified = path.stat().st_mtime
-        except OSError:
-            return empty
+        """The end of this run's own output, read and bounded by ``run_output``.
 
-        truncated = size > STATUS_TAIL_BYTES
-        text = raw.decode("utf-8", errors="replace")
-        if truncated:
-            # A byte seek lands mid-line. Drop that fragment rather than publish
-            # it as though the run had written a line beginning there.
-            text = text.split("\n", 1)[1] if "\n" in text else ""
-        lines = text.splitlines()
-        if len(lines) > STATUS_TAIL_LINES:
-            lines = lines[-STATUS_TAIL_LINES:]
-            truncated = True
-        return {
-            "output_tail": [self._redact(line) for line in lines],
-            "output_truncated": truncated,
-            "output_at": time.strftime(
-                "%Y-%m-%dT%H:%M:%S%z", time.localtime(modified)
-            ),
-        }
+        The redaction is passed in rather than lived there: the token is this
+        process's, and the module that renders a log has no business holding a
+        credential to compare against.
+        """
+        return output_tail(log_file, self._redact)
 
     def _redact(self, line: str) -> str:
         """The Vikunja token never travels out in a run's output.
