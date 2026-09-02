@@ -19,6 +19,15 @@ the board shows, what every worktree already in the investment checkout uses,
 and the only number a person asking "where did #714's run go" has. The row id
 appears only for a ticket Vikunja reported no index for, spelled ``row-`` so the
 two numbering spaces can never be read as one.
+
+**So ``run_name`` is what one run is CALLED, not just where it works
+(task 762).** The run log was the last human-facing artifact still named from
+the row id: board ticket #714's output went to ``task-715-<stamp>.log``, a
+filename naming a different, real ticket, sitting one directory away from the
+``task-714`` worktree the same run was working in. Two spellings of one run is
+how a reader quotes the wrong number, which is the whole of task 659. The
+worktree, the branch and the run log now come from this one function, so they
+cannot disagree; the lock keeps the row id and keeps it internal.
 """
 
 from __future__ import annotations
@@ -53,15 +62,15 @@ class WorktreeError(RuntimeError):
     """
 
 
-def worktree_name(task_number: int | None, task_id: int) -> str:
-    """The directory and branch stem for one ticket's run."""
+def run_name(task_number: int | None, task_id: int) -> str:
+    """What one ticket's run is called: its directory, branch and log stem."""
     if task_number is not None:
         return f"task-{task_number}"
     return f"row-{task_id}"
 
 
 def branch_name(task_number: int | None, task_id: int) -> str:
-    return f"{BRANCH_PREFIX}{worktree_name(task_number, task_id)}"
+    return f"{BRANCH_PREFIX}{run_name(task_number, task_id)}"
 
 
 def _git(run: Callable[..., subprocess.CompletedProcess], repo_root: Path, *args: str):
@@ -90,7 +99,7 @@ def ensure_worktree(
     creates and the other reuses, and the lock — not this — decides which run
     actually starts.
     """
-    name = worktree_name(task_number, task_id)
+    name = run_name(task_number, task_id)
     path = repo_root / WORKTREES_DIR / name
 
     # A registered worktree carries a `.git` FILE pointing at the parent's

@@ -71,8 +71,11 @@ LAUNCHED = {
     "reference": f"#{READY}",
     "pid": 4242,
     "started_at": "2026-09-01T10:15:00+0200",
-    # The row id is in this path, which is why it is not in what we return.
-    "log_file": f"/home/glen/.local/state/vikunja-claude/runs/task-{READY_ROW_ID}-20260901-101500.log",
+    # A host path, which is why it is not in what we return. It is named for
+    # the BOARD, like the worktree and the branch (task 762) — this fixture used
+    # to spell the row id here, and copying a name the runner no longer writes
+    # would test this boundary against a runner that does not exist.
+    "log_file": f"/home/glen/.local/state/vikunja-claude/runs/task-{READY}-20260901-101500.log",
     "workdir": "/home/glen/stacks/investment",
     "executor": DEFAULT_EXECUTOR,
     "model": None,
@@ -94,7 +97,7 @@ STATUS = {
     "workdir": "/home/glen/stacks/investment",
     # Both of these are the runner's to send and this side's to withhold.
     "pid": 2918949,
-    "log_file": f"/home/glen/.local/state/vikunja-claude/runs/task-{READY_ROW_ID}-20260901-143042.log",
+    "log_file": f"/home/glen/.local/state/vikunja-claude/runs/task-{READY}-20260901-143042.log",
     "finished_at": None,
     "exit_status": None,
     "timed_out": False,
@@ -393,18 +396,24 @@ class TestTheAnswerCarriesNoRowIdAndNoHostLog(RunnerTestCase):
                 ])
 
     def test_the_log_path_the_runner_returns_is_not_republished(self):
-        """Its filename is `task-<row id>-<stamp>.log`, so passing the runner's
-        answer through would have published the id in a path a reader copies.
+        """A host path is not something this boundary hands out.
 
-        Asked as "no value carries that path", not "the digits do not appear":
-        a bare digit is in the timestamp too, and an assertion that cannot fail
-        for the right reason cannot pass for one either.
+        It used to spell the row id (`task-<row id>-<stamp>.log`), and that was
+        the first reason to withhold it. Task 762 named it for the board, so
+        that reason is gone and this one is not: the path names a directory on
+        the host, and nothing a caller of this boundary can do with it.
+
+        The row-id substring assertion went with the reason for it. Against a
+        board-named fixture it could no longer fail, and an assertion that
+        cannot fail for the right reason cannot pass for one either — the guard
+        that still bites is `test_the_row_id_is_in_the_request_and_in_nothing_
+        that_comes_back`.
         """
         started = self.start()
         self.assertNotIn("log_file", started)
         blob = json.dumps(started)
-        self.assertNotIn(f"task-{READY_ROW_ID}-", blob)
         self.assertNotIn(".log", blob)
+        self.assertNotIn(".local/state", blob)
 
     def test_the_pid_is_not_republished_either(self):
         """Nothing a caller of this boundary can do with it."""
@@ -713,12 +722,15 @@ class TestTheStatusCarriesNoRowIdAndNoHostLog(RunnerTestCase):
         self.assertNotIn(STATUS["pid"], list(answer.values()))
 
     def test_the_log_path_is_not_republished(self):
-        """`task-<row id>-<stamp>.log` spells the id this surface does not
-        publish (task 663) — which is also why the tail of that file comes
-        back as text rather than as somewhere to go and read it."""
+        """A path on the runner's host, which is why the tail of that file comes
+        back as text rather than as somewhere to go and read it.
+
+        It spelled the row id too until task 762 named it for the board; the
+        withholding is unchanged and the reason is now the narrower one.
+        """
         answer = self.read()
         self.assertNotIn("log_file", answer)
-        self.assertNotIn(f"task-{READY_ROW_ID}-", json.dumps(answer))
+        self.assertNotIn(".log", json.dumps(answer))
         self.assertNotIn(".local/state", json.dumps(answer))
 
     def test_the_row_id_is_in_the_request_and_in_nothing_that_comes_back(self):

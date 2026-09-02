@@ -38,6 +38,7 @@ from unittest import mock
 
 from vikunja_claude.launcher import AlreadyRunning, Launcher, pid_alive
 from vikunja_claude.vikunja import Ticket
+from vikunja_claude.worktree import run_name
 
 from .support import make_config, make_repo
 
@@ -129,7 +130,7 @@ class TimeoutTestCase(unittest.TestCase):
             except (ProcessLookupError, PermissionError):
                 pass
         for thread in threading.enumerate():
-            if thread.name.startswith("reaper-task-"):
+            if thread.name.startswith("reaper-"):
                 thread.join(timeout=30)
 
     # -- reading what the run left behind ----------------------------------
@@ -151,8 +152,13 @@ class TimeoutTestCase(unittest.TestCase):
         return self.launcher._lock_path(TICKET.task_id).exists()
 
     def join_reaper(self) -> None:
+        # The reaper is named for the run, which is named for the BOARD — the
+        # same name as its worktree, its branch and its log (task 762). Derived
+        # rather than spelled, so this fixture cannot go on naming the row id
+        # after the runner has stopped.
+        wanted = f"reaper-{run_name(TICKET.task_number, TICKET.task_id)}"
         for thread in threading.enumerate():
-            if thread.name == f"reaper-task-{TICKET.task_id}":
+            if thread.name == wanted:
                 thread.join(timeout=30)
                 self.assertFalse(thread.is_alive(), "the reaper never returned")
 
