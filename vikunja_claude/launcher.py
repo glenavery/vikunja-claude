@@ -83,17 +83,40 @@ class LaunchRecord:
 STATUS_TAIL_LINES = 40
 STATUS_TAIL_BYTES = 8000
 
-#: What a run that started can be, once it is no longer running. `lost` is the
-#: one worth naming: the process is gone and the runner never recorded how it
-#: ended, which is what a restart of this service leaves behind, because the
-#: thread that writes the terminal event lives in this process and dies with it.
-#: Reporting that as `finished` would claim an exit nobody observed, and as
-#: `failed` would claim a failure the runner never saw.
+#: What a run that started can be, once it is no longer running. Two of these
+#: name a run whose ending nobody watched, and neither reports an outcome:
+#: `finished` would claim an exit nobody observed and `failed` a failure the
+#: runner never saw. They differ in what has been DONE about it, which is what
+#: a reader has to act on (task 757):
+#:
+#: * `lost` — the ending is still unaccounted for. The lock may still be held,
+#:   nothing has been said on the board, and the next startup will act on it.
+#: * `reconciled` — that same run, closed out (task 754): the ending is
+#:   recorded as missed, the lock is released and nothing further will happen
+#:   to it. The word is about the accounting, never about the outcome, which
+#:   remains exactly as unknown as it was.
+#:
+#: The two used to be one word, so a run that had been closed out was reported
+#: as one nothing had been done about — and the note read out for it said the
+#: ticket was probably still In Progress, when reconciliation is what moved it.
 RUN_RUNNING = "running"
 RUN_FINISHED = "finished"
 RUN_FAILED = "failed"
 RUN_LOST = "lost"
+RUN_RECONCILED = "reconciled"
 RUN_NONE = "none"
+
+#: Every state ``run_status`` can report, enumerated once so that a reader of
+#: this vocabulary — the note table on the MCP side, and the test that pins it —
+#: cannot be asked about a state that is not here or miss one that is.
+RUN_STATES = (
+    RUN_RUNNING,
+    RUN_FINISHED,
+    RUN_FAILED,
+    RUN_LOST,
+    RUN_RECONCILED,
+    RUN_NONE,
+)
 
 #: The event a reconciliation writes for a run nobody saw end (task 754). It is
 #: deliberately not `finished` and not `timeout`: both of those are *observed*
@@ -342,13 +365,20 @@ class Launcher:
                 if timed_out or finished.get("exit_status") != 0
                 else RUN_FINISHED
             )
+        elif orphaned is not None:
+            # Started, gone, and closed out. Still no outcome — reconciliation
+            # records that an ending was missed, it does not discover what the
+            # ending was — but everything that was going to happen to this run
+            # has happened: the ending is on the log, the lock is released,
+            # and the startup pass that does this also tells the board.
+            # Reported as `lost` it was indistinguishable from the case below,
+            # which is the one thing a reader has to act on differently
+            # (task 757).
+            state = RUN_RECONCILED
         else:
-            # Started and gone. `lost` either way, and deliberately the same
-            # word whether or not it has been reconciled yet: reconciliation
-            # records the ending, it does not discover what the ending was.
-            # What changes is that it is now a CLOSED fact with a time on it,
-            # rather than an open-ended inference from a missing record
-            # (task 754).
+            # Started and gone, with nothing yet said about it. The lock may
+            # still be held; the next startup, or the next read that is allowed
+            # to reclaim, will close it out.
             state = RUN_LOST
 
         # The lock is the fallback only for the window between claiming the slot

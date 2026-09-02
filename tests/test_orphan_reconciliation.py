@@ -14,9 +14,11 @@ Two properties carry the design, and the tests are mostly about them:
 * **A recorded ending is not an observed one.** Reconciliation writes
   `orphaned`, never `finished` and never `timeout`, because it did not watch
   the process and has no exit status to report. Recording either would invent
-  the outcome this exists to stop inventing. `lost` therefore stays `lost`
-  after reconciliation — what changes is that it becomes a closed, dated fact
-  instead of an open-ended inference from a missing record.
+  the outcome this exists to stop inventing. So a reconciled run still reports
+  no exit status and no timeout — what changes is that its ending is a closed,
+  dated fact instead of an open-ended inference from a missing record, and
+  task 757 gives that its own word: `lost` is a run nothing has been done
+  about, `reconciled` is this one.
 * **The local half and the board half fail differently.** The ending is
   recorded and the lock released whatever the board does, because a Vikunja
   that is down must not stop the service starting or leave a lock claiming a
@@ -145,8 +147,16 @@ class TestARestartClosesOutTheRunItKilled(RestartTestCase):
         self.assertNotIn("succeeded", text)
 
     def test_the_status_read_now_shows_a_closed_ending(self):
-        """`lost` stays `lost` — reconciliation records the ending, it does not
-        discover what the ending was. What changes is that it has a time."""
+        """The same run, read before and after, through the real read path.
+
+        Both states describe a run nobody watched end; they differ in what has
+        been done about it, which is what a reader acts on (task 757). One is
+        still unaccounted for — the lock may be held and the board has not been
+        told. The other is closed: ending recorded, lock released, ticket sent
+        back. Reported as the same word, a caller was told of the second that
+        the ending was never recorded and the ticket was probably still In
+        Progress, and reconciliation is what moved it.
+        """
         self.launch()
         before = self.restart().launcher.run_status(READY_ROW_ID)
         self.assertEqual(before["state"], "lost")
@@ -156,11 +166,40 @@ class TestARestartClosesOutTheRunItKilled(RestartTestCase):
         service.reconcile_orphaned_runs()
         after = service.launcher.run_status(READY_ROW_ID)
 
-        self.assertEqual(after["state"], "lost")
+        self.assertEqual(after["state"], "reconciled")
         self.assertIsNotNone(after["reconciled_at"])
         # Still no exit status, and still not a timeout: neither was observed.
+        # The word changed because the accounting did, not the outcome.
         self.assertIsNone(after["exit_status"])
         self.assertFalse(after["timed_out"])
+        self.assertFalse(after["alive"])
+
+    def test_the_state_alone_tells_the_two_apart(self):
+        """Without reading `reconciled_at` beside it. A caller branching on the
+        state is the case this exists for: the note read out for a run, and
+        what a reader should do about it, are both keyed on that one word."""
+        self.launch()
+        unreconciled = self.restart().launcher.run_status(READY_ROW_ID)
+
+        service = self.restart()
+        service.reconcile_orphaned_runs()
+        reconciled = service.launcher.run_status(READY_ROW_ID)
+
+        self.assertNotEqual(unreconciled["state"], reconciled["state"])
+
+    def test_reading_a_reconciled_run_still_writes_nothing(self):
+        """The read surface stays read-only on both sides of the split. It
+        reads the lock rather than reclaiming it, precisely so that the
+        evidence of an un-reaped run survives being asked about."""
+        self.launch()
+        service = self.restart()
+        service.reconcile_orphaned_runs()
+        log_before = self.config.log_path.read_bytes()
+
+        service.launcher.run_status(READY_ROW_ID)
+
+        self.assertEqual(self.config.log_path.read_bytes(), log_before)
+        self.assertFalse(self.lock_path().exists())
 
 
 class TestWhatReconciliationLeavesAlone(RestartTestCase):

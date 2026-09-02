@@ -1615,8 +1615,22 @@ class McpService:
             "as anything here can tell. The usual cause is the launcher "
             "service being restarted while the run was in flight, which kills "
             "the run and the thread that would have recorded its ending. "
-            "Expect the ticket to still be sitting In Progress with nothing "
-            "reported on it."
+            "Nothing has been done about it yet: expect the ticket to still "
+            "be sitting In Progress with nothing reported on it, until the "
+            "runner next starts and closes the run out."
+        ),
+        "reconciled": (
+            "The run started, its process is gone, and the runner has closed "
+            "it out: the missed ending is recorded, the lock is released, and "
+            "nothing further will happen to this run. That is an account of "
+            "the run, not an outcome for it — nobody observed how it ended, "
+            "so it is neither finished nor failed and there is no exit "
+            "status. A run closed out by the runner's startup pass is also "
+            "commented on and moved back to Ready, leaving alone a ticket "
+            "somebody had already moved on — so read the bucket in this "
+            "answer for the column it is actually in. Treat any work the run "
+            "may have done as unverified and check the repository before "
+            "starting it again."
         ),
         "none": (
             "The runner has no record of a run for this task. Either it was "
@@ -1676,6 +1690,10 @@ class McpService:
             "finished_at": status.get("finished_at"),
             "exit_status": status.get("exit_status"),
             "timed_out": bool(status.get("timed_out")),
+            # When the runner closed out a run it lost, and never an ending it
+            # watched: a reconciled run has no `finished_at`, so without this
+            # the one time anybody can put on it would not travel (task 757).
+            "reconciled_at": status.get("reconciled_at"),
             "workdir": status.get("workdir"),
             "recent_output": status.get("output_tail") or [],
             "recent_output_truncated": bool(status.get("output_truncated")),
@@ -1826,15 +1844,21 @@ class McpService:
                     "It reads and changes nothing, so it takes one call and no "
                     "approval. "
                     "It answers with the run's state — running, finished, "
-                    "failed, lost, or none if the runner has no record of one "
-                    "— whether the process is still alive, which executor and "
-                    "model it is on, when it started and finished, and a "
-                    "bounded tail of the run's own recent output, which is "
-                    "what distinguishes a run still thinking from one in its "
-                    "tests, its commit or its closing report. "
-                    "'lost' specifically means the run's process is gone and "
-                    "the runner never recorded how it ended, so the ticket is "
-                    "probably still In Progress with nothing reported on it. "
+                    "failed, lost, reconciled, or none if the runner has no "
+                    "record of one — whether the process is still alive, "
+                    "which executor and model it is on, when it started and "
+                    "finished, and a bounded tail of the run's own recent "
+                    "output, which is what distinguishes a run still thinking "
+                    "from one in its tests, its commit or its closing report. "
+                    "'lost' and 'reconciled' both mean the run's process is "
+                    "gone and nothing observed how it ended; they differ in "
+                    "what has been done about it. 'lost' is still "
+                    "unaccounted for, so the ticket is probably sitting In "
+                    "Progress with nothing reported on it. 'reconciled' has "
+                    "been closed out by the runner, which on startup also "
+                    "comments on the ticket and moves it back to Ready, and "
+                    "needs nothing further — though whatever the run may have "
+                    "done is unverified. "
                     "This tool CANNOT pause, kill, retry or resume a run, and "
                     "there is nothing on this connection that can: how a run "
                     "is performed and when it stops belong to the runner."
