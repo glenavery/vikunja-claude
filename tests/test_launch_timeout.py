@@ -1,4 +1,16 @@
-"""What the reaper does when a run outstays the time limit (task 758).
+"""What the reaper does about time: nothing by default (817), and this when asked (758).
+
+**There is no elapsed-time ceiling unless an operator configures one** (task
+817). `NoElapsedTimeCeiling` and `TheCeilingSetting` at the foot of this file
+own that half: a run ends when its executor exits, `wait()` is given no
+deadline rather than a large one, and task 813 — killed at the old three-hour
+default while running its final full-suite validation — is why.
+
+Everything above them is what happens when a ceiling IS set, which is still
+exactly the task 758 behaviour. That path is now a capability rather than
+something every run is subject to, so it is tested by asking for it.
+
+What the reaper does when a run outstays a configured time limit (task 758).
 
 The timeout path used to send SIGTERM to the run's process group, set the exit
 status to None, release the ticket's lock and log `finished`. Every one of those
@@ -378,6 +390,146 @@ class AProcessThatSurvivesSigkill(unittest.TestCase):
         self.assertEqual(status["state"], "reconciled")
         self.assertIsNone(status["exit_status"])
         self.assertIsNotNone(status["reconciled_at"])
+
+
+#: A child that ends on its own, and would report having been signalled if it
+#: ever were. Its exit status is a number nothing else in this file uses, so a
+#: `finished` record carrying it proves the status came from the process rather
+#: than from the reaper's own idea of an ending.
+SELF_ENDING_CHILD = """
+import signal, sys, time
+marker = sys.argv[1]
+signal.signal(signal.SIGTERM, lambda *_: open(marker + '.term', 'w').close())
+open(marker + '.ready', 'w').close()
+time.sleep(0.3)
+sys.exit(7)
+"""
+
+
+class NoElapsedTimeCeiling(unittest.TestCase):
+    """A run is not stopped because time passed (task 817).
+
+    The ceiling above is what an operator gets when they ask for one. By
+    default nobody asks, and then there is no moment at which a healthy run
+    becomes late: `wait()` is given no deadline at all, rather than a large one.
+
+    That distinction is the whole test. A run outliving three hours cannot be
+    demonstrated by waiting for three hours, and a test that watched a short
+    run finish would have passed just as well against the old three-hour
+    default. So what is asserted is that **the reaper set no deadline** — the
+    argument the old code filled in with 10,800 — alongside the ordinary ending
+    that follows from it. Task 813 was killed at exactly that ceiling while
+    running its final full-suite validation.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state_dir = Path(tmp.name)
+        self.markers = self.state_dir / "child"
+        #: Every deadline the reaper handed `wait()`, in order.
+        self.deadlines: list[float | None] = []
+        self.config = make_config(
+            self.state_dir,
+            workdir=make_repo(self.state_dir / "repo"),
+            claude_bin=sys.executable,
+            claude_args=["-c", SELF_ENDING_CHILD],
+            launch_timeout_seconds=None,
+            kill_grace_seconds=0.5,
+        )
+        self.launcher = Launcher(self.config, spawn=self._spawn_recording_waits)
+        self.addCleanup(self._join_reaper)
+
+    def _spawn_recording_waits(self, argv, **kwargs) -> subprocess.Popen:
+        """A real child whose `wait` records the deadline it was given.
+
+        Recorded on the instance rather than by patching `subprocess`, so the
+        run is the real one and the only thing observed is the argument the
+        reaper chose.
+        """
+        process = subprocess.Popen(argv, **kwargs)
+        original = process.wait
+
+        def recording_wait(timeout=None):
+            self.deadlines.append(timeout)
+            return original(timeout=timeout)
+
+        process.wait = recording_wait  # type: ignore[method-assign]
+        return process
+
+    def _join_reaper(self) -> None:
+        for thread in threading.enumerate():
+            if thread.name.startswith("reaper-"):
+                thread.join(timeout=30)
+
+    def _events(self) -> list[dict]:
+        try:
+            text = self.config.log_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        return [json.loads(line) for line in text.splitlines()]
+
+    def _event(self, name: str) -> dict | None:
+        return next((r for r in self._events() if r.get("event") == name), None)
+
+    def test_the_reaper_gives_the_wait_no_deadline(self):
+        """The regression. Against the old default this records 10800."""
+        self.launcher.launch(TICKET, lambda workdir: str(self.markers))
+        self._join_reaper()
+
+        self.assertEqual(self.deadlines, [None])
+
+    def test_the_run_ends_by_itself_and_keeps_its_own_exit_status(self):
+        self.launcher.launch(TICKET, lambda workdir: str(self.markers))
+        self._join_reaper()
+
+        self.assertIsNone(self._event("timeout"), "nothing timed out")
+        self.assertEqual(self._event("finished")["exit_status"], 7)
+
+    def test_nothing_signals_a_run_that_is_merely_taking_a_while(self):
+        """The child records its own SIGTERM, so the absence of that marker is
+        the process's account of it rather than the runner's."""
+        self.launcher.launch(TICKET, lambda workdir: str(self.markers))
+        self._join_reaper()
+
+        self.assertFalse(Path(f"{self.markers}.term").exists())
+
+    def test_the_lock_is_still_released_when_it_ends(self):
+        """Removing the ceiling removes a way of ending, not the accounting."""
+        self.launcher.launch(TICKET, lambda workdir: str(self.markers))
+        self._join_reaper()
+
+        self.assertFalse(self.launcher._lock_path(TICKET.task_id).exists())
+        self.assertEqual(self.launcher.running(), [])
+
+
+class TheCeilingSetting(unittest.TestCase):
+    """`CLAUDE_LAUNCH_TIMEOUT_SECONDS` is absent unless somebody sets it.
+
+    Blank and absent are deliberately the same answer: emptying or commenting
+    out the line in `.env` is how a ceiling is removed, and reading a blank as
+    `0` would turn that gesture into "kill every run on sight".
+    """
+
+    def _config(self, **env):
+        from vikunja_claude.config import Config
+
+        with mock.patch.dict(
+            os.environ, {"VIKUNJA_API_TOKEN": "token", **env}, clear=True
+        ):
+            return Config.from_env(env_file=None)
+
+    def test_the_default_is_no_ceiling(self):
+        self.assertIsNone(self._config().launch_timeout_seconds)
+
+    def test_a_blank_value_is_no_ceiling(self):
+        config = self._config(CLAUDE_LAUNCH_TIMEOUT_SECONDS="")
+        self.assertIsNone(config.launch_timeout_seconds)
+
+    def test_a_number_still_sets_one(self):
+        """The task 758 termination path is a capability, not a default."""
+        config = self._config(CLAUDE_LAUNCH_TIMEOUT_SECONDS="900")
+        self.assertEqual(config.launch_timeout_seconds, 900)
 
 
 if __name__ == "__main__":

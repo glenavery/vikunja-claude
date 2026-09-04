@@ -910,9 +910,40 @@ exists to start, there is one of it, and `runner_url` is resolved from the
 launcher's own `VIKUNJA_CLAUDE_HOST` / `VIKUNJA_CLAUDE_PORT` so the two cannot
 name different places. A launcher that is down is a refusal the caller reads.
 
-### Stopping a run that overstayed (task 758)
+### How long a run may take: as long as it takes (task 817)
 
-A run that reaches `CLAUDE_LAUNCH_TIMEOUT_SECONDS` is stopped by the same thread
+**There is no elapsed-time ceiling.** A run ends when its executor exits, or
+when something stops it explicitly; the runner has no opinion about how long
+that should be, because it has no way to form one — a ticket that needs four
+hours of test runs is not thereby unhealthy.
+
+`CLAUDE_LAUNCH_TIMEOUT_SECONDS` used to default to 10,800 seconds, so every run
+carried a three-hour ceiling whether or not anyone had asked for one. **Task 813
+was killed by that default at the moment it reached final full-suite
+validation** — the work was valid and uncommitted, and a run stopped mid-flight
+reports nothing, so the ticket was left stranded In Progress. That is the shape
+of the cost: the ceiling does its damage at the end of a long run, which is
+precisely where the most has been invested and the least is recoverable.
+
+Unset now, and **blank and absent mean the same thing**, so emptying or
+commenting out the line is how a ceiling is removed. `None` reaches
+`subprocess.wait(timeout=None)` unchanged, where it already means *wait for the
+process* — so "no limit" is the absence of a deadline rather than a very large
+one. There is no number to be reached, and nothing below runs.
+
+Orphan reconciliation is unaffected and is what still covers the case this used
+to be reached for: a run whose process is gone is reclaimed from its lock on the
+next read, exactly as before.
+
+### Stopping a run that overstayed, when a ceiling is set (task 758)
+
+Everything in this section applies **only when an operator sets
+`CLAUDE_LAUNCH_TIMEOUT_SECONDS`**. It is a capability now, not the lifetime of
+every run; setting a number is how you ask for it, and `0` is a ceiling already
+spent when the run starts, which is how the tests reach this path without
+waiting out a real one.
+
+A run that reaches that ceiling is stopped by the same thread
 that has been watching it. What that thread used to do was send SIGTERM to the
 run's process group, release the ticket's lock and log `finished` — none of
 which waited for anything. **`finished` there meant a signal had been sent**,
@@ -924,8 +955,10 @@ kept its environment, and kept editing — while the lock was gone, so nothing
 recorded that anything was running and the same ticket could be launched
 straight back into the directory it was still writing to; the status read said
 `failed`, because a timeout implies it; and reconciliation could not help,
-because it acts on locks and this run no longer had one. Never observed — no run
-has hit the three-hour ceiling — found by reading.
+because it acts on locks and this run no longer had one. Found by reading, and
+unobserved at the time — the three-hour ceiling had not yet been reached by any
+run. It was reached later, by task 813, which is what removed the ceiling from
+the default path (task 817); this failure mode was already fixed by then.
 
 **Two orderings, and they are the whole of the fix.**
 

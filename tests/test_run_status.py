@@ -115,7 +115,10 @@ class TestTheStateOfARun(RunStatusTestCase):
         timeout record, so both are read.
         """
         self.launch()
-        self.end("timeout", after_seconds=10800)
+        # A ceiling an operator configured. There is no default one (task 817),
+        # so this number is an example rather than the lifetime of a run — it
+        # used to be 10800 here, which read as "what every run gets".
+        self.end("timeout", after_seconds=900)
         self.end("finished", exit_status=None)
 
         status = self.status()

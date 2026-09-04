@@ -710,6 +710,14 @@ class Launcher:
         The id releases the lock; the reference is what the log says, because
         `recent()` is rendered on the console a human reads (task 659).
         """
+        # `None` is the default and means there is no elapsed-time ceiling
+        # (task 817): it reaches `wait()` unchanged, where it already means
+        # "wait for the process", so the no-limit case is the ABSENCE of a
+        # deadline rather than a very large one. Nothing below runs — there is
+        # no moment at which a healthy run becomes late. The ceiling used to be
+        # three hours by default, and task 813 was killed by it at final
+        # full-suite validation, which is a run stopped exactly when it had the
+        # most to lose and nothing left to report it.
         try:
             exit_status = process.wait(timeout=self.config.launch_timeout_seconds)
         except subprocess.TimeoutExpired:
