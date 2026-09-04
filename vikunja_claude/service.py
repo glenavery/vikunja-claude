@@ -105,22 +105,43 @@ class TicketService:
         project_id, view_id = self._ids()
         return self.client.oldest_ready_ticket(project_id, view_id)
 
-    def prompt_for(self, ticket: Ticket, workdir: Path | None = None) -> str:
+    def prompt_for(
+        self,
+        ticket: Ticket,
+        workdir: Path | None = None,
+        comments: list[dict] | None = None,
+    ) -> str:
         """The prompt for this ticket, naming the directory the run will use.
 
         ``workdir`` is the run's worktree, known only once the launcher has made
         it. It defaults to the repository root for `preview`, which shows what a
         run would be told without creating anything: a preview that made a
         worktree would leave one behind for every look.
+
+        ``comments`` are the ticket's comments, already read (task 818). None
+        means "not read yet, read them now" -- and it is a distinct case from
+        the empty list, which means the ticket has none. A caller that has
+        already read them passes them in, so the comments a preview *shows* are
+        the same ones it puts in the prompt it shows beside them, and so a
+        launch reads the board once rather than once per surface.
         """
         return build_prompt(
             ticket,
             workdir=workdir or self.config.workdir,
             project_title=self.config.project_title,
+            comments=(
+                self.client.comment_views(ticket.task_id)
+                if comments is None
+                else comments
+            ),
         )
 
     def preview(self, ticket: Ticket) -> dict:
         active = self.launcher.active_launch(ticket.task_id)
+        # Read once and used twice: the comments this payload publishes are the
+        # same objects rendered into the prompt beside them, so a preview cannot
+        # show a reader one brief and the run a different one (task 818).
+        comments = self.client.comment_views(ticket.task_id)
         return {
             # The board number and its rendered form, and no row id (task 659).
             "number": ticket.task_number,
@@ -132,13 +153,13 @@ class TicketService:
             "done": ticket.done,
             "workdir": str(self.config.workdir),
             "description": ticket.description,
-            "prompt": self.prompt_for(ticket),
+            "prompt": self.prompt_for(ticket, comments=comments),
             "running": active,
             # The ticket as it stands NOW, not as it was filed. A comment is
             # where the filer corrects or redirects a brief mid-flight, and a
             # preview that showed only the description let a run work from a
             # version the human had already moved on from.
-            "comments": self.client.comment_views(ticket.task_id),
+            "comments": comments,
         }
 
     # -- reconciliation (task 754) -----------------------------------------
@@ -220,6 +241,14 @@ class TicketService:
     def work(self, ticket: Ticket, executor: str | None = None) -> dict:
         """Move the ticket to In Progress, then launch its executor on it."""
         chosen = self.executor_for(executor)
+        # Read here, before anything is moved or launched, for the same reason
+        # the executor is resolved above: a board that cannot be read is a
+        # refusal that leaves the board alone. The comments are part of the
+        # brief, not decoration on it (task 818) -- a run given the description
+        # alone cannot see the review that rejected the last one -- so failing
+        # to read them is a launch that must not happen, never a launch with
+        # the missing half quietly left out.
+        comments = self.client.comment_views(ticket.task_id)
         moved_to = None
         if ticket.bucket_title != IN_PROGRESS:
             project_id, view_id = self._ids()
@@ -231,7 +260,9 @@ class TicketService:
         # The prompt is built by the launcher, once it knows the worktree it
         # made, so the path the run is told is the path it is given (task 756).
         record: LaunchRecord = self.launcher.launch(
-            ticket, lambda worktree: self.prompt_for(ticket, worktree), chosen
+            ticket,
+            lambda worktree: self.prompt_for(ticket, worktree, comments),
+            chosen,
         )
         return {
             "launched": True,

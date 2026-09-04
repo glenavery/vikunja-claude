@@ -14,6 +14,7 @@ through ``vkctl.py``, which reads the token from its own environment.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Sequence
 
 from .config import PACKAGE_ROOT
 from .vikunja import Ticket
@@ -30,7 +31,7 @@ Repository: {workdir}
 --- BEGIN TICKET DESCRIPTION ---
 {description}
 --- END TICKET DESCRIPTION ---
-
+{comments}
 Rules for this run:
 
 1. SCOPE. Do only what ticket {reference} asks. Do not fix unrelated bugs, do
@@ -73,6 +74,57 @@ Start by reading the repository's CLAUDE.md and the files the ticket names.
 """
 
 
+COMMENTS_TEMPLATE = """
+--- BEGIN TICKET COMMENTS ({count}, oldest first) ---
+These are the ticket as it stands NOW, and the description above is as it was
+filed. A comment is where the filer corrects, redirects or REJECTS the brief
+after it was written, so a later comment overrides an earlier one and overrides
+the description. If one of them rejects work an earlier run already did, that
+rejection is what this run is for -- re-checking the rejected work and
+reporting it again is not.
+
+{body}
+--- END TICKET COMMENTS ---
+"""
+
+
+def _rendered_comment(position: int, total: int, comment: dict[str, Any]) -> str:
+    """One comment, with enough around it to place it in the sequence.
+
+    Author and time are stated because "who said this, and was it before or
+    after the run that claimed to finish" is the question a continuation run is
+    actually asking. Each is labelled when Vikunja did not send one rather than
+    left blank, so a missing author cannot read as the previous line's.
+    """
+    author = comment.get("author") or "an unknown author"
+    created = comment.get("created") or "an unknown time"
+    text = (comment.get("text") or "").strip() or "(empty comment)"
+    return f"[comment {position} of {total}] {author} at {created}:\n{text}"
+
+
+def _comments_section(comments: Sequence[dict[str, Any]]) -> str:
+    """The comment block for the prompt, or nothing at all when there are none.
+
+    Order is whatever ``VikunjaClient.comment_views`` returned -- oldest first,
+    the same sequence the /task page and the MCP publish. It is not re-sorted
+    here: the sequence is one fact about a ticket, and a second definition of
+    it in the prompt could disagree with the one a human read on the page.
+
+    An uncommented ticket gets the prompt it has always had. Absence is not
+    ambiguous, because a run only ever sees this prompt when the comments were
+    read successfully -- ``TicketService`` reads them before anything is moved
+    or launched, and a read that fails refuses the launch.
+    """
+    if not comments:
+        return ""
+    total = len(comments)
+    body = "\n\n".join(
+        _rendered_comment(position, total, comment)
+        for position, comment in enumerate(comments, start=1)
+    )
+    return COMMENTS_TEMPLATE.format(count=total, body=body)
+
+
 def _selector(ticket: Ticket) -> str:
     """How the run should address this ticket on the command line.
 
@@ -92,11 +144,21 @@ def build_prompt(
     ticket: Ticket,
     workdir: Path,
     project_title: str,
+    comments: Sequence[dict[str, Any]],
     vkctl_path: Path = VKCTL,
 ) -> str:
+    """The complete brief for one run: the ticket, and everything said on it.
+
+    ``comments`` has no default on purpose (task 818). The defect this closes
+    was a relaunch that received the description alone, revalidated the commit
+    a review had already rejected and sent the ticket back to Waiting -- and a
+    default of ``[]`` would let any future caller reintroduce exactly that, in
+    the one shape where it looks like there was nothing to say.
+    """
     description = ticket.description.strip() or "(no description on the ticket)"
     return TEMPLATE.format(
         project=project_title,
+        comments=_comments_section(comments),
         reference=ticket.board_reference,
         commit_ref=ticket.commit_ref,
         summary=ticket.summary,
