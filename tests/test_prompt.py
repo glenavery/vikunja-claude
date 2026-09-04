@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from .fakes import task
@@ -51,9 +52,23 @@ class PromptGeneration(ServiceTestCase):
         self.assertIn("BLOCKED:", self.prompt)
         self.assertIn("vkctl.py move --number 8 Waiting", self.prompt)
 
-    def test_success_path_moves_to_done_with_a_comment(self):
+    def test_success_path_moves_to_waiting_never_done(self):
+        """A finished run has a commit on its own worktree branch and nothing
+        else: the runner does not merge, and merging is the human step. Done
+        would claim the work reached main, so the success path stops at
+        Waiting and no path in the prompt moves a ticket to Done."""
         self.assertIn("vkctl.py comment --number 8", self.prompt)
-        self.assertIn("vkctl.py move --number 8 Done", self.prompt)
+        self.assertIn("vkctl.py move --number 8 Waiting", self.prompt)
+        self.assertIsNone(
+            re.search(r"move\s+--number\s+8\s+Done", self.prompt),
+            "the prompt still tells a successful run to move the ticket to Done",
+        )
+
+    def test_success_comment_names_the_commit_and_the_merge_still_owed(self):
+        """The comment is what a human reads to know what is left, so it must
+        carry the sha and say the merge into main has not happened."""
+        self.assertIn("the commit sha", self.prompt)
+        self.assertIn("merged into main before this ticket is Done", self.prompt)
 
     def test_the_prompt_hands_the_run_no_row_id_at_all(self):
         """THE DEFECT THIS GUARDS, and it is the one task 659 was filed for.

@@ -56,8 +56,12 @@ Rules for this run:
    helper already has what it needs.
 
    If you finished the ticket:
-       python3 {vkctl} comment {selector} "<what you changed, which tests you ran, the commit sha>"
-       python3 {vkctl} move {selector} Done
+       python3 {vkctl} comment {selector} "<what you changed, which tests you ran, the commit sha, and that the commit is on branch {branch} and still has to be merged into main before this ticket is Done>"
+       python3 {vkctl} move {selector} Waiting
+
+   Waiting, not Done: work that is committed only on {branch} is not merged,
+   and merging is the human step rule 3 names. Done belongs to whoever merges
+   it into main, after this run has ended.
 
    If you are blocked and cannot finish:
        python3 {vkctl} comment {selector} "BLOCKED: <what is blocking you and what you need>"

@@ -206,8 +206,10 @@ isn't found.
 - requires a commit referencing `(#NN)`, or `(vikunja task <id>)` when the
   title carries no `#NN` prefix;
 - **forbids pushing** — no push, no PR, no remote;
-- tells Claude to comment and move the ticket to **Waiting** if blocked, or to
-  comment and move it to **Done** if it finished.
+- tells Claude to comment and move the ticket to **Waiting** whether it
+  finished or is blocked — a finished run has committed only to its own
+  worktree branch, so its comment names the sha and the merge into `main` that
+  is still owed. **Done** is set by whoever merges, after the run has ended.
 
 ## Token handling
 
