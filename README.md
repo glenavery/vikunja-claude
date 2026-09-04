@@ -201,6 +201,9 @@ isn't found.
 
 - identifies the ticket (reference, task id, Vikunja URL, repository);
 - includes the complete ticket description, inside explicit delimiters;
+- includes **every comment on the ticket**, oldest first, in their own
+  delimited block with each author and timestamp, and says that a later comment
+  overrides an earlier one and overrides the description (task 818);
 - restricts work to that one ticket;
 - requires tests, and forbids weakening existing ones;
 - requires a commit referencing `(#NN)`, or `(vikunja task <id>)` when the
@@ -210,6 +213,33 @@ isn't found.
   finished or is blocked — a finished run has committed only to its own
   worktree branch, so its comment names the sha and the merge into `main` that
   is still owed. **Done** is set by whoever merges, after the run has ended.
+
+### The comments are part of the brief
+
+A relaunch is the normal case, and the reason a ticket is being relaunched is
+almost always written in a comment on it. The prompt used to carry the
+description alone, so a second run received the ticket as **filed** rather than
+as it **stands** — task #813 was relaunched after a review rejected its first
+commit, saw no review, re-checked the rejected commit, agreed with itself and
+went back to Waiting. Nothing malfunctioned; the question was out of date.
+
+Two rules hold this closed, and both live in `TicketService`:
+
+- **They are read at launch time**, before the ticket is moved and before the
+  worktree exists, so a comment added between two runs of one ticket is in the
+  second run's prompt. A preview reads them once and renders the same objects
+  into both the payload and the prompt it shows beside it, so a human cannot be
+  shown one brief while the run gets another.
+- **A read that fails refuses the launch.** Incomplete context is not a
+  degraded run, it is the defect above, and it is invisible from the outside.
+  The refusal happens before anything moves, so it leaves the board alone — the
+  same reasoning as resolving the executor first. `build_prompt`'s `comments`
+  argument has no default for the same reason: omitting it is a `TypeError`,
+  not a silently empty section.
+
+An uncommented ticket gets no block at all and the prompt it has always had.
+That is unambiguous rather than blank, because a run only ever sees this prompt
+when the comments were read successfully.
 
 ## Token handling
 
