@@ -215,14 +215,10 @@ class TicketService:
         name or a broken local seat is a refusal that leaves the board alone —
         rather than a ticket sitting in In Progress with nothing running.
         """
-        return resolve(
-            name or self.config.executor,
-            workdir=self.config.workdir,
-            local_base_url=self.config.local_executor_base_url,
-        )
+        return resolve(name or self.config.executor, self.config)
 
     def work(self, ticket: Ticket, executor: str | None = None) -> dict:
-        """Move the ticket to In Progress, then launch Claude Code for it."""
+        """Move the ticket to In Progress, then launch its executor on it."""
         chosen = self.executor_for(executor)
         moved_to = None
         if ticket.bucket_title != IN_PROGRESS:

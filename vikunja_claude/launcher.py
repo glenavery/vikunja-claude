@@ -1,4 +1,8 @@
-"""Launch Claude Code for one ticket, at most once at a time.
+"""Launch one ticket's harness, at most once at a time.
+
+Which harness that is belongs to the executor, not here (task 810): this module
+spawns ``executor.argv(prompt)`` and cares only that it is one process, in the
+ticket's worktree, holding the ticket's lock.
 
 Concurrency is guarded by a per-ticket lock file created with O_EXCL, so the
 guard survives a restart of this service. A lock whose PID is no longer alive
@@ -21,7 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import Config
-from .executors import DEFAULT_EXECUTOR, Executor
+from .executors import DEFAULT_EXECUTOR, Executor, claude_executor
 from .run_output import tail as output_tail
 from .worktree import WorktreeError, ensure_worktree, run_name
 from .vikunja import Ticket
@@ -538,11 +542,12 @@ class Launcher:
     ) -> LaunchRecord:
         """One run for one ticket, in a worktree of its own.
 
-        ``executor`` decides only which model the launched Claude Code drives,
-        as extra environment for the child. Everything else about a launch — the
-        binary, the arguments, the working directory, the lock, the log, the
-        reap — is the same whichever model is behind it, which is why there is
-        one launch path rather than one per model.
+        ``executor`` decides what binary is spawned and what model it talks to —
+        an argv and extra environment for the child. Everything else about a
+        launch is the same whichever executor ran: the worktree, the prompt, the
+        lock, the log, the reap and the ``vkctl.py`` report-back are the
+        runner's, which is why there is one launch path rather than one per
+        harness (task 810).
 
         ``build_prompt`` is a callable rather than the prompt itself because the
         prompt names the directory the run works in, and that directory does not
@@ -550,7 +555,7 @@ class Launcher:
         the path in the prompt is the path the child is actually given: they
         cannot disagree.
         """
-        executor = executor or Executor(name=DEFAULT_EXECUTOR)
+        executor = executor or claude_executor(self.config)
         with self._mutex:
             existing = self.active_launch(ticket.task_id)
             if existing is not None:
@@ -609,11 +614,7 @@ class Launcher:
             try:
                 handle = log_file.open("w", encoding="utf-8")
                 process = self._spawn(
-                    [
-                        self.config.claude_bin,
-                        *self.config.claude_args,
-                        build_prompt(workdir),
-                    ],
+                    executor.argv(build_prompt(workdir)),
                     cwd=str(workdir),
                     env=self._child_env(ticket, executor),
                     stdin=subprocess.DEVNULL,
@@ -629,8 +630,11 @@ class Launcher:
                     reference=ticket.board_reference,
                     error=str(exc),
                 )
+                # The executor's binary, not the configured Claude Code one: the
+                # two differ for a local run, and naming the wrong one sends a
+                # reader to install a harness that is already there (task 810).
                 raise LaunchError(
-                    f"Could not start {self.config.claude_bin!r}: {exc}"
+                    f"Could not start {executor.binary!r}: {exc}"
                 ) from exc
 
             record = LaunchRecord(

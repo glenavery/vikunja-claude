@@ -15,6 +15,15 @@ the launch now asks for ``--output-format stream-json`` (``config.py``) and this
 module renders it. The artifact, the capture path and the read surface are the
 ones that were already there.
 
+**Two harnesses, one artifact.** Since task 810 the ``local`` executor is
+OpenCode rather than Claude Code, and ``opencode run --format json`` writes the
+same kind of file in the same way: one JSON object per line, as the run happens.
+The vocabularies differ and do not overlap, so this module renders both into one
+set of labels and a reader never has to know which harness produced the line.
+What follows describes Claude Code's; OpenCode's is ``text``, ``reasoning``,
+``tool_use``, ``error`` and the two step markers, handled in
+``_render_opencode``.
+
 **What stream-json is.** One JSON object per line, written as the run happens:
 a ``system``/``init`` line, an ``assistant`` line per model turn (its content
 blocks carry text, thinking and tool calls), a ``user`` line carrying each tool
@@ -77,6 +86,17 @@ LABELS = {
     "tool_use": "tool",
     "tool_result": "tool result",
 }
+
+#: OpenCode event types that are recognised and deliberately render nothing
+#: (task 810). ``step_start`` and ``step_finish`` bracket every model turn and
+#: carry no account of what the run is doing, so a line each would be two
+#: contentless entries per turn — pushing the text, tool calls and errors that
+#: a status read exists for out of the far end of a 40-line window.
+#:
+#: Being listed here is what separates them from an event type this module has
+#: never heard of, which is still named rather than dropped: silence is a
+#: decision taken about a known event, not a gap.
+OPENCODE_SILENT = frozenset({"step_start", "step_finish"})
 
 
 def _flatten(text: str) -> str:
@@ -143,6 +163,89 @@ def _render_block(block) -> str | None:
     return f"{LABELS[kind]}: {body}" if body else None
 
 
+def _as_text(value) -> str:
+    """Whatever a harness put here, as something a reader can be shown.
+
+    Tool output is a string, a tool error may be a structured object, and the
+    point of the line is to say what happened — so a dict is serialised rather
+    than dropped for not being a string.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _render_opencode_tool(part: dict) -> list[str]:
+    """One completed OpenCode tool call as the two lines Claude Code takes two
+    events to say.
+
+    OpenCode reports a tool once, when it finishes, with the call and its result
+    in one object; Claude Code reports the call on the assistant turn and the
+    result on the next user turn. Rendering the one event as two lines keeps a
+    single vocabulary on the read side, so a person watching a status tail does
+    not have to know which harness produced it.
+    """
+    state = part.get("state")
+    state = state if isinstance(state, dict) else {}
+    try:
+        arguments = json.dumps(state.get("input", {}), ensure_ascii=False)
+    except (TypeError, ValueError):
+        arguments = str(state.get("input", ""))
+    lines = [_flatten(f"{LABELS['tool_use']}: {part.get('tool', 'tool')} {arguments}")]
+
+    if state.get("status") == "error":
+        body = _flatten(_as_text(state.get("error")))
+        lines.append(f"tool error: {body}" if body else "tool error:")
+    else:
+        body = _flatten(_as_text(state.get("output")))
+        label = LABELS["tool_result"]
+        lines.append(f"{label}: {body}" if body else f"{label}:")
+    return lines
+
+
+def _render_opencode(record: dict) -> list[str] | None:
+    """An ``opencode run --format json`` event, or None if this is not one.
+
+    OpenCode writes the same artifact in the same way — one JSON object per
+    line, as the run happens — with a vocabulary of its own, and the two do not
+    collide: nothing here is a top-level ``type`` Claude Code emits, and nothing
+    Claude Code emits is one of these. So one renderer serves both executors,
+    and a reader learns one set of labels (task 810).
+    """
+    kind = record.get("type")
+    if kind in OPENCODE_SILENT:
+        return []
+
+    part = record.get("part")
+    part = part if isinstance(part, dict) else {}
+
+    if kind == "text":
+        body = _flatten(part.get("text", ""))
+        return [f"{LABELS['text']}: {body}"] if body else []
+    if kind == "reasoning":
+        body = _flatten(part.get("text", ""))
+        return [f"{LABELS['thinking']}: {body}"] if body else []
+    if kind == "tool_use":
+        return _render_opencode_tool(part)
+    if kind == "error":
+        # Shaped the way OpenCode reports it to a person: the nested message
+        # when there is one, and the error's name when there is not.
+        error = record.get("error")
+        error = error if isinstance(error, dict) else {}
+        data = error.get("data")
+        if isinstance(data, dict) and data.get("message"):
+            body = _flatten(_as_text(data["message"]))
+        else:
+            body = _flatten(_as_text(error.get("name") or record.get("error")))
+        return [f"error: {body}" if body else "error:"]
+    return None
+
+
 def render(raw: str) -> list[str]:
     """One line of a run's log as the lines a reader should see.
 
@@ -181,6 +284,11 @@ def render(raw: str) -> list[str]:
         if turns is not None:
             head = f"{head} after {turns} turns"
         return [f"{head}: {body}" if body else head]
+
+    opencode = _render_opencode(record)
+    if opencode is not None:
+        return opencode
+
     if kind:
         # Named rather than dropped: a reader watching output advance must not
         # be shown a stall that is only an event type this does not know.

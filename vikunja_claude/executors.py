@@ -1,23 +1,37 @@
-"""Which model a run drives, and nothing else.
+"""How a run is launched: which harness, and which model behind it.
 
-The runner owns ticket resolution, the prompt, the lock, the launch, the log and
-the reap. An executor owns exactly one question — *which model does the launched
-Claude Code talk to* — expressed as extra environment for the child process.
-That is the whole abstraction, and it is deliberately this small:
+The runner owns ticket resolution, the worktree, the prompt, the lock, the
+launch, the log and the reap. An executor owns the two questions that are left —
+*what binary is spawned* and *what model does it talk to* — as an argv and as
+extra environment for the child process. That is the whole abstraction.
 
-- the **harness stays Claude Code** in every case. Everything the runner relies
-  on the harness for — running the tests, the commit, reporting back through
-  ``vkctl.py`` — is a property of that harness, not of the model behind it.
-  Swapping in a different CLI would take those away; swapping the model does
-  not touch them.
-- the **worktree is NOT one of those things**, and this docstring used to say it
-  was. Nothing created one: a run was isolated only if the model chose to
-  isolate it, which made the guarantee a property of the model after all — the
-  one thing an executor is supposed not to change. The runner now makes the
-  worktree itself, before the spawn, for every executor (task 756,
-  ``vikunja_claude/worktree.py``).
-- so there is no second launcher, no per-model process handling, and nothing
-  here that knows about tickets.
+**It used to own only the second one, and task 810 is why it now owns both.**
+The harness was Claude Code in every case, on the reasoning that everything the
+runner leans on the harness for belongs to the harness rather than to the model,
+so swapping the CLI would take all of it away. That reasoning was sound when it
+was written and two of its three premises have since expired:
+
+- the **worktree** stopped being one of those things in task 756, when the
+  runner started making it itself, before the spawn, for every executor
+  (``vikunja_claude/worktree.py``). It is now the runner's property, not any
+  harness's.
+- the **commit and the report-back** were never the harness's either. They are
+  instructions in the prompt (``vikunja_claude/prompt.py``) and a helper script
+  the child runs, and both are harness-neutral text.
+- what actually remained was **running commands at all**, and there Claude Code
+  headless was the problem rather than the guarantee: ``--permission-mode
+  acceptEdits`` accepts file edits but *denies bash*, so a local run could edit
+  code and then not run a test, not run ``git commit`` and not run ``vkctl.py``.
+  Task #807 is what that looks like from outside.
+
+So ``local`` is now **OpenCode**, driving the same approved seat, with command
+execution unrestricted inside the ticket's worktree. ``claude`` is untouched and
+stays Claude Code: this widened the abstraction, it did not migrate the default.
+
+What did NOT change, and is the reason there is still one launcher: the
+worktree, the branch, the prompt, the lock, the run log, the reap and the
+``vkctl.py`` report-back are all the runner's, identical whichever executor ran.
+An executor still knows nothing about tickets.
 
 The local executor takes the model's identity from the investment repository's
 ``deploy/ollama/models.json`` — the tracked record of which local models are
@@ -33,6 +47,10 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime, annotation only
+    from .config import Config
 
 #: Where the approved-model record lives, relative to the repository the runner
 #: works in. A path rather than a setting: it is a fact about that repository's
@@ -48,6 +66,50 @@ LOCAL_CODING_SEAT = "local_coding"
 DEFAULT_EXECUTOR = "claude"
 LOCAL_EXECUTOR = "local"
 
+#: How OpenCode is told which model to use: one provider block, one model, one
+#: name. The provider id is ours to choose and is not read from anywhere else,
+#: so it is a constant rather than a setting.
+OLLAMA_PROVIDER = "ollama"
+
+#: The adapter OpenCode loads to speak to that provider. Ollama serves the
+#: OpenAI-compatible shape natively at ``/v1``, which is the whole reason this
+#: path needs no transport shim where the Claude Code one did.
+OLLAMA_PROVIDER_NPM = "@ai-sdk/openai-compatible"
+
+#: Environment carrying a paid provider's credentials, removed from every local
+#: run. The Claude Code executor removed one key for one reason — "the run
+#: fails" must never quietly become "the run bills the frontier model" — and
+#: OpenCode makes that reason bigger rather than smaller: it discovers providers
+#: from the environment, and can address Anthropic, OpenAI, OpenRouter, Google
+#: and Ollama's own hosted tier. Pinning ``--model`` is what chooses the seat;
+#: this is what makes the alternatives unreachable rather than merely unchosen.
+PAID_PROVIDER_KEYS = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_GENERATIVE_AI_API_KEY",
+        "OLLAMA_API_KEY",
+    }
+)
+
+#: The output cap OpenCode's config schema requires beside the context window.
+#:
+#: Unlike the context, this is **not** read from the approved record, because
+#: the record does not state it: no recipe in ``deploy/ollama/`` sets
+#: ``num_predict``, so the seat imposes no output limit of its own and a model
+#: may write until the window is full. OpenCode nonetheless refuses a config
+#: without the key ("Missing key ... limit.output"), so a number has to be
+#: stated, and it is bookkeeping for the harness rather than a claim about the
+#: model.
+#:
+#: It matches what the investment repository's own ``opencode.json`` already
+#: uses for this seat, so an interactive OpenCode session and a ticket run
+#: behave the same way on the same model. If the record ever states an output
+#: cap, this should be read from it the way the context is.
+DEFAULT_OUTPUT_TOKENS = 32768
+
 _NUM_CTX = re.compile(r"^PARAMETER\s+num_ctx\s+(\d+)", re.M)
 
 
@@ -62,9 +124,14 @@ class ExecutorError(RuntimeError):
 
 @dataclass(frozen=True)
 class Executor:
-    """One answer to "which model", as environment for the launched process."""
+    """One answer to "how is a run launched": an argv, and child environment."""
 
     name: str
+    #: The binary to spawn. No default: a harness picked by omission is exactly
+    #: the silent fallback the rest of this module refuses.
+    binary: str
+    #: Everything between the binary and the prompt.
+    args: tuple[str, ...] = ()
     #: What is published about the run: the model id, or None for the harness's
     #: own default, which this package does not get to name.
     model: str | None = None
@@ -72,6 +139,15 @@ class Executor:
     env: dict[str, str] = field(default_factory=dict)
     #: Removed from the child's environment, whatever the service inherited.
     unset: frozenset[str] = frozenset()
+
+    def argv(self, prompt: str) -> list[str]:
+        """The command line, with the prompt last.
+
+        Last because both harnesses take it as a trailing positional, and
+        because the launcher's own tests read ``argv[-1]`` to assert that the
+        two executors are handed the same ticket context.
+        """
+        return [self.binary, *self.args, prompt]
 
     def apply(self, environ: dict[str, str]) -> dict[str, str]:
         child = {k: v for k, v in environ.items() if k not in self.unset}
@@ -130,16 +206,15 @@ def _model_id(entry: dict) -> str:
 def _context_tokens(entry: dict, workdir: Path) -> int:
     """The context the model runs at for a caller that sends no ``num_ctx``.
 
-    Which is what Claude Code is: it speaks the Anthropic message shape and has
-    no field for the runtime's context size, so the Modelfile's standalone
-    default is the one that governs. Reading it here rather than copying the
-    number into ``models.json`` is deliberate — that repository's README calls
-    the duplication out as the mistake worth preventing.
+    Which is what both harnesses are: they speak a chat API with no field for
+    the runtime's context size, so the Modelfile's standalone default is the one
+    that governs. Reading it here rather than copying the number into
+    ``models.json`` is deliberate — that repository's README calls the
+    duplication out as the mistake worth preventing.
 
-    It is read so the harness can be told the truth. Claude Code assumes a 200k
-    window for a model it does not recognise and auto-compacts to it, which on a
-    256k model throws away a quarter of the context the ticket asked to have
-    available.
+    It is read so the harness can be told the truth. A harness that does not
+    know a model's window assumes one and compacts to it, which on a 256k model
+    throws away most of the context the ticket asked to have available.
     """
     modelfile = entry.get("modelfile")
     if not modelfile:
@@ -158,49 +233,106 @@ def _context_tokens(entry: dict, workdir: Path) -> int:
     return int(match.group(1))
 
 
-def local_executor(workdir: Path, base_url: str) -> Executor:
-    """Claude Code, pointed at the approved local seat through the shim.
+def opencode_config(model: str, context: int, base_url: str) -> dict:
+    """The whole of what OpenCode is told, derived from the approved record.
 
-    ``base_url`` is the transport shim, not Ollama directly: Ollama refuses the
-    trailing ``role: system`` message Claude Code always appends, so the two
-    cannot talk without it. See ``deploy/ollama/anthropic_shim.py`` in the
-    investment repository.
+    Handed to the child as ``OPENCODE_CONFIG_CONTENT`` rather than written to a
+    file, for the same reason the model string is read rather than copied: a
+    file is a second copy of the seat, and a second copy is a thing that goes
+    stale. OpenCode merges this over the configs it finds on disk and this one
+    is loaded last, so the run is governed by the record even on a host whose
+    own ``opencode.json`` names something else.
+
+    ``permission`` states the unrestricted execution the ticket run needs. It is
+    stated here *and* as ``--auto`` on the argv, which is not redundancy by
+    accident: this settles the three named capabilities so no ask is raised at
+    all, and ``--auto`` answers any ask these three do not cover. Both matter,
+    because of what OpenCode does with an unanswered ask — see
+    ``DEFAULT_OPENCODE_ARGS``.
+
+    ``limit`` carries both halves because OpenCode refuses a config missing
+    either, and they come from different places on purpose: the context is read
+    from the seat's own recipe, and the output cap is
+    ``DEFAULT_OUTPUT_TOKENS`` because the record states none. Only the first is
+    a fact about the approved model.
     """
-    entry = _seat_entry(_manifest(workdir), workdir)
-    model = _model_id(entry)
-    context = _context_tokens(entry, workdir)
-    return Executor(
-        name=LOCAL_EXECUTOR,
-        model=model,
-        env={
-            "ANTHROPIC_BASE_URL": base_url.rstrip("/"),
-            # Any non-empty value: the shim authenticates nothing, and Claude
-            # Code refuses to start without one.
-            "ANTHROPIC_AUTH_TOKEN": "local",
-            # Every tier, not just the default. Claude Code reaches for the
-            # small/fast model on its own for summarisation and titles, and one
-            # unset tier is a request to a model this endpoint does not serve.
-            "ANTHROPIC_MODEL": model,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
-            "ANTHROPIC_SMALL_FAST_MODEL": model,
-            "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(context),
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "model": f"{OLLAMA_PROVIDER}/{model}",
+        "provider": {
+            OLLAMA_PROVIDER: {
+                "npm": OLLAMA_PROVIDER_NPM,
+                "name": "Ollama",
+                "options": {"baseURL": base_url},
+                "models": {
+                    model: {
+                        "name": model,
+                        "limit": {
+                            "context": context,
+                            "output": DEFAULT_OUTPUT_TOKENS,
+                        },
+                    }
+                },
+            }
         },
-        # The service may well have been started with a real key in its
-        # environment. A local run must not carry one: if the base URL is ever
-        # wrong or unreachable in the wrong way, the difference between "the run
-        # fails" and "the run silently bills the frontier model" is this line.
-        unset=frozenset({"ANTHROPIC_API_KEY"}),
+        "permission": {"edit": "allow", "bash": "allow", "webfetch": "allow"},
+    }
+
+
+def claude_executor(config: "Config") -> Executor:
+    """Claude Code as installed, talking to whatever it normally talks to.
+
+    Adds and removes nothing. This is the path task 810 deliberately left alone:
+    the harness question was opened for the local seat, not answered again for
+    the default one.
+    """
+    return Executor(
+        name=DEFAULT_EXECUTOR,
+        binary=config.claude_bin,
+        args=tuple(config.claude_args),
     )
 
 
-def resolve(name: str, workdir: Path, local_base_url: str) -> Executor:
-    """The executor by name, or a refusal naming the ones that exist."""
+def local_executor(config: "Config") -> Executor:
+    """OpenCode, driving the approved local seat, unrestricted in the worktree.
+
+    ``config.local_executor_base_url`` is Ollama's own OpenAI-compatible
+    endpoint, reached directly. The Anthropic transport shim this used to go
+    through exists because Claude Code speaks the Anthropic message shape and
+    appends a trailing ``role: system`` message Ollama refuses; OpenCode speaks
+    the OpenAI shape, which Ollama serves natively, so the shim is not on this
+    path at all any more.
+    """
+    entry = _seat_entry(_manifest(config.workdir), config.workdir)
+    model = _model_id(entry)
+    context = _context_tokens(entry, config.workdir)
+    settings = opencode_config(model, context, config.local_executor_base_url.rstrip("/"))
+    return Executor(
+        name=LOCAL_EXECUTOR,
+        binary=config.opencode_bin,
+        # The model is pinned on the command line as well as in the config, and
+        # it is appended after the configurable arguments so that it is the one
+        # thing an `OPENCODE_ARGS` cannot take off. Which model a run may use is
+        # the seat's answer, not a deployment's.
+        args=(*config.opencode_args, "--model", f"{OLLAMA_PROVIDER}/{model}"),
+        model=model,
+        env={"OPENCODE_CONFIG_CONTENT": json.dumps(settings)},
+        unset=PAID_PROVIDER_KEYS,
+    )
+
+
+def resolve(name: str, config: "Config") -> Executor:
+    """The executor by name, or a refusal naming the ones that exist.
+
+    Takes the whole config rather than the handful of settings each executor
+    happens to need today: an executor now answers "how is a run launched",
+    which is a config-shaped question, and a per-setting signature is a list to
+    forget an entry from the next time one is added.
+    """
     if name == DEFAULT_EXECUTOR:
-        return Executor(name=DEFAULT_EXECUTOR)
+        return claude_executor(config)
     if name == LOCAL_EXECUTOR:
-        return local_executor(workdir, local_base_url)
+        return local_executor(config)
     raise ExecutorError(
         f"Unknown executor {name!r}. Available: "
         f"{DEFAULT_EXECUTOR!r}, {LOCAL_EXECUTOR!r}."

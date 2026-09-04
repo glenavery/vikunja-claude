@@ -21,6 +21,7 @@ from pathlib import Path
 from vikunja_claude.config import (
     Config,
     DEFAULT_CLAUDE_ARGS,
+    DEFAULT_OPENCODE_ARGS,
     InvestmentConfig,
     McpConfig,
     OAuthConfig,
@@ -204,6 +205,12 @@ def make_config(state_dir: Path, **overrides) -> Config:
         # out by hand this drifted from what a real launch is given the
         # moment the default changed (task 755).
         claude_args=shlex.split(DEFAULT_CLAUDE_ARGS),
+        opencode_bin="opencode",
+        # Read from the production default for the same reason as the line
+        # above, and it matters more here: what a local run is allowed to do is
+        # decided by these arguments, so a hand-copied list would let the real
+        # default lose a flag while the suite went on asserting the old one.
+        opencode_args=shlex.split(DEFAULT_OPENCODE_ARGS),
         host="127.0.0.1",
         port=3460,
         state_dir=state_dir,

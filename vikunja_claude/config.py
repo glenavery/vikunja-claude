@@ -22,10 +22,18 @@ from .executors import DEFAULT_EXECUTOR
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV_FILE = PACKAGE_ROOT / ".env"
 
-#: Where the transport shim listens. A deployment fact rather than a model fact,
-#: which is why it lives here and not in the approved-model record: moving the
-#: shim's port changes nothing about which model is approved.
-DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11440"
+#: Where the local executor reaches the approved seat. A deployment fact rather
+#: than a model fact, which is why it lives here and not in the approved-model
+#: record: moving the port changes nothing about which model is approved.
+#:
+#: This is **Ollama itself**, on its OpenAI-compatible surface. It used to be
+#: the Anthropic transport shim on :11440, which exists only because Claude Code
+#: speaks the Anthropic message shape and appends a trailing ``role: system``
+#: message Ollama refuses. OpenCode speaks the OpenAI shape, which Ollama serves
+#: natively, so the local path no longer goes through the shim at all
+#: (task 810). The shim is still there and still serves the Claude Code path;
+#: nothing here reaches it.
+DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11434/v1"
 
 #: Seconds a killed run is given to die before the signal is escalated, and
 #: again before the runner gives up on it. Long enough for a harness that traps
@@ -53,6 +61,21 @@ DEFAULT_KILL_GRACE_SECONDS = 30.0
 DEFAULT_CLAUDE_ARGS = (
     "-p --verbose --output-format stream-json --permission-mode acceptEdits"
 )
+
+#: How the local executor's harness is asked to work one ticket unattended
+#: (task 810). ``OPENCODE_ARGS`` overrides this entirely, the way ``CLAUDE_ARGS``
+#: does — except for the seat, which ``executors.py`` appends afterwards so a
+#: deployment cannot choose the model.
+#:
+#: ``run`` is the headless subcommand. ``--format json`` is the observability
+#: half and is the exact counterpart of ``--output-format stream-json``: one
+#: JSON object per line, written as each step of the run completes, which is
+#: what ``vikunja_claude/run_output.py`` renders and what a status read has to
+#: have (task 755). ``--auto`` is what lets an unattended run carry out the
+#: commands the ticket needs — the tests, ``git commit``, ``vkctl.py`` — inside
+#: the worktree the runner made for it. Its scope and its containment are
+#: documented in README.md § Permissions.
+DEFAULT_OPENCODE_ARGS = "run --format json --auto"
 
 # Shared by both services, so they cannot drift apart: the launcher and the MCP
 # server must talk to the same Vikunja and mean the same project by "project".
@@ -396,6 +419,12 @@ class Config:
     workdir: Path
     claude_bin: str
     claude_args: list[str]
+    #: The local executor's harness. Separate settings from the Claude Code
+    #: ones rather than one pair reused, because the two are selected per run:
+    #: a deployment may be running `claude` and `local` tickets on the same
+    #: afternoon, and one shared pair could not describe both (task 810).
+    opencode_bin: str
+    opencode_args: list[str]
     host: str
     port: int
     state_dir: Path
@@ -410,13 +439,13 @@ class Config:
     #: has nothing to say about how long a run may take.
     kill_grace_seconds: float = DEFAULT_KILL_GRACE_SECONDS
     #: Which executor a run uses when the request does not name one. The
-    #: executor decides only which model the launched Claude Code drives; see
+    #: executor decides which harness is spawned and which model it drives; see
     #: `vikunja_claude/executors.py`.
     executor: str = DEFAULT_EXECUTOR
-    #: The Anthropic-shaped endpoint the local executor points Claude Code at.
-    #: It is the transport shim rather than Ollama itself — Ollama refuses the
-    #: trailing system message Claude Code always sends, so the two cannot talk
-    #: directly. Unused unless the local executor is selected.
+    #: The OpenAI-compatible endpoint the local executor points OpenCode at:
+    #: Ollama itself, reached directly. Unused unless the local executor is
+    #: selected. See `DEFAULT_LOCAL_BASE_URL` for why the transport shim is no
+    #: longer in the middle of this.
     local_executor_base_url: str = DEFAULT_LOCAL_BASE_URL
     project_id: int | None = None
     _log_path: Path | None = field(default=None, repr=False)
@@ -449,6 +478,10 @@ class Config:
             claude_bin=os.environ.get("CLAUDE_BIN", "claude"),
             claude_args=shlex.split(
                 os.environ.get("CLAUDE_ARGS", DEFAULT_CLAUDE_ARGS)
+            ),
+            opencode_bin=os.environ.get("OPENCODE_BIN", "opencode"),
+            opencode_args=shlex.split(
+                os.environ.get("OPENCODE_ARGS", DEFAULT_OPENCODE_ARGS)
             ),
             host=os.environ.get("VIKUNJA_CLAUDE_HOST", "127.0.0.1"),
             port=int(os.environ.get("VIKUNJA_CLAUDE_PORT", "3460")),

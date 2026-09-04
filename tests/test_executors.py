@@ -1,11 +1,13 @@
-"""Task 690 — selecting which model a run drives.
+"""Tasks 690 and 810 — which harness a run uses, and which model behind it.
 
-The runner gained one thing: a choice of model. It did not gain a second
-launcher, a second lock, a second log, or any notion of "a local run" as a
-different kind of run. Most of what is asserted here is therefore about what
-stayed the same, because that is the part a later change is likely to break.
+The runner gained one thing in task 690: a choice of model. It did not gain a
+second launcher, a second lock, a second log, or any notion of "a local run" as
+a different kind of run. Task 810 changed what an executor may choose — the
+local one is now OpenCode rather than Claude Code — and the list of things that
+must NOT have changed is the same list, which is why most of what is asserted
+here is still about what stayed the same.
 
-Two properties are worth more than the rest:
+Three properties are worth more than the rest:
 
 - **the approval is read, never copied.** The model comes from the investment
   repository's `deploy/ollama/models.json`, so moving the seat there moves the
@@ -14,6 +16,9 @@ Two properties are worth more than the rest:
 - **a broken local configuration refuses.** The alternative to a local run is a
   run against a paid frontier model, so a fallback would answer "run this
   locally" with a bill.
+- **a local run can actually carry out commands.** This is what task 810 is for,
+  and it is asserted rather than assumed because the failure it replaces is a
+  quiet one: see `UnattendedExecution`.
 """
 
 from __future__ import annotations
@@ -28,6 +33,8 @@ from vikunja_claude.launcher import AlreadyRunning
 from vikunja_claude.executors import (
     DEFAULT_EXECUTOR,
     LOCAL_EXECUTOR,
+    DEFAULT_OUTPUT_TOKENS,
+    PAID_PROVIDER_KEYS,
     Executor,
     ExecutorError,
     local_executor,
@@ -37,7 +44,10 @@ from vikunja_claude.executors import (
 from .support import ServiceTestCase, make_config, make_repo
 from .test_browser_flow import HttpFlow
 
-BASE_URL = "http://127.0.0.1:11440"
+#: Ollama's own OpenAI-compatible endpoint. OpenCode speaks that shape, so the
+#: local path reaches the seat directly rather than through the Anthropic
+#: transport shim Claude Code needed (task 810).
+BASE_URL = "http://127.0.0.1:11434/v1"
 
 #: The shape of the real manifest, cut down to what the runner reads. Built as a
 #: dict rather than copied as text so a test can move the seat by editing it.
@@ -80,6 +90,23 @@ def write_repo(root: Path, manifest=None, recipes=None) -> Path:
     return root
 
 
+def config_for(workdir: Path, **overrides):
+    """A Config pointed at one throwaway workdir.
+
+    An executor now answers "how is a run launched", so it is resolved from the
+    config rather than from a hand-picked pair of settings (task 810). Built
+    through `make_config` so the arguments a test reasons about are the
+    production ones.
+    """
+    overrides.setdefault("local_executor_base_url", BASE_URL)
+    return make_config(workdir / "_state", workdir=workdir, **overrides)
+
+
+def opencode_settings(executor: Executor) -> dict:
+    """What the child is actually told, decoded from its environment."""
+    return json.loads(executor.env["OPENCODE_CONFIG_CONTENT"])
+
+
 class Repo(unittest.TestCase):
     """A throwaway workdir carrying an approved-model record."""
 
@@ -91,6 +118,9 @@ class Repo(unittest.TestCase):
     def rewrite(self, manifest=None, recipes=None) -> None:
         write_repo(self.workdir, manifest, recipes)
 
+    def local(self, **overrides) -> Executor:
+        return local_executor(config_for(self.workdir, **overrides))
+
 
 # --------------------------------------------------------------------------- #
 # The model comes from the approved record                                      #
@@ -98,9 +128,11 @@ class Repo(unittest.TestCase):
 
 class ResolvingTheSeat(Repo):
     def test_the_model_is_the_one_holding_the_local_coding_seat(self):
-        executor = local_executor(self.workdir, BASE_URL)
+        executor = self.local()
         self.assertEqual(executor.model, "qwen38-27b-abl:256k")
-        self.assertEqual(executor.env["ANTHROPIC_MODEL"], "qwen38-27b-abl:256k")
+        self.assertEqual(
+            opencode_settings(executor)["model"], "ollama/qwen38-27b-abl:256k"
+        )
 
     def test_moving_the_seat_moves_the_runner_with_no_code_change(self):
         """The acceptance criterion, exercised rather than argued.
@@ -119,22 +151,24 @@ class ResolvingTheSeat(Repo):
                 "some-other-model.Modelfile": "FROM x\nPARAMETER num_ctx 131072\n",
             },
         )
-        executor = local_executor(self.workdir, BASE_URL)
+        executor = self.local()
         self.assertEqual(executor.model, "some-other:256k")
-        self.assertEqual(executor.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "131072")
+        settings = opencode_settings(executor)
+        self.assertEqual(settings["model"], "ollama/some-other:256k")
+        self.assertEqual(
+            settings["provider"]["ollama"]["models"]["some-other:256k"]["limit"],
+            {"context": 131072, "output": DEFAULT_OUTPUT_TOKENS},
+        )
 
     def test_an_alias_is_preferred_over_a_floating_latest_tag(self):
-        executor = local_executor(self.workdir, BASE_URL)
+        executor = self.local()
         self.assertNotIn(":latest", executor.model or "")
 
     def test_a_seat_holder_with_no_alias_is_named_by_its_built_name(self):
         manifest = json.loads(json.dumps(MANIFEST))
         manifest["models"][0]["aliases"] = []
         self.rewrite(manifest)
-        self.assertEqual(
-            local_executor(self.workdir, BASE_URL).model,
-            "qwen38-27b-abl-256k:latest",
-        )
+        self.assertEqual(self.local().model, "qwen38-27b-abl-256k:latest")
 
 
 # --------------------------------------------------------------------------- #
@@ -143,19 +177,39 @@ class ResolvingTheSeat(Repo):
 
 class ApprovedContext(Repo):
     def test_the_window_is_read_from_the_seats_own_recipe(self):
-        """Claude Code sends no num_ctx, so the Modelfile default is what runs.
+        """The harness sends no num_ctx, so the Modelfile default is what runs.
 
-        It has to be told, too: Claude Code assumes 200k for a model it does not
-        recognise and auto-compacts to it, which on this seat would throw away a
-        quarter of the context the ticket asks to have available.
+        It has to be told, too: a harness that does not know a model's window
+        assumes one and compacts to it, which on this seat would throw away most
+        of the context the ticket asks to have available.
         """
-        executor = local_executor(self.workdir, BASE_URL)
-        self.assertEqual(executor.env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "262144")
+        settings = opencode_settings(self.local())
+        model = settings["provider"]["ollama"]["models"]["qwen38-27b-abl:256k"]
+        self.assertEqual(model["limit"]["context"], 262144)
+
+    def test_the_output_cap_is_stated_because_the_schema_demands_one(self):
+        """The two halves of `limit` come from different places, on purpose.
+
+        The context is a fact about the approved model, read from its recipe.
+        The output cap is not: no recipe under `deploy/ollama/` sets
+        `num_predict`, so the seat imposes no output limit of its own. OpenCode
+        refuses a config without the key all the same ("Missing key ...
+        limit.output"), so a number has to be stated, and it is the harness's
+        bookkeeping rather than a claim the record makes.
+
+        Both are asserted because a config missing either is rejected at
+        startup — which is a launch that fails, not a run that degrades.
+        """
+        settings = opencode_settings(self.local())
+        model = settings["provider"]["ollama"]["models"]["qwen38-27b-abl:256k"]
+        self.assertEqual(
+            model["limit"], {"context": 262144, "output": DEFAULT_OUTPUT_TOKENS}
+        )
 
     def test_a_recipe_that_states_no_context_is_a_refusal_not_a_default(self):
         self.rewrite(recipes={"qwen38-27b-abl-256k.Modelfile": "FROM base\n"})
         with self.assertRaises(ExecutorError) as caught:
-            local_executor(self.workdir, BASE_URL)
+            self.local()
         self.assertIn("num_ctx", str(caught.exception))
 
 
@@ -167,7 +221,7 @@ class Refusals(Repo):
     def test_a_missing_record_names_the_path_it_looked_at(self):
         with TemporaryDirectory() as empty:
             with self.assertRaises(ExecutorError) as caught:
-                local_executor(Path(empty), BASE_URL)
+                local_executor(config_for(Path(empty)))
         self.assertIn("models.json", str(caught.exception))
 
     def test_a_record_with_no_seat_holder_refuses(self):
@@ -175,14 +229,14 @@ class Refusals(Repo):
         del manifest["models"][0]["seat"]
         self.rewrite(manifest)
         with self.assertRaises(ExecutorError):
-            local_executor(self.workdir, BASE_URL)
+            self.local()
 
     def test_two_seat_holders_refuse_rather_than_one_being_picked(self):
         manifest = json.loads(json.dumps(MANIFEST))
         manifest["models"][1]["seat"] = "local_coding"
         self.rewrite(manifest)
         with self.assertRaises(ExecutorError) as caught:
-            local_executor(self.workdir, BASE_URL)
+            self.local()
         self.assertIn("seat names one model", str(caught.exception))
 
     def test_an_unreadable_record_refuses(self):
@@ -190,11 +244,11 @@ class Refusals(Repo):
             "{not json", encoding="utf-8"
         )
         with self.assertRaises(ExecutorError):
-            local_executor(self.workdir, BASE_URL)
+            self.local()
 
     def test_an_unknown_executor_name_names_the_ones_that_exist(self):
         with self.assertRaises(ExecutorError) as caught:
-            resolve("qwen-code", self.workdir, BASE_URL)
+            resolve("qwen-code", config_for(self.workdir))
         self.assertIn(DEFAULT_EXECUTOR, str(caught.exception))
         self.assertIn(LOCAL_EXECUTOR, str(caught.exception))
 
@@ -204,44 +258,148 @@ class Refusals(Repo):
 # --------------------------------------------------------------------------- #
 
 class ChildEnvironment(Repo):
-    def test_every_model_tier_is_pinned_not_only_the_default(self):
-        """Claude Code reaches for its small/fast model unasked.
+    def test_the_seat_is_pinned_on_the_command_line_as_well_as_in_the_config(self):
+        """Two statements of one model, and the argv one is load-bearing.
 
-        One unset tier is a request to a model this endpoint does not serve, on
-        a code path nobody chose — summarisation, a conversation title — and it
-        fails in the middle of a run rather than at the start.
+        OpenCode can address providers this run must never reach — Anthropic,
+        OpenAI, Ollama's own hosted tier — and a config key it merges over is a
+        weaker claim than a flag. The flag is appended after the configurable
+        arguments so an `OPENCODE_ARGS` cannot take it off.
         """
-        env = local_executor(self.workdir, BASE_URL).env
-        for key in (
-            "ANTHROPIC_MODEL",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL",
-            "ANTHROPIC_DEFAULT_SONNET_MODEL",
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-            "ANTHROPIC_SMALL_FAST_MODEL",
-        ):
-            self.assertEqual(env[key], "qwen38-27b-abl:256k", key)
+        executor = self.local()
+        self.assertEqual(
+            executor.args[-2:], ("--model", "ollama/qwen38-27b-abl:256k")
+        )
+        self.assertEqual(
+            opencode_settings(executor)["model"], "ollama/qwen38-27b-abl:256k"
+        )
 
-    def test_the_endpoint_is_the_shim_and_a_trailing_slash_does_not_survive(self):
-        executor = local_executor(self.workdir, "http://127.0.0.1:11440/")
-        self.assertEqual(executor.env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:11440")
+    def test_the_provider_points_at_ollama_and_a_trailing_slash_does_not_survive(self):
+        """Ollama itself, not the Anthropic shim.
+
+        The shim exists because Claude Code speaks the Anthropic message shape
+        and appends a trailing system message Ollama refuses. OpenCode speaks
+        the OpenAI shape, which Ollama serves natively, so this path does not go
+        through the shim at all (task 810).
+        """
+        executor = self.local(local_executor_base_url="http://127.0.0.1:11434/v1/")
+        provider = opencode_settings(executor)["provider"]["ollama"]
+        self.assertEqual(provider["options"]["baseURL"], "http://127.0.0.1:11434/v1")
 
     def test_a_real_api_key_is_removed_from_a_local_runs_environment(self):
         """The one line between "the run fails" and "the run bills the frontier".
 
         The service may perfectly well have been started with a key in its
-        environment, and the child inherits everything by default.
+        environment, and the child inherits everything by default. Asserted over
+        the whole set rather than one key, because OpenCode discovers providers
+        from the environment and one survivor is one reachable paid provider.
         """
-        executor = local_executor(self.workdir, BASE_URL)
-        child = executor.apply({"ANTHROPIC_API_KEY": "sk-real", "PATH": "/usr/bin"})
-        self.assertNotIn("ANTHROPIC_API_KEY", child)
+        environ = {key: "sk-real" for key in PAID_PROVIDER_KEYS}
+        environ["PATH"] = "/usr/bin"
+        child = self.local().apply(environ)
+        for key in PAID_PROVIDER_KEYS:
+            self.assertNotIn(key, child)
         self.assertEqual(child["PATH"], "/usr/bin")
+
+    def test_the_config_reaches_the_child_without_a_file_being_written(self):
+        """The record stays the only copy of the seat; nothing is left on disk.
+
+        A written config would be a second copy, and a second copy is a thing
+        that goes stale — the same reasoning that keeps the model string out of
+        this package.
+        """
+        executor = self.local()
+        self.assertIn("OPENCODE_CONFIG_CONTENT", executor.env)
+        self.assertEqual(list(self.workdir.glob("**/opencode.json")), [])
 
     def test_the_default_executor_adds_and_removes_nothing(self):
         """`claude` is the harness as installed, and must stay untouched."""
-        executor = resolve(DEFAULT_EXECUTOR, self.workdir, BASE_URL)
+        executor = resolve(DEFAULT_EXECUTOR, config_for(self.workdir))
         environ = {"ANTHROPIC_API_KEY": "sk-real", "PATH": "/usr/bin"}
         self.assertEqual(executor.apply(environ), environ)
         self.assertIsNone(executor.model)
+
+
+# --------------------------------------------------------------------------- #
+# A local run can actually carry out the commands the ticket needs              #
+# --------------------------------------------------------------------------- #
+
+class UnattendedExecution(Repo):
+    """Task 810's reason to exist, asserted rather than assumed.
+
+    **The failure being prevented is not a stall, and that is the whole point.**
+    It is tempting to write this as "the run does not hang waiting for
+    approval", and such a test would pass forever without testing anything,
+    because neither harness ever blocks on a person in headless mode. What they
+    do instead differs, and both spellings of the old failure are quiet:
+
+    - Claude Code headless under `--permission-mode acceptEdits` accepts file
+      edits and **denies bash**. A run reads the ticket, edits code, and is then
+      refused the test, the `git commit` and the `vkctl.py` report-back. That is
+      task #807.
+    - `opencode run` answers a permission request itself: it allows it with
+      `--auto` and **refuses it without**, then carries on regardless. So a
+      missing flag produces a run that looks busy, ends by itself, and has
+      changed nothing.
+
+    Neither shows up as a hang, a non-zero exit or an empty log. What separates
+    a working configuration from both is the launched command line and the
+    permissions in the config the child is handed, so those are what is pinned
+    here.
+    """
+
+    def test_the_local_run_is_launched_with_command_execution_enabled(self):
+        argv = self.local().argv("the prompt")
+        self.assertIn("--auto", argv)
+
+    def test_the_config_hands_the_run_the_capabilities_a_ticket_needs(self):
+        """Editing files, running commands, and reading what a ticket cites.
+
+        Stated in the config as well as on the command line: this settles the
+        named capabilities so no request is raised at all, and `--auto` answers
+        anything these three do not cover.
+        """
+        permission = opencode_settings(self.local())["permission"]
+        self.assertEqual(permission["edit"], "allow")
+        self.assertEqual(permission["bash"], "allow")
+        self.assertEqual(permission["webfetch"], "allow")
+
+    def test_it_is_the_headless_subcommand_writing_events_as_it_goes(self):
+        """`run --format json`, the counterpart of Claude Code's stream-json.
+
+        Without it a status read can prove a process started and nothing more,
+        which is what #714 looked like from outside (task 755). `run` must also
+        come first: it is the subcommand, not a flag.
+        """
+        argv = self.local().argv("the prompt")
+        self.assertEqual(argv[1], "run")
+        self.assertIn("--format", argv)
+        self.assertEqual(argv[argv.index("--format") + 1], "json")
+
+    def test_the_prompt_is_the_last_argument_and_is_passed_whole(self):
+        """One argv element, not split, and after every flag.
+
+        A prompt that arrived split across positionals would reach the model as
+        a different ticket, and one placed before a flag would be parsed as its
+        value.
+        """
+        prompt = "You are working a single ticket.\n\nWith a blank line in it."
+        argv = self.local().argv(prompt)
+        self.assertEqual(argv[-1], prompt)
+        self.assertEqual(argv.count(prompt), 1)
+
+    def test_the_claude_executor_is_left_on_its_own_arguments(self):
+        """Task 810 widened the choice; it did not migrate the default.
+
+        The ticket says so explicitly, and this is the assertion that would fail
+        if the two harnesses were ever collapsed into one.
+        """
+        config = config_for(self.workdir)
+        claude = resolve(DEFAULT_EXECUTOR, config)
+        self.assertEqual(claude.binary, config.claude_bin)
+        self.assertEqual(list(claude.args), list(config.claude_args))
+        self.assertNotIn("--auto", claude.argv("the prompt"))
+        self.assertEqual(claude.env, {})
 
 
 # --------------------------------------------------------------------------- #
@@ -263,28 +421,60 @@ class ThroughTheRunner(ServiceTestCase):
     def work_local(self):
         return self.service.work(self.service.get_by_task_number(8), LOCAL_EXECUTOR)
 
-    def test_a_local_run_uses_the_same_binary_arguments_and_directory(self):
-        """The executor chooses a model. It does not choose a launcher.
+    def test_a_local_run_uses_a_different_harness_in_the_same_directory(self):
+        """The executor chooses a harness. It does not choose a launcher.
 
-        Everything the runner relies on the harness for — its worktree mode, the
-        branch, running the tests, the commit, reporting back — is a property of
-        Claude Code, not of the model behind it. A local run that swapped the
-        binary would lose all of it silently.
+        This test used to assert the opposite half — that the two argvs were
+        identical — on the reasoning that the worktree, the branch, the tests,
+        the commit and the report-back all belonged to Claude Code, so swapping
+        the binary would lose them. Task 810 is the ticket that checked that
+        list. The worktree and the branch became the runner's in task 756; the
+        commit and the report-back are instructions in the prompt and a helper
+        script, both harness-neutral. What was left was running commands at all,
+        and there Claude Code headless was the defect rather than the guarantee.
+
+        So the binary now differs on purpose, and what must not differ is
+        everything the runner owns: the directory, and one launch path through
+        it.
         """
         self.service.work(self.service.get_by_task_number(8))
         default_call = self.spawn.calls[0]
         self.launcher._release(9)
         self.work_local()
         local_call = self.spawn.calls[1]
-        self.assertEqual(local_call["argv"], default_call["argv"])
+
         self.assertEqual(local_call["cwd"], default_call["cwd"])
+        self.assertNotEqual(local_call["argv"][0], default_call["argv"][0])
+        self.assertEqual(local_call["argv"][0], self.config.opencode_bin)
+        self.assertEqual(default_call["argv"][0], self.config.claude_bin)
+
+    def test_both_executors_go_through_one_launch_path(self):
+        """One lock, one log, one record shape, whichever harness ran.
+
+        The launch record is what `/launches`, the console and the `work`
+        response all read, so a harness that produced a differently shaped one
+        would be a second runner wearing the first one's clothes.
+        """
+        default = self.service.work(self.service.get_by_task_number(8))
+        self.launcher._release(9)
+        local = self.work_local()
+        self.assertEqual(sorted(default), sorted(local))
+        self.assertEqual(default["reference"], local["reference"])
+        self.assertEqual(default["workdir"], local["workdir"])
 
     def test_the_model_reaches_the_child_through_the_environment(self):
         self.work_local()
-        env = self.spawn.calls[0]["env"]
-        self.assertEqual(env["ANTHROPIC_MODEL"], "qwen38-27b-abl:256k")
-        self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "262144")
-        self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:11440")
+        call = self.spawn.calls[0]
+        settings = json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(settings["model"], "ollama/qwen38-27b-abl:256k")
+        provider = settings["provider"]["ollama"]
+        self.assertEqual(
+            provider["models"]["qwen38-27b-abl:256k"]["limit"]["context"], 262144
+        )
+        self.assertEqual(
+            provider["options"]["baseURL"], self.config.local_executor_base_url
+        )
+        self.assertIn("--auto", call["argv"])
 
     def test_the_runners_own_environment_is_not_displaced_by_the_executors(self):
         """The Vikunja settings are applied after the executor, on purpose."""
@@ -413,7 +603,7 @@ class OverTheSocket(HttpFlow):
 class ExecutorDataclass(unittest.TestCase):
     def test_apply_removes_before_it_adds(self):
         executor = Executor(
-            name="x", env={"A": "new"}, unset=frozenset({"A", "B"})
+            name="x", binary="x-bin", env={"A": "new"}, unset=frozenset({"A", "B"})
         )
         self.assertEqual(executor.apply({"A": "old", "B": "gone", "C": "kept"}),
                          {"A": "new", "C": "kept"})
