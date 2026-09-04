@@ -1,6 +1,13 @@
-"""Build the Claude Code prompt for a single Vikunja ticket.
+"""Build the prompt for a single Vikunja ticket.
 
-The prompt never contains the Vikunja API token. Claude updates the board
+Harness-neutral, and that is load-bearing rather than incidental: the commit and
+the report-back are instructions in this text and a helper script the child
+runs, not capabilities of any particular CLI. It is what let task 810 change the
+local executor's harness without the runner losing either of them, and it is why
+both executors are handed the same prompt with nothing trimmed for being a local
+model.
+
+The prompt never contains the Vikunja API token. The run updates the board
 through ``vkctl.py``, which reads the token from its own environment.
 """
 

@@ -33,7 +33,11 @@ import os
 import shlex
 from unittest import mock
 
-from vikunja_claude.config import DEFAULT_CLAUDE_ARGS, PACKAGE_ROOT
+from vikunja_claude.config import (
+    DEFAULT_CLAUDE_ARGS,
+    DEFAULT_OPENCODE_ARGS,
+    PACKAGE_ROOT,
+)
 from vikunja_claude.run_output import (
     STATUS_LINE_CHARS,
     STATUS_READ_BYTES,
@@ -99,15 +103,28 @@ class TestTheLaunchAsksForOutputAsItHappens(ServiceTestCase):
         the host until somebody noticed. The host's own `.env` is untracked and
         cannot be asserted here; the example it is copied from can.
         """
+        self.assert_example_matches("CLAUDE_ARGS", DEFAULT_CLAUDE_ARGS)
+
+    def test_the_shipped_env_file_does_not_quietly_undo_the_local_default(self):
+        """The same trap, for the harness task 810 added.
+
+        It bites harder here: `OPENCODE_ARGS` is where a local run's ability to
+        run commands at all is decided, so an example that drifted from the
+        default would hand somebody a copied `.env` that produces runs which
+        read the ticket and change nothing.
+        """
+        self.assert_example_matches("OPENCODE_ARGS", DEFAULT_OPENCODE_ARGS)
+
+    def assert_example_matches(self, name: str, default: str) -> None:
         example = PACKAGE_ROOT / ".env.example"
         declared = [
             line.split("=", 1)[1].strip()
             for line in example.read_text(encoding="utf-8").splitlines()
-            if line.startswith("CLAUDE_ARGS=")
+            if line.startswith(f"{name}=")
         ]
 
-        self.assertEqual(len(declared), 1, "one CLAUDE_ARGS line, or none to compare")
-        self.assertEqual(shlex.split(declared[0]), shlex.split(DEFAULT_CLAUDE_ARGS))
+        self.assertEqual(len(declared), 1, f"one {name} line, or none to compare")
+        self.assertEqual(shlex.split(declared[0]), shlex.split(default))
 
     def test_a_launch_hands_those_arguments_to_the_process(self):
         """The default is only worth anything if it reaches the child. It is
@@ -327,6 +344,139 @@ class TestWhatAnEventIsRenderedAs(ServiceTestCase):
     def test_an_event_carrying_nothing_says_nothing(self):
         self.assertEqual(render(assistant({"type": "text", "text": ""})), [])
         self.assertEqual(render(""), [])
+
+
+class TestTheOtherHarnessRendersThroughTheSameSurface(ServiceTestCase):
+    """OpenCode's vocabulary, rendered into the labels a reader already knows.
+
+    Since task 810 the `local` executor is OpenCode, and `opencode run --format
+    json` writes the same kind of artifact in the same way: one JSON object per
+    line, as each step of the run completes. Only the vocabulary differs, and it
+    does not collide with Claude Code's — nothing here is a top-level `type`
+    Claude Code emits, and nothing Claude Code emits is one of these — so one
+    renderer serves both and a status tail reads the same whichever ran.
+    """
+
+    @staticmethod
+    def event(kind: str, **payload) -> str:
+        """The envelope OpenCode writes: a type, a stamp, a session, a body."""
+        return json.dumps(
+            {"type": kind, "timestamp": 1, "sessionID": "ses_1", **payload}
+        )
+
+    def test_assistant_text_carries_the_same_label_as_claude_codes(self):
+        self.assertEqual(
+            render(self.event("text", part={"type": "text", "text": "Reading the diff"})),
+            ["assistant: Reading the diff"],
+        )
+
+    def test_reasoning_is_shown_as_thinking(self):
+        self.assertEqual(
+            render(self.event("reasoning", part={"type": "reasoning", "text": "which test bites"})),
+            ["thinking: which test bites"],
+        )
+
+    def test_one_completed_tool_renders_as_the_call_and_its_result(self):
+        """Two lines from one event, on purpose.
+
+        Claude Code reports a tool call on the assistant turn and its result on
+        the next user turn; OpenCode reports both together when the tool
+        finishes. Rendering the one event as two lines keeps a single vocabulary
+        on the read side.
+        """
+        self.assertEqual(
+            render(
+                self.event(
+                    "tool_use",
+                    part={
+                        "type": "tool",
+                        "tool": "bash",
+                        "state": {
+                            "status": "completed",
+                            "input": {"command": "pytest -q"},
+                            "output": "38 passed",
+                        },
+                    },
+                )
+            ),
+            ['tool: bash {"command": "pytest -q"}', "tool result: 38 passed"],
+        )
+
+    def test_a_failed_tool_is_labelled_as_an_error(self):
+        lines = render(
+            self.event(
+                "tool_use",
+                part={
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "error",
+                        "input": {"command": "pytest -q"},
+                        "error": "command not found",
+                    },
+                },
+            )
+        )
+        self.assertEqual(lines[1], "tool error: command not found")
+
+    def test_a_structured_tool_error_is_serialised_rather_than_dropped(self):
+        """The point of the line is to say what happened.
+
+        A tool error need not be a string, and a renderer that showed only
+        strings would turn the most interesting event in a run into a blank.
+        """
+        lines = render(
+            self.event(
+                "tool_use",
+                part={
+                    "type": "tool",
+                    "tool": "edit",
+                    "state": {"status": "error", "error": {"code": 2}},
+                },
+            )
+        )
+        self.assertIn("tool error:", lines[1])
+        self.assertIn("code", lines[1])
+
+    def test_a_run_error_prefers_the_message_over_the_class_name(self):
+        """What OpenCode shows a person, shown here too."""
+        self.assertEqual(
+            render(
+                self.event(
+                    "error",
+                    error={"name": "ProviderError", "data": {"message": "model not found"}},
+                )
+            ),
+            ["error: model not found"],
+        )
+
+    def test_a_run_error_with_no_message_falls_back_to_its_name(self):
+        self.assertEqual(
+            render(self.event("error", error={"name": "ProviderError"})),
+            ["error: ProviderError"],
+        )
+
+    def test_the_step_markers_are_recognised_and_deliberately_silent(self):
+        """Silence chosen for a known event, not a gap.
+
+        `step_start` and `step_finish` bracket every model turn and say nothing
+        about what the run is doing. A line each would be two contentless
+        entries per turn, pushing the text, tool calls and errors a status read
+        exists for out of the far end of a 40-line window.
+        """
+        self.assertEqual(render(self.event("step_start", part={"type": "step-start"})), [])
+        self.assertEqual(render(self.event("step_finish", part={"type": "step-finish"})), [])
+
+    def test_an_unknown_opencode_event_is_still_named(self):
+        """The guarantee that survives a vocabulary change in either harness.
+
+        A reader watching output advance must not be shown a stall that is only
+        an event type this module has not met.
+        """
+        self.assertEqual(render(self.event("something_new")), ["something_new:"])
+
+    def test_an_empty_text_part_says_nothing_rather_than_an_empty_label(self):
+        self.assertEqual(render(self.event("text", part={"type": "text", "text": "  "})), [])
 
 
 class TestWhatComesBackStaysBounded(RunOutputTestCase):

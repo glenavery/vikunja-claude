@@ -76,7 +76,7 @@ can start a Claude run on this host.
 | GET | `/` | Console: ticket input, Preview prompt, Work ticket, Work next Ready |
 | GET | `/health` | Service + Vikunja reachability (`503` when Vikunja is down) |
 | GET | `/task/{id}` | Ticket details and the generated prompt. **Never launches.** |
-| POST | `/task/{id}/work` | Move to In Progress, then launch Claude Code. `?executor=local` runs it on the approved local model |
+| POST | `/task/{id}/work` | Move to In Progress, then launch the ticket's harness. `?executor=local` runs it on OpenCode against the approved local model |
 | GET | `/task/{id}/run` | What the last run for that task is doing: state, liveness, executor, model, and a bounded tail of its output. **Reads only** |
 | GET | `/task/{id}/launch` | Landing page for the browser button: launches on load |
 | GET | `/ticket/{n}` | Board-number lookup (`#N` on the card); redirects to `/task/{id}` |
@@ -251,15 +251,14 @@ If a description is lost anyway, it is recoverable from orphaned TOAST chunks
 until vacuum reclaims them — tools and method in
 `/home/glen/stacks/vikunja/recovery-tools/`. Act immediately.
 
-## Which model a run drives
+## Which harness a run uses, and which model behind it
 
 A run can execute on the approved **local** model instead of the hosted one.
-That is the only thing the choice changes.
 
 | | |
 |---|---|
 | `claude` (default) | Claude Code as installed, talking to whatever it normally talks to. |
-| `local` | Claude Code, pointed at the approved local coding seat. |
+| `local` | **OpenCode**, driving the approved local coding seat, with command execution enabled inside the ticket's worktree. |
 
 ```bash
 curl -s -X POST localhost:3460/ticket/33/work?executor=local | jq
@@ -269,45 +268,98 @@ RUNNER_EXECUTOR=local          # or make it the default for every run
 The console and each ticket page carry a **“(local model)”** button beside the
 normal one.
 
-**The harness stays Claude Code either way, and that is the point.** Everything
-the runner leans on the harness for — its worktree mode and the branch it makes,
-running the tests, the commit, reporting back through `vkctl.py` — belongs to
-Claude Code, not to the model behind it. Swapping in a different CLI would take
-all of that away; swapping the model touches none of it. So there is one
-launcher, one lock, one log and one prompt, and an executor is nothing but extra
-environment for the child process.
+**The harness used to be Claude Code either way, and task 810 is why it is not.**
+The reasoning for one harness was that everything the runner leans on the
+harness for belongs to the harness rather than to the model, so swapping the CLI
+would take all of it away. That was sound when it was written, and two of its
+three premises have since expired:
+
+- the **worktree and the branch** stopped being the harness's in task 756, when
+  the runner started making them itself, before the spawn, for every executor.
+- the **commit and the report-back** were never the harness's. They are
+  instructions in the prompt and a helper script the child runs, and both are
+  harness-neutral text.
+- what actually remained was **running commands at all** — and there Claude Code
+  headless was the problem rather than the guarantee. See *Permissions* below.
+
+So there is still one launcher, one lock, one log, one prompt and one worktree,
+and an executor is now an argv plus extra environment for the child. `claude` is
+untouched: this widened the choice, it did not migrate the default.
+
+**`opencode` has to be on the service's PATH, and it is not there by default.**
+The user unit runs with `PATH=/home/glen/.local/bin:/usr/local/bin:/usr/bin:/bin`,
+which is where `claude` is symlinked from; an npm-global install puts `opencode`
+in `~/.npm-global/bin`, which is not on that list. Either symlink it into
+`~/.local/bin` beside `claude`, or name it outright:
+
+```env
+OPENCODE_BIN=/home/glen/.npm-global/bin/opencode
+```
+
+Getting this wrong is a clean refusal rather than a bad run — the launch fails
+with `Could not start 'opencode'`, the lock is released and the ticket is left
+where it was — but the first local run after deploying is where it shows up.
 
 **Nothing here names a model.** `local` resolves the model from
 `deploy/ollama/models.json` in `CLAUDE_WORKDIR` — the investment repository's
 tracked record of which local models are approved and what job each holds. The
 one entry carrying `"seat": "local_coding"` is the model, and its Modelfile's
-`num_ctx` is the context the run is given (currently 262,144; Claude Code
-assumes 200k for a model it does not recognise and compacts to it, so it has to
-be told). Approving a different model is an edit there and nothing here.
+`num_ctx` is the context the run is given (currently 262,144; a harness that
+does not know a model's window assumes one and compacts to it, so it has to be
+told). Approving a different model is an edit there and nothing here.
+
+That record is the **only** copy. OpenCode is configured through
+`OPENCODE_CONFIG_CONTENT` in the child's environment, built fresh from the seat
+at every launch — so no `opencode.json` is written, and a host whose own
+`opencode.json` names something else does not change what a ticket run uses.
+`limit` carries a context and an output cap, and they come from different places
+on purpose. The context is read from the seat's recipe and is a fact about the
+approved model. The output cap is not: no recipe under `deploy/ollama/` sets
+`num_predict`, so the seat imposes no output limit of its own — but OpenCode
+refuses a config missing the key, so one is stated as harness bookkeeping and
+matched to the value the investment repository's own `opencode.json` already
+uses for this seat.
 
 **A local run that cannot be configured is refused, never downgraded.** A
 missing record, no seat, two seats, or a recipe stating no context all give
 `400` and launch nothing. The alternative to a local run is a run against a paid
-frontier model, so falling back would answer “run this locally” with a bill —
-and for the same reason a local run's environment has `ANTHROPIC_API_KEY`
-removed, whatever the service inherited.
+frontier model, so falling back would answer “run this locally” with a bill.
 
-`LOCAL_EXECUTOR_BASE_URL` is a **transport shim**, not Ollama itself: Ollama
-refuses any `role: system` message that is not first and Claude Code always
-appends one, so without the shim the two cannot talk at all. It ships in the
-investment repository — `deploy/ollama/anthropic_shim.py`, with its unit and the
-measurements in `deploy/ollama/README.md`.
+For the same reason a local run's environment has every paid provider's
+credentials removed — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
+`GEMINI_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`, `OLLAMA_API_KEY` — whatever the
+service inherited. That list grew with the harness: OpenCode discovers providers
+from the environment and can address Anthropic, OpenAI, Google, OpenRouter and
+Ollama's own hosted tier, so one surviving key is one reachable paid provider.
+Pinning `--model` is what chooses the seat; emptying these is what makes the
+alternatives unreachable rather than merely unchosen, and the flag is appended
+after `OPENCODE_ARGS` so a deployment cannot take it off.
+
+`LOCAL_EXECUTOR_BASE_URL` is **Ollama itself**, on its OpenAI-compatible surface
+(`http://127.0.0.1:11434/v1`). It used to be the Anthropic transport shim on
+:11440, which exists only because Claude Code speaks the Anthropic message shape
+and appends a trailing `role: system` message Ollama refuses. OpenCode speaks
+the OpenAI shape, which Ollama serves natively, so the local path no longer goes
+through the shim at all. The shim is still deployed and still serves the Claude
+Code path; nothing in this package reaches it.
 
 ## Permissions
 
-The default `CLAUDE_ARGS` is
+The two executors answer this differently, and neither failure mode is a stall —
+**in headless mode neither harness ever waits for a person.** That is what makes
+both of them quiet, and it is why the launch arguments are asserted in the suite
+(`tests/test_executors.py`, `UnattendedExecution`) rather than only described
+here.
+
+**`claude`.** The default `CLAUDE_ARGS` is
 `-p --verbose --output-format stream-json --permission-mode acceptEdits`: file
-edits are
-accepted, but **bash commands are denied in headless mode**, so a run cannot
-actually execute tests or `git commit`. That default is deliberately the safe
-one. To let unattended runs finish, either allowlist the commands you want in
-`/home/glen/stacks/investment/.claude/settings.json`, or — understanding what
-it means — set:
+edits are accepted, but **bash commands are denied in headless mode**, so a run
+cannot actually execute tests, `git commit`, or `vkctl.py`. That default is
+deliberately the safe one, and #807 is what it looks like from outside — a run
+that reads the ticket, edits code, and is refused everything after that. To let
+unattended runs finish, either allowlist the commands you want in
+`/home/glen/stacks/investment/.claude/settings.json`, or — understanding what it
+means — set:
 
 ```env
 CLAUDE_ARGS=-p --verbose --output-format stream-json --dangerously-skip-permissions
@@ -315,14 +367,31 @@ CLAUDE_ARGS=-p --verbose --output-format stream-json --dangerously-skip-permissi
 
 Decide that consciously; the service will not decide it for you.
 
-`--output-format stream-json` is what makes a run observable while it runs, and
-`--verbose` is what Claude Code demands beside it — it refuses the pair without
-it. With the default `text` format a run prints once, at the end, so
-`get_task_run_status` can prove a process started and nothing more; that is what
-#714 looked like from outside (task 755). Keep both flags in any `CLAUDE_ARGS`
-you set. Nothing else reads the run log, so the format is free to be JSON:
-`vikunja_claude/run_output.py` renders it back to lines, and passes any line
-that is not JSON through untouched.
+**`local`.** The default `OPENCODE_ARGS` is `run --format json --auto`, and the
+injected config allows `edit`, `bash` and `webfetch`. Both halves are needed and
+they are not the same statement: the config settles those three capabilities so
+no request is raised at all, and `--auto` answers anything they do not cover.
+What `--auto` prevents is not a hang — `opencode run` answers a permission
+request itself, allowing it with the flag and **refusing it without**, then
+carrying on either way. So leaving the flag off produces a run that looks busy,
+ends by itself, and has changed nothing.
+
+**The containment is the worktree, not the permission prompt.** A local run is
+unrestricted inside the per-ticket git worktree the runner made for it, which is
+its cwd; that is the trade this makes deliberately, and it is why the worktree
+became the runner's own property in task 756 rather than something a model chose.
+The prompt tells the run to stay on its branch, not to merge, and not to push.
+
+**Observability is the other half of both defaults.** `--output-format
+stream-json` and `--format json` are counterparts: one JSON object per line,
+written as the run happens. With Claude Code's default `text` format a run
+prints once at the end, so `get_task_run_status` can prove a process started and
+nothing more — that is what #714 looked like from outside (task 755). Keep the
+streaming flag in any `CLAUDE_ARGS` or `OPENCODE_ARGS` you set (`--verbose` too
+for Claude Code, which refuses the pair without it). Nothing else reads the run
+log, so the format is free to be JSON: `vikunja_claude/run_output.py` renders
+both vocabularies back to one set of labels, and passes any line that is not
+JSON through untouched.
 
 ## Safety properties
 
@@ -1568,7 +1637,7 @@ vikunja_claude/
   vikunja.py      Vikunja client, Ticket, lookup by task id, board number, #NN
   html_text.py    description HTML ↔ plain text
   prompt.py       the prompt template
-  executors.py    which model a run drives, and nothing else
+  executors.py    which harness a run uses, and which model behind it
   launcher.py     locks, spawn, logging, reaping
   service.py      order of operations: move, then launch
   web.py          HTML console
