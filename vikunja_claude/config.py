@@ -239,6 +239,24 @@ def _project_id_override() -> int | None:
     return int(raw) if raw else None
 
 
+def _launch_timeout_seconds() -> int | None:
+    """The run's elapsed-time ceiling, or None when there is none (task 817).
+
+    **Absent means no ceiling**, which is also the default: a run ends when its
+    executor exits or when something stops it explicitly, and the runner has no
+    opinion about how long that may take. The setting used to default to three
+    hours whether or not anybody had asked for one, and task 813 was killed by
+    that default at final full-suite validation.
+
+    A value still sets a real ceiling, so an operator who wants one says so and
+    gets exactly the task 758 termination path. Blank is spelled the same as
+    absent — a commented-out or emptied line in `.env` is how a ceiling is
+    removed, and reading it as `0` would turn that into "kill on sight".
+    """
+    raw = os.environ.get("CLAUDE_LAUNCH_TIMEOUT_SECONDS", "").strip()
+    return int(raw) if raw else None
+
+
 def _mcp_projects() -> tuple[ProjectRef, ...]:
     """The approved boards, from the environment or the default pair.
 
@@ -429,7 +447,22 @@ class Config:
     port: int
     state_dir: Path
     frontend_url: str
-    launch_timeout_seconds: int
+    #: An elapsed-time ceiling for a run, or **None for no ceiling at all**,
+    #: which is the default (task 817). A healthy run is not something this
+    #: system knows the length of: it ends when its executor exits. The ceiling
+    #: used to default to three hours, and task 813 was killed by it at the
+    #: moment it reached final full-suite validation — valid work left
+    #: uncommitted and the ticket stranded In Progress, because a run stopped
+    #: mid-flight reports nothing to the board.
+    #:
+    #: `None` reaches `subprocess.wait(timeout=None)` unchanged, which is
+    #: already "wait for the process", so no-limit is the absence of a deadline
+    #: rather than a very large one — there is no number to be reached and the
+    #: reaper simply watches. A number still means what it always did, including
+    #: `0`, which is a ceiling already spent when the run starts; that is how the
+    #: task 758 tests reach the termination path without waiting out a real one.
+    #: Setting one is how an operator gets that behaviour back.
+    launch_timeout_seconds: int | None = None
     #: How long a run that hit that ceiling is given to die, per signal. The
     #: reaper sends SIGTERM, waits this long, escalates to SIGKILL and waits
     #: this long again, so a wedged child costs at most twice this before the
@@ -489,9 +522,7 @@ class Config:
             frontend_url=os.environ.get(
                 "VIKUNJA_FRONTEND_URL", DEFAULT_FRONTEND_URL
             ).rstrip("/"),
-            launch_timeout_seconds=int(
-                os.environ.get("CLAUDE_LAUNCH_TIMEOUT_SECONDS", "10800")
-            ),
+            launch_timeout_seconds=_launch_timeout_seconds(),
             kill_grace_seconds=float(
                 os.environ.get(
                     "CLAUDE_KILL_GRACE_SECONDS", str(DEFAULT_KILL_GRACE_SECONDS)
