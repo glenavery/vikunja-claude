@@ -375,6 +375,87 @@ the OpenAI shape, which Ollama serves natively, so the local path no longer goes
 through the shim at all. The shim is still deployed and still serves the Claude
 Code path; nothing in this package reaches it.
 
+### Navigating the code: the repository's Graphify graph (task 821)
+
+A local run used to answer every structural question — who calls this, what
+owns that rule, where is this enforced — with `grep` and `read`, paying for each
+one in whole files pulled into the window. The repository already holds the
+answer as a graph, and graphify already knows how to serve it, so a local run is
+handed that server:
+
+```json
+"mcp": {
+  "graphify": {
+    "type": "local",
+    "command": ["<interpreter>", "-m", "graphify.serve", "<CLAUDE_WORKDIR>/graphify-out/graph.json"],
+    "enabled": true
+  }
+}
+```
+
+It advertises `query_graph`, `get_node`, `get_neighbors`, `get_community`,
+`god_nodes`, `graph_stats` and `shortest_path`. Nothing is mandatory: `grep`,
+`read` and `glob` are untouched, and the graph is one more way to look something
+up rather than the only one. **`claude` runs are not given this** — they reach
+graphify their own way, through the investment repository's `CLAUDE.md` and its
+`PreToolUse` hook — and this changes nothing about them.
+
+**Two paths, neither of them a setting.** The graph is
+`graphify-out/graph.json` under `CLAUDE_WORKDIR`, and the interpreter comes from
+`graphify-out/.graphify_python`, which graphify writes beside the graph naming
+the python that can import it (under a venv or a `uv tool` install the system
+`python3` cannot). Both are facts about that repository's layout, the way
+`deploy/ollama/models.json` is, and a configurable copy of either would only be
+a second thing to keep in step.
+
+**The graph is the checkout's, named absolutely, and that is deliberate.** A run
+works in the ticket's worktree, where `graphify-out` does not exist — it is
+untracked, so a worktree starts without one. A relative path would resolve to
+nothing there, and building a graph per worktree would be a second index of the
+same repository. The graph's nodes carry repository-relative sources
+(`api/db_config.py L50`), so a symbol it resolves is a symbol at that path
+inside the worktree.
+
+**The runner states it; no config on disk supplies it.** It travels in
+`OPENCODE_CONFIG_CONTENT` with the seat. OpenCode merges the configs it finds —
+the checkout's own `opencode.json`, the host's `~/.config/opencode` — and both
+are edited by people for their own sessions, so a run that inherited its graph
+from one of them would lose it the day somebody tidied up. Merging is by key: a
+project or host config naming other MCP servers keeps them, and only `graphify`
+is the runner's.
+
+**Nothing here builds or refreshes a graph.** A stale graph is refreshed the way
+the humans working the same checkout refresh it, with `graphify update .` in
+`CLAUDE_WORKDIR`.
+
+#### Verifying it, and why the check is where it is
+
+```bash
+# From the checkout, with the config the runner would build:
+OPENCODE_CONFIG_CONTENT="$(…)" opencode mcp list
+#   ● ✓ graphify connected
+#         /…/.venv/bin/python -m graphify.serve /…/graphify-out/graph.json
+```
+
+Measured against OpenCode 1.18.27 and graphify's own server, the two failures
+are **not** caught in the same place:
+
+| What is wrong | What OpenCode reports | Where it is caught |
+|---|---|---|
+| The interpreter cannot import graphify | `✗ graphify failed` — the server exits at once | OpenCode, visibly |
+| `graph.json` is not there | `✓ graphify connected`, tools advertised, and a query answers `isError: false` carrying the text *graph.json not found* | **Nowhere** — so the runner checks it |
+
+The second row is the reason a local launch reads both paths before it spawns. A
+query that failed and reported success is the one outcome a run must never be
+handed: it is indistinguishable, from inside the run, from a repository about
+which the graph simply knows nothing.
+
+**So a checkout that cannot serve its graph refuses the launch**, with a message
+naming the repair, in the same way and for the same reason a missing seat does:
+`400`, nothing spawned, the ticket left where it was. The `claude` executor is
+unaffected — a checkout with no graph can still run a ticket, just not a local
+one.
+
 ## Permissions
 
 The two executors answer this differently, and neither failure mode is a stall —
@@ -1702,7 +1783,7 @@ vikunja_claude/
   vikunja.py      Vikunja client, Ticket, lookup by task id, board number, #NN
   html_text.py    description HTML ↔ plain text
   prompt.py       the prompt template
-  executors.py    which harness a run uses, and which model behind it
+  executors.py    which harness a run uses, which model behind it, and what it can reach
   launcher.py     locks, spawn, logging, reaping
   service.py      order of operations: move, then launch
   web.py          HTML console
