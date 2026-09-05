@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -34,6 +35,8 @@ from vikunja_claude.executors import (
     DEFAULT_EXECUTOR,
     LOCAL_EXECUTOR,
     DEFAULT_OUTPUT_TOKENS,
+    GRAPHIFY_SERVER_NAME,
+    GRAPHIFY_SERVE_MODULE,
     PAID_PROVIDER_KEYS,
     Executor,
     ExecutorError,
@@ -73,11 +76,35 @@ MANIFEST = {
 RECIPE = "FROM base\nPARAMETER temperature 1\nPARAMETER num_ctx 262144\n"
 
 
+def write_graphify(root: Path, graph=True, interpreter=sys.executable) -> Path:
+    """The graphify artifacts a checkout carries: a graph and its interpreter.
+
+    Both are content the runner only reads, so the graph is a stub — what is
+    under test is which path is handed to OpenCode, never what the graph says.
+    The interpreter defaults to the one running the tests because the runner
+    checks that the recorded path exists, and this one demonstrably does.
+
+    `graph=False` and `interpreter=None` are how a test asks for a checkout
+    missing one of them, which is a refusal rather than a quieter run.
+    """
+    out = root / "graphify-out"
+    out.mkdir(parents=True, exist_ok=True)
+    if graph:
+        (out / "graph.json").write_text(
+            json.dumps({"nodes": [], "links": []}), encoding="utf-8"
+        )
+    if interpreter is not None:
+        (out / ".graphify_python").write_text(f"{interpreter}\n", encoding="utf-8")
+    return root
+
+
 def write_repo(root: Path, manifest=None, recipes=None) -> Path:
     """A workdir shaped like the investment repository's ollama deployment.
 
     A real git repository as well as the right files, because a launch now
-    creates a worktree in the workdir and refuses if it cannot (task 756).
+    creates a worktree in the workdir and refuses if it cannot (task 756), and
+    a graphify graph beside them, because a local launch now reads that too
+    (task 821). Both are properties of the checkout the runner works in.
     """
     make_repo(root)
     ollama = root / "deploy" / "ollama"
@@ -87,6 +114,7 @@ def write_repo(root: Path, manifest=None, recipes=None) -> Path:
     )
     for name, text in (recipes or {"qwen38-27b-abl-256k.Modelfile": RECIPE}).items():
         (ollama / name).write_text(text, encoding="utf-8")
+    write_graphify(root)
     return root
 
 
@@ -403,6 +431,169 @@ class UnattendedExecution(Repo):
 
 
 # --------------------------------------------------------------------------- #
+# The code graph a local run may navigate by                                    #
+# --------------------------------------------------------------------------- #
+
+class GraphNavigation(Repo):
+    """Task 821 — the repository's existing graph, reachable from a local run.
+
+    Two things are worth more than the rest of what is asserted here.
+
+    **The graph is the CHECKOUT's, named absolutely.** A run works in the
+    ticket's worktree, and `graphify-out` is untracked, so a worktree starts
+    without one: a relative path would resolve to nothing, and a per-worktree
+    graph would be the second indexer this ticket is not allowed to build.
+
+    **A missing graph refuses the launch, and that is not belt-and-braces.**
+    Measured against OpenCode 1.18.27 and graphify's own server: an interpreter
+    that cannot import graphify is caught downstream — the server exits and
+    `opencode mcp list` reports it failed — but a missing *graph* is not. The
+    server starts, OpenCode reports it connected, the tools are advertised, and
+    a query answers `isError: false` with the text "graph.json not found". A
+    query that failed and reported success is the outcome this refusal exists
+    to make impossible, and nothing downstream would have caught it.
+    """
+
+    def server(self, **overrides) -> dict:
+        return opencode_settings(self.local(**overrides))["mcp"][GRAPHIFY_SERVER_NAME]
+
+    def test_the_run_is_offered_the_graph_server_and_it_is_enabled(self):
+        """Advertised, not merely present: a disabled entry serves nothing."""
+        settings = opencode_settings(self.local())
+        self.assertIn(GRAPHIFY_SERVER_NAME, settings["mcp"])
+        self.assertTrue(settings["mcp"][GRAPHIFY_SERVER_NAME]["enabled"])
+        self.assertEqual(settings["mcp"][GRAPHIFY_SERVER_NAME]["type"], "local")
+
+    def test_the_command_serves_the_existing_graph_with_its_own_interpreter(self):
+        """Graphify's server, graphify's interpreter, the checkout's graph.
+
+        The interpreter is read from the record graphify writes beside the
+        graph rather than guessed or configured: under a venv or a `uv tool`
+        install the system `python3` cannot import graphify, and a second copy
+        of that answer here would be a second thing to keep in step.
+        """
+        command = self.server()["command"]
+        interpreter = (
+            self.workdir / "graphify-out" / ".graphify_python"
+        ).read_text(encoding="utf-8").strip()
+        self.assertEqual(
+            command,
+            [
+                interpreter,
+                "-m",
+                GRAPHIFY_SERVE_MODULE,
+                str((self.workdir / "graphify-out" / "graph.json").resolve()),
+            ],
+        )
+
+    def test_the_graph_is_named_absolutely_because_the_run_works_elsewhere(self):
+        """The run's cwd is the worktree; a relative path would find nothing."""
+        graph = Path(self.server()["command"][-1])
+        self.assertTrue(graph.is_absolute())
+        self.assertTrue(graph.is_file())
+
+    def test_naming_the_graph_does_not_displace_the_rest_of_the_config(self):
+        """The seat, its window and the permissions are all still stated.
+
+        `mcp` is an addition to what the record already governs, and a config
+        that lost the seat to gain a graph would run the wrong model quietly.
+        """
+        settings = opencode_settings(self.local())
+        self.assertEqual(settings["model"], "ollama/qwen38-27b-abl:256k")
+        self.assertEqual(
+            settings["provider"]["ollama"]["models"]["qwen38-27b-abl:256k"]["limit"],
+            {"context": 262144, "output": DEFAULT_OUTPUT_TOKENS},
+        )
+        self.assertEqual(settings["permission"]["bash"], "allow")
+
+    def test_the_graph_is_stated_by_the_runner_not_left_to_a_host_config(self):
+        """It travels in the generated blob, so no config on disk supplies it.
+
+        OpenCode merges the configs it finds — the checkout's `opencode.json`,
+        the host's `~/.config/opencode` — and both are edited by people for
+        their own sessions. A run that inherited its graph from one of them
+        would lose it the day somebody tidied up, and lose it silently.
+        """
+        executor = self.local()
+        self.assertIn(
+            GRAPHIFY_SERVER_NAME,
+            json.loads(executor.env["OPENCODE_CONFIG_CONTENT"])["mcp"],
+        )
+        self.assertEqual(list(self.workdir.glob("**/opencode.json*")), [])
+
+    def test_the_default_executor_is_not_given_a_graph_server(self):
+        """`claude` is untouched: it reaches the graph its own way, or not.
+
+        The ticket widened the local harness only, and this is the assertion
+        that would fail if the two were ever collapsed into one.
+        """
+        claude = resolve(DEFAULT_EXECUTOR, config_for(self.workdir))
+        self.assertEqual(claude.env, {})
+
+
+class GraphRefusals(Repo):
+    """A checkout that cannot serve its graph stops the run, loudly."""
+
+    def rebuild_graphify(self, **kwargs) -> None:
+        for name in ("graph.json", ".graphify_python"):
+            path = self.workdir / "graphify-out" / name
+            if path.exists():
+                path.unlink()
+        write_graphify(self.workdir, **kwargs)
+
+    def test_a_checkout_with_no_graph_refuses_and_names_the_repair(self):
+        self.rebuild_graphify(graph=False)
+        with self.assertRaises(ExecutorError) as caught:
+            self.local()
+        message = str(caught.exception)
+        self.assertIn("graphify-out/graph.json", message.replace(str(self.workdir), ""))
+        self.assertIn("graphify update .", message)
+
+    def test_a_checkout_with_no_interpreter_record_refuses(self):
+        self.rebuild_graphify(interpreter=None)
+        with self.assertRaises(ExecutorError) as caught:
+            self.local()
+        self.assertIn(".graphify_python", str(caught.exception))
+
+    def test_an_empty_interpreter_record_refuses_rather_than_defaulting(self):
+        """No fallback to `python3`: the one that can import graphify is named.
+
+        A default here would produce a server that exits on start, which reads
+        from the run as tools that were never there.
+        """
+        self.rebuild_graphify(interpreter="")
+        with self.assertRaises(ExecutorError) as caught:
+            self.local()
+        self.assertIn("names no interpreter", str(caught.exception))
+
+    def test_an_interpreter_that_is_not_there_refuses(self):
+        self.rebuild_graphify(interpreter="/nowhere/bin/python")
+        with self.assertRaises(ExecutorError) as caught:
+            self.local()
+        self.assertIn("/nowhere/bin/python", str(caught.exception))
+
+    def test_the_refusal_does_not_fall_back_to_the_default_executor(self):
+        """The alternative to a local run is a paid one, so nothing is retried.
+
+        `resolve` is asked for the local executor by name and must raise, not
+        hand back the Claude Code one with a warning.
+        """
+        self.rebuild_graphify(graph=False)
+        with self.assertRaises(ExecutorError):
+            resolve(LOCAL_EXECUTOR, config_for(self.workdir))
+
+    def test_the_default_executor_still_resolves_without_a_graph(self):
+        """A graph is the local harness's dependency, not the runner's.
+
+        `claude` runs were explicitly left alone, so a checkout with no graph
+        must not become a checkout that cannot run a ticket at all.
+        """
+        self.rebuild_graphify(graph=False)
+        claude = resolve(DEFAULT_EXECUTOR, config_for(self.workdir))
+        self.assertEqual(claude.name, DEFAULT_EXECUTOR)
+
+
+# --------------------------------------------------------------------------- #
 # Through the runner, where it has to keep everything else the same             #
 # --------------------------------------------------------------------------- #
 
@@ -475,6 +666,31 @@ class ThroughTheRunner(ServiceTestCase):
             provider["options"]["baseURL"], self.config.local_executor_base_url
         )
         self.assertIn("--auto", call["argv"])
+
+    def test_the_graph_the_child_gets_is_the_checkouts_not_the_worktrees(self):
+        """The one assertion that needs a real launch to make (task 821).
+
+        Everything else about the graph can be read off the generated config,
+        but this is about the gap between where the config is built and where
+        the run works: the runner makes a worktree and spawns into it, and that
+        worktree has no `graphify-out` of its own — it is untracked, so a fresh
+        one never does. A graph named relatively, or named from the run's own
+        directory, would resolve to nothing there; and nothing is what a
+        missing graph looks like from inside the run, because the server still
+        starts and still answers.
+        """
+        self.work_local()
+        call = self.spawn.calls[0]
+        settings = json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])
+        graph = Path(settings["mcp"][GRAPHIFY_SERVER_NAME]["command"][-1])
+        self.assertEqual(
+            graph, (self.config.workdir / "graphify-out" / "graph.json").resolve()
+        )
+        self.assertTrue(graph.is_file())
+
+        worktree = Path(call["cwd"])
+        self.assertNotEqual(worktree, self.config.workdir)
+        self.assertFalse((worktree / "graphify-out").exists())
 
     def test_the_runners_own_environment_is_not_displaced_by_the_executors(self):
         """The Vikunja settings are applied after the executor, on purpose."""

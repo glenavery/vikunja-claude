@@ -5,6 +5,13 @@ launch, the log and the reap. An executor owns the two questions that are left �
 *what binary is spawned* and *what model does it talk to* — as an argv and as
 extra environment for the child process. That is the whole abstraction.
 
+Task 821 added a third thing the local one may answer, and it is deliberately
+narrow: *what the harness can reach*. OpenCode takes its whole configuration
+from that environment, so the code graph a run navigates by is stated in the
+same generated blob as the seat — see ``graphify_server``. It is still a
+property of how the run is launched, not of the ticket, and the ``claude``
+executor is untouched by it.
+
 **It used to own only the second one, and task 810 is why it now owns both.**
 The harness was Claude Code in every case, on the reasoning that everything the
 runner leans on the harness for belongs to the harness rather than to the model,
@@ -109,6 +116,28 @@ PAID_PROVIDER_KEYS = frozenset(
 #: behave the same way on the same model. If the record ever states an output
 #: cap, this should be read from it the way the context is.
 DEFAULT_OUTPUT_TOKENS = 32768
+
+#: Where the repository's Graphify code graph lives, relative to the repository
+#: root, and the interpreter record graphify writes beside it. Paths rather than
+#: settings for the reason ``MANIFEST_PATH`` is one: both are facts about that
+#: repository's layout, and a configurable copy would only be a second thing to
+#: keep in step. The interpreter in particular is graphify's own answer to
+#: "which python can import me" — under a venv or a ``uv tool`` install the
+#: system ``python3`` cannot, and graphify records the one that can.
+GRAPHIFY_DIR = Path("graphify-out")
+GRAPHIFY_GRAPH = GRAPHIFY_DIR / "graph.json"
+GRAPHIFY_INTERPRETER = GRAPHIFY_DIR / ".graphify_python"
+
+#: What the graph server is called in the generated config. OpenCode namespaces
+#: an MCP server's tools under its name, so this is also what a run sees.
+GRAPHIFY_SERVER_NAME = "graphify"
+
+#: The module that serves an existing graph over MCP on stdio. Serving the graph
+#: the repository already has is the whole of this: nothing here builds, updates
+#: or refreshes one, and a run that wants a fresher graph asks the same
+#: ``graphify`` the humans do.
+GRAPHIFY_SERVE_MODULE = "graphify.serve"
+
 
 _NUM_CTX = re.compile(r"^PARAMETER\s+num_ctx\s+(\d+)", re.M)
 
@@ -233,7 +262,73 @@ def _context_tokens(entry: dict, workdir: Path) -> int:
     return int(match.group(1))
 
 
-def opencode_config(model: str, context: int, base_url: str) -> dict:
+def graphify_server(workdir: Path) -> dict:
+    """The MCP entry that puts the repository's existing code graph in reach.
+
+    A local run navigates by ``grep`` and ``read``: every question about who
+    calls a function, what a module owns or where a rule is enforced is paid for
+    in whole files pulled into the window. The repository already carries the
+    answer as a graph — ``graphify-out/graph.json``, built and refreshed for the
+    humans working the same checkout — and graphify already knows how to serve
+    it over MCP. This exposes that server to the run; it does not build a second
+    index, and it does not make the graph the only way to look something up.
+
+    **The graph is the CHECKOUT's, named absolutely, and that is deliberate.**
+    A run's cwd is the ticket's worktree, where ``graphify-out`` does not exist:
+    it is untracked, so a worktree starts without one. A relative path would
+    therefore resolve to nothing, and building one per worktree is the second
+    indexer this is not allowed to be. The graph's nodes carry repository-
+    relative sources (``api/db_config.py L50``), so a symbol it resolves is a
+    symbol at that path inside the worktree.
+
+    **Both checks below are load-bearing, and neither is redundant with
+    OpenCode's own.** Measured against the real binary (1.18.27):
+
+    - an interpreter that cannot import graphify is caught — the server exits at
+      once and ``opencode mcp list`` reports ``✗ failed``;
+    - a missing *graph* is not. The server starts, OpenCode reports
+      ``✓ connected``, the tools are advertised, and a query comes back as
+      ``isError: false`` carrying "graph.json not found" as its answer text.
+      That is a query that failed and said it succeeded, which is the one
+      outcome a run must never be handed.
+
+    So the graph's existence is settled here, before the launch, where it can be
+    a refusal that names its own repair.
+    """
+    graph = (workdir / GRAPHIFY_GRAPH).resolve()
+    if not graph.is_file():
+        raise ExecutorError(
+            f"No Graphify graph at {graph}. The local executor serves the "
+            "graph the repository already has; build it there with "
+            "`graphify update .`. Left unchecked this is not an error at all: "
+            "OpenCode reports the server connected and every query answers "
+            "'graph.json not found' as though it had succeeded."
+        )
+    record = (workdir / GRAPHIFY_INTERPRETER).resolve()
+    try:
+        interpreter = record.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        raise ExecutorError(
+            f"No interpreter record at {record}. Graphify writes it beside the "
+            "graph, naming the python that can import it; rebuilding the graph "
+            "writes it again."
+        ) from None
+    if not interpreter:
+        raise ExecutorError(f"{record} is empty, so it names no interpreter.")
+    if not Path(interpreter).exists():
+        raise ExecutorError(
+            f"{record} names {interpreter}, which is not there. That is the "
+            "graph's interpreter having moved or its environment having been "
+            "removed, not a path to guess at."
+        )
+    return {
+        "type": "local",
+        "command": [interpreter, "-m", GRAPHIFY_SERVE_MODULE, str(graph)],
+        "enabled": True,
+    }
+
+
+def opencode_config(model: str, context: int, base_url: str, graphify: dict) -> dict:
     """The whole of what OpenCode is told, derived from the approved record.
 
     Handed to the child as ``OPENCODE_CONFIG_CONTENT`` rather than written to a
@@ -255,6 +350,15 @@ def opencode_config(model: str, context: int, base_url: str) -> dict:
     from the seat's own recipe, and the output cap is
     ``DEFAULT_OUTPUT_TOKENS`` because the record states none. Only the first is
     a fact about the approved model.
+
+    ``mcp`` names the code graph the run may navigate by (task 821). It is
+    stated *here*, in what the runner generates, rather than left to the
+    checkout's own ``opencode.json`` or the host's ``~/.config/opencode``:
+    OpenCode merges every config it finds and both of those are edited by
+    people for their own sessions, so a run that inherited the graph from one
+    of them would lose it the day somebody tidied up, and lose it silently.
+    Merging is by key, so a project or host config naming other servers keeps
+    them; only ``graphify`` is the runner's.
     """
     return {
         "$schema": "https://opencode.ai/config.json",
@@ -276,6 +380,7 @@ def opencode_config(model: str, context: int, base_url: str) -> dict:
             }
         },
         "permission": {"edit": "allow", "bash": "allow", "webfetch": "allow"},
+        "mcp": {GRAPHIFY_SERVER_NAME: graphify},
     }
 
 
@@ -302,11 +407,20 @@ def local_executor(config: "Config") -> Executor:
     appends a trailing ``role: system`` message Ollama refuses; OpenCode speaks
     the OpenAI shape, which Ollama serves natively, so the shim is not on this
     path at all any more.
+
+    The graph server is resolved from ``config.workdir`` — the checkout, not the
+    worktree the run will work in — and refuses rather than degrading, for the
+    reasons in ``graphify_server``.
     """
     entry = _seat_entry(_manifest(config.workdir), config.workdir)
     model = _model_id(entry)
     context = _context_tokens(entry, config.workdir)
-    settings = opencode_config(model, context, config.local_executor_base_url.rstrip("/"))
+    settings = opencode_config(
+        model,
+        context,
+        config.local_executor_base_url.rstrip("/"),
+        graphify_server(config.workdir),
+    )
     return Executor(
         name=LOCAL_EXECUTOR,
         binary=config.opencode_bin,
