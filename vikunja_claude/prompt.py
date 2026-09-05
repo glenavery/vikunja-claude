@@ -9,6 +9,16 @@ model.
 
 The prompt never contains the Vikunja API token. The run updates the board
 through ``vkctl.py``, which reads the token from its own environment.
+
+**Rule 2 is a working ORDER, not a preference** (task 823). The local Qwen run
+for #813 finished its implementation and then lost substantial time to
+overlapping test edits — malformed text, conflicting fixtures and undefined
+helpers — because nothing was validated between them. The order is stated once,
+here, for every executor: a harness-specific version of it would be a second
+policy, and the run that needs it most is whichever one is cheapest to blame.
+Note what it does NOT ask for: a full suite after every edit. The narrow checks
+are what must follow each edit, and making the expensive one mandatory is how a
+run learns to skip the step entirely.
 """
 
 from __future__ import annotations
@@ -38,19 +48,34 @@ Rules for this run:
    not refactor code the ticket does not touch, and do not start other tickets.
    If you find a separate problem, mention it in your completion comment rather
    than fixing it.
-2. TESTS. The change is not finished without tests. Add or extend tests that
+2. HOW YOU WORK. One change at a time, and validate it before making the next
+   one. In this order, every time:
+     a. Inspect, and identify the smallest coherent change.
+     b. Apply that one change.
+     c. Immediately syntax- or type-check the files you just touched.
+     d. Run the narrowest existing tests that cover them.
+     e. Fix any failure — a bad edit, a syntax or LSP error, a failing test —
+        before you make any further change.
+     f. Add regression tests the same way, one at a time, running each as you
+        add it.
+     g. Run the broader suite only once the narrow checks pass.
+   You do not need the full suite after every edit; you do need step c and step
+   d after every edit. Stacking unvalidated edits is how a run loses an hour to
+   malformed text, conflicting fixtures and helpers that were never defined —
+   and each of those is cheapest to find in the edit that caused it.
+3. TESTS. The change is not finished without tests. Add or extend tests that
    would fail without your change, and run the relevant suite. Never weaken,
    skip or delete an existing test or assertion to make a failure disappear.
-3. WHERE YOU ARE. This directory is a git worktree made for this ticket, on
+4. WHERE YOU ARE. This directory is a git worktree made for this ticket, on
    branch {branch}. Work here and commit here. Do not switch branches, do not
    merge into main, and do not make another worktree. Merging is a human step
    that happens after this run ends.
-4. COMMIT. Commit your work with a message referencing the ticket, e.g.
+5. COMMIT. Commit your work with a message referencing the ticket, e.g.
    "<type>: <what changed> {commit_ref}". Commit only the files this ticket
    required.
-5. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
+6. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
    commit local.
-6. REPORT BACK to Vikunja when you stop, using the helper below. It names the
+7. REPORT BACK to Vikunja when you stop, using the helper below. It names the
    ticket the way the board does — never the number in a /tasks/<id> URL, which
    is a different number for a different task. Copy the commands as they stand.
    Do not call the Vikunja API directly and do not look for an API token — the
@@ -61,7 +86,7 @@ Rules for this run:
        python3 {vkctl} move {selector} Waiting
 
    Waiting, not Done: work that is committed only on {branch} is not merged,
-   and merging is the human step rule 3 names. Done belongs to whoever merges
+   and merging is the human step rule 4 names. Done belongs to whoever merges
    it into main, after this run has ended.
 
    If you are blocked and cannot finish:

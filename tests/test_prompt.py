@@ -33,6 +33,72 @@ class PromptGeneration(ServiceTestCase):
         self.assertIn("Do only what ticket #8 asks", self.prompt)
         self.assertIn("do not start other tickets", self.prompt)
 
+    def test_states_the_incremental_validation_order(self):
+        """The ORDER, not merely the words (task 823).
+
+        Every step of this loop is advice any run would claim to follow already;
+        what the #813 run actually did was apply several test edits and validate
+        at the end. So the assertion is that the seven steps appear in the
+        served prompt in the sequence they must happen in — a rewrite that
+        preserved the vocabulary and lost the sequence would keep the defect and
+        pass a presence check.
+        """
+        steps = [
+            "smallest coherent change",
+            "Apply that one change",
+            "syntax- or type-check the files you just touched",
+            "Run the narrowest existing tests",
+            "before you make any further change",
+            "Add regression tests the same way, one at a time",
+            "Run the broader suite only once the narrow checks pass",
+        ]
+        positions = []
+        for step in steps:
+            index = self.prompt.find(step)
+            self.assertNotEqual(index, -1, f"the prompt never says {step!r}")
+            positions.append(index)
+        self.assertEqual(positions, sorted(positions),
+                         "the validation steps are out of order in the prompt")
+
+    def test_a_failure_is_resolved_before_the_next_change(self):
+        """The rule the loop rests on: the run stops advancing on a red state.
+
+        Without it the order is a suggestion — a run can follow every step and
+        still stack a second edit on a broken first one, which is the shape the
+        #813 run got into.
+        """
+        self.assertIn("Fix any failure", self.prompt)
+        self.assertIn("a syntax or LSP error, a failing test", self.prompt)
+        self.assertIn("before you make any further change", self.prompt)
+
+    def test_validation_after_every_edit_is_narrow_never_the_full_suite(self):
+        """Both halves, because either alone is the wrong instruction.
+
+        "Validate after every edit" without the narrowing reads as a full suite
+        per edit, which is slow enough that a run learns to skip the step; the
+        narrowing without the obligation is permission to batch.
+        """
+        self.assertIn("You do not need the full suite after every edit",
+                      self.prompt)
+        self.assertIn("you do need step c and step\n   d after every edit",
+                      self.prompt)
+
+    def test_the_loop_is_in_the_shared_prompt_and_not_per_executor(self):
+        """One policy for every harness (task 823's own requirement).
+
+        Asked of the builder's signature rather than of the text: `build_prompt`
+        cannot vary the loop by executor because it is never told which executor
+        will run — the runner picks that afterwards. A branch on the harness
+        would have to appear as a parameter here first.
+        """
+        import inspect
+
+        from vikunja_claude.prompt import build_prompt
+
+        parameters = set(inspect.signature(build_prompt).parameters)
+        for forbidden in ("executor", "harness", "model", "is_local"):
+            self.assertNotIn(forbidden, parameters)
+
     def test_requires_tests(self):
         self.assertIn("not finished without tests", self.prompt)
         self.assertIn("would fail without your change", self.prompt)
