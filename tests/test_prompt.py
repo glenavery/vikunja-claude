@@ -99,6 +99,63 @@ class PromptGeneration(ServiceTestCase):
         for forbidden in ("executor", "harness", "model", "is_local"):
             self.assertNotIn(forbidden, parameters)
 
+    def test_says_when_to_ask_the_code_graph(self):
+        """Task 825. #821 connected Graphify to the local harness and the
+        restarted #813 run went on grepping, because nothing in the prompt said
+        the graph existed or when it answers better. The rule has to name the
+        question shape it is for, not merely the tool."""
+        # The template wraps these sentences, so match on unwrapped fragments —
+        # the convention the tests above this one already follow.
+        self.assertIn("NAVIGATING THE CODE", self.prompt)
+        self.assertIn("ask it first for RELATIONSHIP", self.prompt)
+        self.assertIn("questions: who calls this", self.prompt)
+        self.assertIn("Then read the specific files it", self.prompt)
+
+    def test_distinguishes_relationship_navigation_from_literal_search(self):
+        """Both halves. A rule that only promoted the graph would push a run to
+        ask it for an exact string, which is what search is good at and the
+        graph is not; the run would then conclude the graph is useless."""
+        self.assertIn("LITERAL question", self.prompt)
+        self.assertIn("this exact string, flag or error message", self.prompt)
+        self.assertIn("Text search is still the right tool", self.prompt)
+
+    def test_requires_reading_the_resolved_source_before_changing_it(self):
+        """The graph describes the code; only the code is the code. Editing on
+        what the graph said would make a stale or partial index into a wrong
+        edit, which is worse than the grepping this replaces."""
+        self.assertIn("Never change code on what the graph said alone",
+                      self.prompt)
+        self.assertIn("open the source", self.prompt)
+
+    def test_stays_conditional_when_no_graph_is_available(self):
+        """A repository without a graph must not read this as a blocked run.
+
+        The clause is conditional at both ends — "if this repository has a code
+        graph" opening it, and an explicit fallback closing it — because a run
+        that treats an absent tool as a prerequisite stops instead of grepping.
+        """
+        self.assertIn("If this repository has a code graph", self.prompt)
+        self.assertIn("if no graph is available here, navigate by search",
+                      self.prompt)
+        self.assertIn("not a step you are required to have taken", self.prompt)
+
+    def test_the_navigation_rule_did_not_disturb_the_rules_around_it(self):
+        """Task 825 inserted a rule and renumbered; nothing else may have moved.
+
+        The renumbering is the risk an insertion carries — the old rule 3 became
+        4 and so on — so this pins that each surviving rule still leads its own
+        numbered line, and that the one cross-reference between them was
+        rewritten to name its rule rather than a number that keeps changing.
+        """
+        for numbered in ("1. SCOPE.", "2. HOW YOU WORK.",
+                         "3. NAVIGATING THE CODE.", "4. TESTS.",
+                         "5. WHERE YOU ARE.", "6. COMMIT.", "7. DO NOT PUSH.",
+                         "8. REPORT BACK"):
+            self.assertIn(numbered, self.prompt)
+        self.assertIn("the human step the WHERE YOU ARE rule names", self.prompt)
+        self.assertNotIn("rule 3 names", self.prompt)
+        self.assertNotIn("rule 4 names", self.prompt)
+
     def test_requires_tests(self):
         self.assertIn("not finished without tests", self.prompt)
         self.assertIn("would fail without your change", self.prompt)
