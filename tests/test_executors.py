@@ -653,6 +653,31 @@ class ThroughTheRunner(ServiceTestCase):
         self.assertEqual(default["reference"], local["reference"])
         self.assertEqual(default["workdir"], local["workdir"])
 
+    def test_both_harnesses_are_told_how_to_navigate_the_code(self):
+        """Task 825, asserted where the two harnesses are actually spawned.
+
+        The rule is only worth anything if it reaches the run, and the run that
+        needed it was the local one: #821 connected Graphify to OpenCode and the
+        restarted #813 run kept grepping, because the prompt never mentioned it.
+        So this reads the navigation rule out of the prompt argument of each
+        spawned argv rather than out of `build_prompt` — the same place the
+        launcher's other cross-harness assertions read, and the only place that
+        can show a per-executor prompt if one ever appears.
+        """
+        self.service.work(self.service.get_by_task_number(8))
+        self.launcher._release(9)
+        self.work_local()
+
+        default_prompt = self.spawn.calls[0]["argv"][-1]
+        local_prompt = self.spawn.calls[1]["argv"][-1]
+        for prompt in (default_prompt, local_prompt):
+            self.assertIn("NAVIGATING THE CODE", prompt)
+            self.assertIn("ask it first for RELATIONSHIP", prompt)
+            self.assertIn("Text search is still the right tool", prompt)
+        # Not merely "both contain it": the brief is one text, so the rule
+        # cannot be present in both and yet differ between them.
+        self.assertEqual(default_prompt, local_prompt)
+
     def test_the_model_reaches_the_child_through_the_environment(self):
         self.work_local()
         call = self.spawn.calls[0]

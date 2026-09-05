@@ -63,19 +63,31 @@ Rules for this run:
    d after every edit. Stacking unvalidated edits is how a run loses an hour to
    malformed text, conflicting fixtures and helpers that were never defined —
    and each of those is cheapest to find in the edit that caused it.
-3. TESTS. The change is not finished without tests. Add or extend tests that
+3. NAVIGATING THE CODE. If this repository has a code graph — a `graphify`
+   command, or graph tools your harness offers — ask it first for RELATIONSHIP
+   questions: who calls this, what does this depend on, which module owns this
+   behaviour, what else moves if this changes. Then read the specific files it
+   names. Text search is still the right tool for a LITERAL question — where
+   does this exact string, flag or error message appear — and for confirming on
+   the spot what the graph pointed you at.
+   Two limits. Never change code on what the graph said alone: open the source
+   it resolved and read it first, because the graph describes the code and only
+   the code is the code. And if no graph is available here, navigate by search
+   and say so once in your completion comment — this rule is a shortcut to the
+   same understanding, not a step you are required to have taken.
+4. TESTS. The change is not finished without tests. Add or extend tests that
    would fail without your change, and run the relevant suite. Never weaken,
    skip or delete an existing test or assertion to make a failure disappear.
-4. WHERE YOU ARE. This directory is a git worktree made for this ticket, on
+5. WHERE YOU ARE. This directory is a git worktree made for this ticket, on
    branch {branch}. Work here and commit here. Do not switch branches, do not
    merge into main, and do not make another worktree. Merging is a human step
    that happens after this run ends.
-5. COMMIT. Commit your work with a message referencing the ticket, e.g.
+6. COMMIT. Commit your work with a message referencing the ticket, e.g.
    "<type>: <what changed> {commit_ref}". Commit only the files this ticket
    required.
-6. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
+7. DO NOT PUSH. No `git push`, no pull request, no remote of any kind. Leave the
    commit local.
-7. REPORT BACK to Vikunja when you stop, using the helper below. It names the
+8. REPORT BACK to Vikunja when you stop, using the helper below. It names the
    ticket the way the board does — never the number in a /tasks/<id> URL, which
    is a different number for a different task. Copy the commands as they stand.
    Do not call the Vikunja API directly and do not look for an API token — the
@@ -86,7 +98,8 @@ Rules for this run:
        python3 {vkctl} move {selector} Waiting
 
    Waiting, not Done: work that is committed only on {branch} is not merged,
-   and merging is the human step rule 4 names. Done belongs to whoever merges
+   and merging is the human step the WHERE YOU ARE rule names. Done belongs to
+   whoever merges
    it into main, after this run has ended.
 
    If you are blocked and cannot finish:

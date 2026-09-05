@@ -207,6 +207,8 @@ isn't found.
 - restricts work to that one ticket;
 - states the **implementation loop** — one change, validated before the next
   (task 823, below);
+- says **when to ask the repository's code graph** rather than grep (task 825,
+  below);
 - requires tests, and forbids weakening existing ones;
 - requires a commit referencing `(#NN)`, or `(vikunja task <id>)` when the
   title carries no `#NN` prefix;
@@ -258,6 +260,38 @@ is that the prompt *communicates* the order — the tests pin that, and the orde
 usefulness is a claim about the model, which this repository cannot settle from
 inside. If a benchmark is wanted later, the arm to build is the corrective-edit
 count above, over many tickets, not a single replay of #813.
+
+### Asking the code graph instead of grepping (task 825)
+
+Task 821 connected Graphify to the local executor and proved the tools were
+advertised, connected and callable. The restarted #813 run then navigated by
+`grep` and `read` anyway — because **a tool a run does not know it should reach
+for is not a capability, it is an unused connection**. Nothing in the shared
+prompt mentioned the graph or said what it answers better.
+
+Rule 3 says it, in one place, for every harness:
+
+- **Relationship questions go to the graph first** — who calls this, what does
+  this depend on, which module owns this behaviour, what else moves if this
+  changes — and the run then reads the specific files the graph named.
+- **Literal questions stay with text search** — where an exact string, flag or
+  error message appears — as does confirming on the spot what the graph pointed
+  at. A rule that only promoted the graph would push a run to ask it for an
+  exact string, which search does well and a graph does not, and the run would
+  conclude the graph is useless.
+- **The resolved source is read before any edit.** The graph describes the code;
+  only the code is the code, and an edit made on what a stale or partial index
+  said is worse than the grepping this replaces.
+- **It is conditional at both ends.** "If this repository has a code graph"
+  opens it and an explicit search fallback closes it, so a repository without
+  one — or a run whose graph tools failed to connect — navigates by search and
+  says so once, rather than treating an absent tool as a prerequisite and
+  stopping.
+
+It adds no tool, index, executor branch or execution path: the graph is the one
+task 821 already exposed, and `tests/test_executors.py` reads the rule out of
+the prompt argument of **each spawned argv**, which is where a per-executor
+brief would show up if one ever appeared.
 
 ### The comments are part of the brief
 
