@@ -205,6 +205,8 @@ isn't found.
   delimited block with each author and timestamp, and says that a later comment
   overrides an earlier one and overrides the description (task 818);
 - restricts work to that one ticket;
+- states the **implementation loop** — one change, validated before the next
+  (task 823, below);
 - requires tests, and forbids weakening existing ones;
 - requires a commit referencing `(#NN)`, or `(vikunja task <id>)` when the
   title carries no `#NN` prefix;
@@ -213,6 +215,49 @@ isn't found.
   finished or is blocked — a finished run has committed only to its own
   worktree branch, so its comment names the sha and the merge into `main` that
   is still owed. **Done** is set by whoever merges, after the run has ended.
+
+### One change at a time: the implementation loop (task 823)
+
+Rule 2 of the prompt states a working order, and it is an order rather than a
+list of good habits:
+
+1. inspect, and identify the smallest coherent change; 2. apply that one change;
+3. syntax- or type-check the files just touched; 4. run the narrowest existing
+tests covering them; 5. fix any failure — bad edit, syntax or LSP error, failing
+test — before making another change; 6. add regression tests one at a time,
+running each as it is added; 7. run the broader suite only once the narrow
+checks pass.
+
+**What it came from.** The local Qwen run for #813 finished its implementation
+and then lost substantial time to overlapping test edits: malformed text,
+conflicting fixtures and helpers that were never defined, none of it caught
+until several edits had piled up. Every individual step above is something a run
+would say it already does; what it did was validate at the end.
+
+**Narrow, not full.** The loop deliberately does *not* ask for the whole suite
+after every edit. Steps 3 and 4 are what must follow each edit; making the
+expensive check mandatory is how a run learns to skip the step entirely, which
+is the failure this is trying to prevent rather than a stricter version of it.
+
+**It is in the shared prompt, once.** No executor branch, no local-model
+variant: `build_prompt` is never told which harness will run, so a per-executor
+policy would have to appear as a parameter there first — which
+`tests/test_prompt.py` asserts it does not. `claude` and `local` runs get the
+identical text, for the same reason task 810 kept everything else harness-neutral.
+
+**On measuring it.** A replay *could* demonstrate fewer repeated corrective
+edits — relaunch a ticket of comparable shape under both prompts and count
+corrective edits per run (an edit to a file that was edited in the immediately
+preceding step, without an intervening validation command) from the run
+transcripts, which `run_output.py` already captures. It is deliberately **not** a
+prerequisite here, and the honest reason is that the comparison would be weak:
+n=1 per arm, a nondeterministic model, and ticket difficulty as an uncontrolled
+variable that swamps the effect being measured. Two runs proving nothing would be
+worse than none, because the number would then be quoted. What is asserted here
+is that the prompt *communicates* the order — the tests pin that, and the order's
+usefulness is a claim about the model, which this repository cannot settle from
+inside. If a benchmark is wanted later, the arm to build is the corrective-edit
+count above, over many tickets, not a single replay of #813.
 
 ### The comments are part of the brief
 
