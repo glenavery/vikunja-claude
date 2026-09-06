@@ -1357,6 +1357,18 @@ What holds:
   body. The actual reason — `invalid_redirect_uri`, and the permitted list — is
   in the response body, so reproduce the registration with `curl` rather than
   reading the log and guessing.
+- **The client store is capped, and the cap may only spend clients nobody
+  authorized** (task 840). `/oauth/register` is reachable from the internet, so
+  the file cannot grow without bound — but a connector registers exactly *once*,
+  when it is created, and never again, so under eviction by age alone the
+  working connector is always the oldest record and always the first to go.
+  A client the operator carried through the consent screen is therefore never
+  evicted: it is marked when its code is issued, which is downstream of the
+  passphrase, and a client the file still holds a code or token for counts as
+  marked whether or not it says so. If the cap is reached with nothing
+  unauthorized to remove, the registration is refused — `503`,
+  `temporarily_unavailable` — rather than a working connector being taken out
+  to make room for an unknown one.
 - **A code is single use**, lives 60 seconds, and is bound to the client, the
   redirect URI, the challenge and the resource. Redeeming one twice fails *and*
   revokes every token the first redemption issued — a replayed code means it
@@ -1530,6 +1542,47 @@ and it leaves issued tokens alone. Delete the state file instead.
 The Vikunja API token is separate and unaffected: the MCP server uses the same
 one as the launcher, so revoking *that* (Vikunja → Settings → API tokens) cuts
 off both services and every ticket the board has open.
+
+#### Recovering a connector whose `client_id` the server no longer knows
+
+The symptom is `/oauth/authorize` answering the connector's own id with
+**"Unknown client_id. Register the client first, or configure it on the
+server."** The client record is gone from the state file while ChatGPT still
+presents the id it was issued — either because the file was deleted, or, before
+task 840, because the cap evicted it. An access token already issued keeps
+working until it expires, so this usually shows up as a re-authorization that
+fails rather than as the connector going dark.
+
+Two ways back, and the first is the ordinary one:
+
+- **Re-add the connector in ChatGPT.** It registers again on creation, gets a
+  fresh `client_id` and a fresh per-connector callback, and the authorization
+  that follows marks it as one that must not be evicted. Nothing on the server
+  needs changing.
+- **Pin the id instead**, if the same `client_id` has to keep working — a
+  configured client is not in the state file at all, so nothing can evict it.
+  Both variables are needed: the id ChatGPT presents, and *that connector's*
+  callback, because a configured client's redirect URIs are matched exactly and
+  setting the list replaces the default rather than adding to it.
+
+  ```bash
+  ${EDITOR:-vim} /home/glen/stacks/vikunja-claude/.env
+  #   VIKUNJA_MCP_OAUTH_CLIENT_ID=cid_…                       # what ChatGPT presents
+  #   VIKUNJA_MCP_OAUTH_REDIRECT_URIS=https://chatgpt.com/connector/oauth/<connector-id> \
+  #                                   https://chatgpt.com/connector_platform_oauth_redirect
+  systemctl --user restart vikunja-claude-mcp
+  ```
+
+  The connector id cannot be derived: it is only ever visible in the failing
+  authorization request itself. It is in the access log, but **URL-encoded** —
+  `redirect_uri=https%3A%2F%2Fchatgpt.com%2Fconnector%2Foauth%2F<id>` — so a
+  grep for the readable form finds nothing and the value looks lost when it is
+  not:
+
+  ```bash
+  journalctl --user -u vikunja-claude-mcp --since -30d \
+    | grep -o "client_id=[^&]*&redirect_uri=[^&]*" | sort -u
+  ```
 
 ### Operational reads (AI Server status)
 

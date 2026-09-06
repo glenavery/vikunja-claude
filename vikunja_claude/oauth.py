@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .config import McpConfig
-from .oauth_store import OAuthStore, digest, new_secret
+from .oauth_store import ClientStoreFull, OAuthStore, digest, new_secret
 
 # One scope, meaning the boundary's fixed tool set and nothing else. It is not a permission
 # system: it exists because the protocol has a place for the name of what was
@@ -304,7 +304,23 @@ class AuthorizationServer:
         if auth_method != "none":
             secret = new_secret()
             record["client_secret_hash"] = digest(secret)
-        self.store.register_client(record)
+        try:
+            self.store.register_client(record)
+        except ClientStoreFull as exc:
+            # Every slot belongs to a client the operator authorized, so there
+            # is nothing to take. Failing here costs an unknown client a
+            # registration; the alternative costs a working connector its id.
+            return Response.json(
+                503,
+                {
+                    "error": "temporarily_unavailable",
+                    "error_description": (
+                        f"This server cannot register another client: {exc}. "
+                        "Remove the clients that are no longer connected from "
+                        "the OAuth state file, then register again."
+                    ),
+                },
+            )
 
         response: dict[str, Any] = {
             "client_id": client_id,
