@@ -21,8 +21,10 @@ import unittest
 import urllib.parse
 from pathlib import Path
 
+from unittest import mock
+
 from vikunja_claude.oauth import MAX_FAILED_ATTEMPTS, SCOPE, AuthorizationServer
-from vikunja_claude.oauth_store import OAuthStore
+from vikunja_claude.oauth_store import MAX_CLIENTS, OAuthStore
 
 from .fakes import PROJECT_ID
 from .support import (
@@ -120,6 +122,148 @@ class TestClientRegistration(HttpTestCase):
 
     def test_registration_without_redirect_uris_is_refused(self):
         self.assertEqual(self.register_client(redirect_uris=[])["status"], 400)
+
+
+class TestTheClientCapDoesNotStrandAConnector(HttpTestCase):
+    """What the cap on registered clients may and may not remove (task 840).
+
+    Registration is open to the internet, and a connector registers exactly
+    once — when it is created — and then never again. So under eviction by age
+    alone the working connector is always the oldest client and always the
+    first to go, which is how the live boundary ended up answering ChatGPT's
+    own id with "Unknown client_id". The cap still has to bound the file; it
+    is only allowed to spend clients nobody ever authorized.
+    """
+
+    def stored(self) -> dict:
+        return json.loads(self.config.oauth_state_path.read_text())["clients"]
+
+    def flood(self, count: int) -> None:
+        """What a scanner, a re-add or a run of test connectors does."""
+        for number in range(count):
+            registered = self.register_client(client_name=f"throwaway {number}")
+            self.assertEqual(registered["status"], 201, registered)
+
+    def connected_client(self) -> str:
+        """A client carried all the way to a token, as a connector is.
+
+        Then aged, deliberately, so that it is the *first* record any
+        age-ordered eviction would reach. A connector registers once and never
+        again, so being the oldest thing in the file is its normal condition —
+        and a test that leaves it tied with the flood only proves the rule
+        about 1 record in 20, which is to say it passes whether the rule holds
+        or not.
+        """
+        code, verifier, client_id = self.obtain_code()
+        status, payload = self.exchange(code, verifier, client_id)
+        self.assertEqual(status, 200, payload)
+        state = json.loads(self.config.oauth_state_path.read_text())
+        state["clients"][client_id]["issued_at"] = 1
+        self.config.oauth_state_path.write_text(json.dumps(state))
+        return client_id
+
+    def test_an_authorized_client_is_never_evicted(self):
+        client_id = self.connected_client()
+        self.flood(MAX_CLIENTS + 5)
+        self.assertIn(client_id, self.stored())
+
+    def test_it_still_reaches_the_consent_screen_after_the_flood(self):
+        """Glen's acceptance gesture, end to end over the socket.
+
+        The store keeping the record is not the claim; the claim is that
+        re-authorizing from the connector dialog gets the consent screen. That
+        is a different code path from the one that stored it, and it is the
+        one that failed.
+        """
+        client_id = self.connected_client()
+        self.flood(MAX_CLIENTS + 5)
+        _, challenge = self.pkce()
+        query = urllib.parse.urlencode(self.authorize_params(client_id, challenge))
+        status, _, body = self.open(f"/oauth/authorize?{query}", token=None)
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("Unknown client_id", body)
+
+    def test_the_token_it_already_holds_still_opens_the_boundary(self):
+        """The evicted-client failure reached /mcp too, once the token expired."""
+        token = self.access_token()
+        self.flood(MAX_CLIENTS + 5)
+        status, _, body = self.rpc("tools/list", token=token)
+        self.assertEqual(status, 200, body)
+
+    def test_the_file_is_still_bounded_by_clients_nobody_authorized(self):
+        """The cap has to keep working: an open endpoint, a file on disk.
+
+        The record is aged by hand because every registration a test makes
+        lands in the same second, and the file is written with sorted keys —
+        so with equal timestamps "oldest" is alphabetical, and the claim about
+        age would not be a claim about anything.
+        """
+        oldest = self.register_client(client_name="never came back")["client_id"]
+        state = json.loads(self.config.oauth_state_path.read_text())
+        state["clients"][oldest]["issued_at"] = 1
+        self.config.oauth_state_path.write_text(json.dumps(state))
+
+        self.flood(MAX_CLIENTS)
+        clients = self.stored()
+        self.assertLessEqual(len(clients), MAX_CLIENTS)
+        self.assertNotIn(oldest, clients)
+
+    def test_a_full_store_of_authorized_clients_refuses_the_registration(self):
+        """No room and nothing spendable is a refusal, not a sacrifice.
+
+        The cap is patched down because the rule is about the shape of the
+        store, not about the number twenty, and reaching twenty authorizations
+        is twenty consent screens.
+        """
+        with mock.patch("vikunja_claude.oauth_store.MAX_CLIENTS", 2):
+            first = self.connected_client()
+            second = self.connected_client()
+            refused = self.register_client(client_name="one too many")
+        self.assertEqual(refused["status"], 503, refused)
+        self.assertEqual(refused["error"], "temporarily_unavailable")
+        self.assertIn("state file", refused["error_description"])
+        self.assertEqual(set(self.stored()), {first, second})
+
+    def test_it_survives_after_every_token_it_held_has_expired(self):
+        """A connector left alone for longer than its refresh token lives.
+
+        Nothing in the file names the client any more, and it has done nothing
+        wrong: re-authorizing from the connector dialog is exactly the gesture
+        that is supposed to bring it back, and it needs the client record to
+        still be there to do it. This is what the stamp is for, and it is the
+        half a scan of live grants cannot cover.
+        """
+        client_id = self.connected_client()
+        state = json.loads(self.config.oauth_state_path.read_text())
+        state["codes"] = {}
+        state["tokens"] = {}
+        self.config.oauth_state_path.write_text(json.dumps(state))
+
+        self.flood(MAX_CLIENTS + 2)
+        self.assertIn(client_id, self.stored())
+
+    def test_a_grant_protects_a_client_registered_before_the_stamp_existed(self):
+        """The clients already in the live file when this rule shipped.
+
+        They were authorized before anything wrote it down, so the grant the
+        file holds for them is the only record of it — and it has to be
+        enough, or the fix protects nothing that is already connected.
+        """
+        client_id = self.connected_client()
+        state = json.loads(self.config.oauth_state_path.read_text())
+        del state["clients"][client_id]["authorized_at"]
+        state["codes"] = {}
+        self.config.oauth_state_path.write_text(json.dumps(state))
+
+        self.flood(MAX_CLIENTS + 2)
+        self.assertIn(client_id, self.stored())
+
+    def test_authorizing_stamps_the_client_it_authorized_and_no_other(self):
+        bystander = self.register_client(client_name="bystander")["client_id"]
+        client_id = self.connected_client()
+        clients = self.stored()
+        self.assertTrue(clients[client_id]["authorized_at"])
+        self.assertNotIn("authorized_at", clients[bystander])
 
 
 class TestTheChatGptConnectorCallback(HttpTestCase):
