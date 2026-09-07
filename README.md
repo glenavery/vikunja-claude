@@ -1410,6 +1410,20 @@ What holds:
   connector is speaking. The two rules are complementary rather than
   overlapping: replacement removes the way the file filled in practice, and the
   cap governs what happens when it fills anyway.
+- **A connector whose row is gone is taken back at the consent screen**, not
+  told to register first. The configured redirect URIs say which connections
+  this server has; the file says which ones hold grants. So a `client_id`
+  presented with an admitted callback names a connector this server knows,
+  whatever became of its row — and refusing it was a dead end, because the
+  connector cannot register again: its dialog did that once, when it was
+  created, and every attempt since replays the id it was given. Re-admission
+  decides nothing about who is asking and grants nothing: the record is built
+  in memory for the request to be checked against, and is written only where
+  the code is issued, which is past the passphrase. A wrong guess therefore
+  leaves the file byte-for-byte as it was, and asking at all writes nothing —
+  a read that repaired what it read would be an open endpoint writing to the
+  store under another name. A callback that is *not* admitted is still
+  refused: this rests on the whitelist rather than replacing it.
 - **A registration that was never authorized expires after an hour**
   (`PENDING_CLIENT_TTL_SECONDS`). Adding a connector is a registration and a
   consent, and nothing reports the half that did not happen — an abandoned
@@ -1599,15 +1613,32 @@ off both services and every ticket the board has open.
 
 #### Recovering a connector whose `client_id` the server no longer knows
 
-The symptom is `/oauth/authorize` answering the connector's own id with
-**"Unknown client_id. Register the client first, or configure it on the
-server."** The client record is gone from the state file while ChatGPT still
-presents the id it was issued — either because the file was deleted, or, before
-task 840, because the cap evicted it. An access token already issued keeps
-working until it expires, so this usually shows up as a re-authorization that
-fails rather than as the connector going dark.
+**This recovers itself now, and the rest of this section is background.** A
+client_id presented alongside a redirect URI this deployment admits is taken
+back on the spot: the consent screen appears, the passphrase is asked for as
+usual, and issuing the code writes the row again and marks it authorized. The
+configured redirect URIs are what say which connections this server has; the
+state file is only where the grants live, and a `client_id` is a name this
+server handed out rather than a secret it keeps. Nothing is written before the
+passphrase, so an unknown id at an admitted callback costs a consent, not a
+connector — and an id at a callback that is *not* admitted is still refused,
+because re-admission rests on the whitelist rather than replacing it.
 
-Two ways back, and the first is the ordinary one:
+That matters because the connector has no other move. Its dialog registers
+once, when it is created, and every attempt afterwards replays the id it was
+given, so being refused was a dead end that only hand-editing
+`mcp_oauth.json` could open — which happened twice, on 2026-09-03 and
+2026-09-07, and is what "if the fix was sound we wouldn't have to restore
+stuff" is about.
+
+The symptom was `/oauth/authorize` answering the connector's own id with
+**"Unknown client_id."** The client record is gone from the state file while
+ChatGPT still presents the id it was issued — either because the file was
+deleted, or, before task 840, because the cap evicted it. An access token
+already issued keeps working until it expires, so it showed up as a
+re-authorization that failed rather than as the connector going dark.
+
+Two things still worth knowing:
 
 - **Re-add the connector in ChatGPT.** It registers again on creation, gets a
   fresh `client_id` and a fresh per-connector callback, and the authorization

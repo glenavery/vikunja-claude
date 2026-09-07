@@ -443,6 +443,160 @@ class TestReconnectingRetiresTheConnectionItReplaces(HttpTestCase):
         self.assertEqual(status, 200, body)
 
 
+class TestAConnectorWhoseRowIsGone(HttpTestCase):
+    """Recovering from a lost client record without touching the state file.
+
+    This is the failure the boundary actually had, twice: ChatGPT holding a
+    client_id the file no longer carried, replaying it at /oauth/authorize,
+    and being told to register first — which is the one thing its dialog
+    cannot do a second time. Both times it was fixed by hand-editing
+    mcp_oauth.json, which is not a recovery path, it is an admission that
+    there isn't one.
+
+    The configured redirect URIs are what say which connections this server
+    has. The file is where grants live. So an admitted callback is enough to
+    know a connector, and losing the file costs a consent, not a connector.
+    """
+
+    def stored(self) -> dict:
+        """The clients on disk, where "no file yet" is a real answer.
+
+        Two of these tests assert that nothing was written, and until
+        something is there is no file to read — so a missing one is the state
+        they are looking for, not an error.
+        """
+        if not self.config.oauth_state_path.exists():
+            return {}
+        return json.loads(self.config.oauth_state_path.read_text())["clients"]
+
+    def authorize(self, client_id: str, redirect_uri: str = REDIRECT_URI, **overrides):
+        _, challenge = self.pkce()
+        params = self.authorize_params(
+            client_id, challenge, redirect_uri=redirect_uri, **overrides
+        )
+        return params, self.approve(params)
+
+    def get_authorize(self, client_id: str, redirect_uri: str = REDIRECT_URI):
+        """Just ask, without submitting the form."""
+        _, challenge = self.pkce()
+        return self.open(
+            "/oauth/authorize?"
+            + urllib.parse.urlencode(
+                self.authorize_params(client_id, challenge, redirect_uri=redirect_uri)
+            ),
+            token=None,
+        )
+
+    def connect(self, client_name: str, redirect_uri: str) -> tuple[str, str]:
+        """A connector added the ordinary way. Returns (client_id, access token)."""
+        client = self.register_client(
+            client_name=client_name, redirect_uris=[redirect_uri]
+        )
+        self.assertEqual(client["status"], 201, client)
+        verifier, challenge = self.pkce()
+        params = self.authorize_params(
+            client["client_id"], challenge, redirect_uri=redirect_uri
+        )
+        status, headers, body = self.approve(params)
+        self.assertEqual(status, 302, body)
+        status, payload = self.exchange(
+            self.redirect_query(headers)["code"],
+            verifier,
+            client["client_id"],
+            redirect_uri=redirect_uri,
+        )
+        self.assertEqual(status, 200, payload)
+        return client["client_id"], str(payload["access_token"])
+
+    def test_it_gets_back_in_through_the_consent_screen(self):
+        lost = "cid_" + "a" * 40
+        _, (status, headers, body) = self.authorize(lost)
+        self.assertEqual(status, 302, body)
+        self.assertIn("code", self.redirect_query(headers))
+        self.assertIn(lost, self.stored())
+
+    def test_the_readmitted_row_is_marked_so_it_is_never_evicted_again(self):
+        lost = "cid_" + "b" * 40
+        self.authorize(lost)
+        self.assertTrue(self.stored()[lost]["authorized_at"])
+
+    def test_the_recovered_connector_can_reach_the_boundary(self):
+        """End to end, because a row in the file is not the claim."""
+        lost = "cid_" + "c" * 40
+        verifier, challenge = self.pkce()
+        params = self.authorize_params(lost, challenge)
+        status, headers, body = self.approve(params)
+        self.assertEqual(status, 302, body)
+        status, payload = self.exchange(
+            self.redirect_query(headers)["code"], verifier, lost
+        )
+        self.assertEqual(status, 200, payload)
+        status, _, body = self.rpc("tools/list", token=payload["access_token"])
+        self.assertEqual(status, 200, body)
+
+    def test_the_chatgpt_connector_recovers_the_same_way(self):
+        """The live case: a per-connector callback, admitted by shape."""
+        lost = "cid_" + "d" * 40
+        _, (status, headers, body) = self.authorize(
+            lost, redirect_uri=CONNECTOR_REDIRECT_URI
+        )
+        self.assertEqual(status, 302, body)
+        self.assertIn(lost, self.stored())
+
+    def test_a_wrong_passphrase_writes_nothing_at_all(self):
+        """The whole of the gate, and the reason this is not a way in.
+
+        Re-admission decides nothing about who is asking — it cannot, at an
+        endpoint anyone can reach. So it must not leave a trace behind when
+        the answer is no, or an open endpoint would be writing to the file
+        again by another name.
+        """
+        lost = "cid_" + "e" * 40
+        before = self.stored()
+        _, challenge = self.pkce()
+        status, _, _ = self.approve(
+            self.authorize_params(lost, challenge), passphrase="wrong"
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(self.stored(), before)
+
+    def test_merely_asking_writes_nothing(self):
+        """A GET that repaired what it read would be a write on a read."""
+        before = self.stored()
+        status, _, _ = self.get_authorize("cid_" + "f" * 40)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.stored(), before)
+
+    def test_an_unadmitted_callback_is_still_refused(self):
+        """Re-admission rests on the whitelist; it does not replace it."""
+        _, challenge = self.pkce()
+        status, _, page = self.open(
+            "/oauth/authorize?"
+            + urllib.parse.urlencode(
+                self.authorize_params(
+                    "cid_" + "g" * 40,
+                    challenge,
+                    redirect_uri="https://evil.example/callback",
+                )
+            ),
+            token=None,
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("Unknown client_id", page)
+
+    def test_it_cannot_displace_a_connector_that_holds_a_grant(self):
+        """Re-admission goes through registration, so it spends nothing.
+
+        Someone guessing an id against the connector callback must not be able
+        to take out the ChatGPT client that is actually connected.
+        """
+        connected, token = self.connect("ChatGPT", CONNECTOR_REDIRECT_URI)
+        self.get_authorize("cid_" + "h" * 40, redirect_uri=CONNECTOR_REDIRECT_URI)
+        self.assertIn(connected, self.stored())
+        status, _, body = self.rpc("tools/list", token=token)
+        self.assertEqual(status, 200, body)
+
+
 class TestARegistrationThatWasNeverAuthorized(HttpTestCase):
     """An attempt that did not become a connection does not stay in the file.
 
@@ -822,10 +976,30 @@ class TestTheAuthorizationRequest(HttpTestCase):
         )
 
     def test_an_unknown_client_is_never_redirected_anywhere(self):
-        """The only address on offer is the one the bad request supplied."""
-        status, headers, _ = self.get_authorize(client_id="cid_invented")
+        """The only address on offer is the one the bad request supplied.
+
+        An unknown client_id is now refused on the callback rather than on the
+        id, since an admitted callback is enough to re-admit one; what may not
+        happen either way is a bounce to the address the bad request named.
+        """
+        status, headers, _ = self.get_authorize(
+            client_id="cid_invented", redirect_uri="https://evil.example/callback"
+        )
         self.assertEqual(status, 400)
         self.assertNotIn("Location", headers)
+
+    def test_an_unknown_client_on_an_admitted_callback_reaches_consent(self):
+        """A connector whose row is gone gets the passphrase prompt, not a wall.
+
+        It cannot register again — its dialog did that once, when it was
+        created, and every attempt since replays the id it was given — so
+        refusing here leaves it with no gesture that recovers it. Reaching the
+        consent screen is not being let in: the passphrase still is.
+        """
+        status, headers, body = self.get_authorize(client_id="cid_invented")
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("Location", headers)
+        self.assertIn("passphrase", body)
 
     def test_a_redirect_uri_that_was_not_registered_is_not_redirected_to(self):
         status, headers, page = self.get_authorize(
