@@ -1365,7 +1365,13 @@ What holds:
   the first to go. A client the operator carried through the consent screen is
   therefore never evicted: it is marked when its code is issued, which is
   downstream of the passphrase, and a client the file still holds a code or
-  token for counts as marked whether or not it says so. If the cap is reached
+  token for counts as marked whether or not it says so — and is then *written*
+  as marked, in the next write to the store, so the half of the evidence that
+  expires is never the only half that remembers. That reading happens before
+  the lapsed grants are pruned, because nothing runs between writes: a token is
+  not noticed expiring at its expiry, it is found expired by whatever touches
+  the file next, and pruning first would discard in one pass the evidence that
+  same pass exists to record. If the cap is reached
   with nothing unauthorized to remove, the registration is refused — `503`,
   `temporarily_unavailable` — rather than a working connector being taken out
   to make room for an unknown one.
