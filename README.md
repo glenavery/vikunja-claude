@@ -1383,14 +1383,22 @@ What holds:
   itself, its `client_name` and its `redirect_uris`, because being issued a new
   `client_id` is what re-registering *is*; ChatGPT's callback carries a
   per-connector path, so two ChatGPT connectors stay distinct and neither
-  deletes the other. This happens at the consent screen and not at
-  `/oauth/register`: until the new connection exists the old one is still the
-  working one, and a connector that asks for an id without ever coming back
-  with it has replaced nothing. The one exception is a store whose every slot
-  is authorized, where a registration may take the registering connector's
-  *own* older record as a last resort before refusing — it is the only
-  authorized client that registration is entitled to, and the authorization to
-  come would retire it anyway.
+  deletes the other.
+- **Replacement happens at the consent screen, and only there.** Two reasons,
+  and the second is the one with teeth. Until the new connection exists the old
+  one is still the working one — OpenCode registered a third time while holding
+  a refresh token good for another month — so a connector that asks for an id
+  and never returns with it has replaced nothing. And an identity is a thing a
+  stranger can *state*: `/oauth/register` takes no passphrase, and `Qwen Code`
+  at `http://localhost:7777/oauth/callback` is a guess rather than a
+  credential. A same-identity eviction at registration would therefore hand an
+  unauthenticated caller the one power the cap exists to deny, which is the
+  rule above defeated by asking for it in the right words. So a full store
+  still refuses a registration that names a client already in it — `503` — and
+  the consent screen stays the first point at which anything has proved which
+  connector is speaking. The two rules are complementary rather than
+  overlapping: replacement removes the way the file filled in practice, and the
+  cap governs what happens when it fills anyway.
 - **A code is single use**, lives 60 seconds, and is bound to the client, the
   redirect URI, the challenge and the resource. Redeeming one twice fails *and*
   revokes every token the first redemption issued — a replayed code means it

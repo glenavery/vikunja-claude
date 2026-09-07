@@ -372,21 +372,25 @@ class TestReconnectingRetiresTheConnectionItReplaces(HttpTestCase):
             self.connect()
         self.assertEqual(len(self.stored()), 1)
 
-    def test_a_reconnection_is_not_refused_by_a_store_full_of_itself(self):
-        """The failure mode 840 left behind, at the size it happens.
+    def test_claiming_a_connected_client_s_identity_evicts_nothing(self):
+        """Why replacement may not also happen at /oauth/register.
 
-        Before this, twenty reconnections of one connector filled the store
-        with twenty authorized clients, and the twenty-first was refused 503 —
-        a connector locked out by its own history.
+        An identity is a thing a stranger can state: registration takes no
+        passphrase, and "Qwen Code" at localhost:7777 is a guess rather than a
+        credential. Were a matching registration allowed to make room by
+        retiring the client it names, an unauthenticated caller would hold the
+        one power the cap exists to deny — 840's rule, defeated by asking for
+        it in the right words. The consent screen is the first point anything
+        has proved which connector is speaking.
         """
-        client_id, token = "", ""
         with mock.patch("vikunja_claude.oauth_store.MAX_CLIENTS", 2):
-            self.connect("one connector")
-            for _ in range(4):
-                client_id, token = self.connect("another connector")
+            first, token = self.connect("Qwen Code")
+            second, _ = self.connect("another connector")
+            impostor = self.register_client(client_name="Qwen Code")
+        self.assertEqual(impostor["status"], 503, impostor)
+        self.assertEqual(set(self.stored()), {first, second})
         status, _, body = self.rpc("tools/list", token=token)
         self.assertEqual(status, 200, body)
-        self.assertIn(client_id, self.stored())
 
 
 class TestTheChatGptConnectorCallback(HttpTestCase):

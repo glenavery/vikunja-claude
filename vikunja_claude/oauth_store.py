@@ -190,39 +190,33 @@ class OAuthStore:
         """Store a newly registered client, evicting only an unused one.
 
         Registration is reachable from the internet and a connector registers
-        exactly once, when it is created — so "the oldest client" is the
-        working one, not the disposable one, and evicting by age alone strands
-        the connector with an id nothing recognises any more (task 840).
-        Raises :class:`ClientStoreFull` rather than evicting an authorized
-        client that is not this one.
+        when it is *created*, so its record stays among the oldest in the file
+        for as long as it keeps working: evicting by age alone strands it with
+        an id nothing recognises any more (task 840). Raises
+        :class:`ClientStoreFull` rather than evicting an authorized client.
+
+        Nothing is spendable here for claiming to be a client already in the
+        file. Registration takes no passphrase and an identity is a thing a
+        stranger can state — "Qwen Code" at localhost:7777 is a guess, not a
+        credential — so a same-identity eviction *here* would hand an
+        unauthenticated caller the one power the cap exists to deny. A
+        reconnection replaces its predecessor at the consent screen, which is
+        the first point anything has proved it is the connector it says it is.
         """
         with self._lock:
             state = self._read()
             self._expire(state)
             clients = state["clients"]
             authorized = self._authorized(state)
-
-            def by_age(candidates) -> list[tuple[str, dict[str, Any]]]:
-                return sorted(candidates, key=lambda item: item[1].get("issued_at", 0))
-
             # Oldest first, and never one holding a grant. A client that
             # registered and never came back is the one nobody misses.
-            evictable = by_age(
-                (client_id, held)
-                for client_id, held in clients.items()
-                if client_id not in authorized
-            )
-            # Then, and only once there is nothing else left to spend, this
-            # connector's own earlier records. A store full of authorized
-            # clients would otherwise lock out the one connector whose
-            # registration costs the file nothing — the authorization to come
-            # retires those records anyway. It can never reach another
-            # connector's: same name, same callbacks, or not a candidate.
-            identity = _identity(record)
-            evictable += by_age(
-                (client_id, held)
-                for client_id, held in clients.items()
-                if client_id in authorized and _identity(held) == identity
+            evictable = sorted(
+                (
+                    (client_id, held)
+                    for client_id, held in clients.items()
+                    if client_id not in authorized
+                ),
+                key=lambda item: item[1].get("issued_at", 0),
             )
             while len(clients) >= MAX_CLIENTS:
                 if not evictable:
@@ -230,9 +224,7 @@ class OAuthStore:
                         f"all {len(clients)} registered clients have been "
                         "authorized, so there is none to evict"
                     )
-                victim = evictable.pop(0)[0]
-                clients.pop(victim)
-                self._forget_grants(state, victim)
+                clients.pop(evictable.pop(0)[0])
             clients[record["client_id"]] = record
             self._write(state)
         return record
