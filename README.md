@@ -1410,6 +1410,19 @@ What holds:
   connector is speaking. The two rules are complementary rather than
   overlapping: replacement removes the way the file filled in practice, and the
   cap governs what happens when it fills anyway.
+- **A registration that was never authorized expires after an hour**
+  (`PENDING_CLIENT_TTL_SECONDS`). Adding a connector is a registration and a
+  consent, and nothing reports the half that did not happen — an abandoned
+  dialog, a passphrase given up on and a stranger's POST all look identical
+  from here, which is to say they look like nothing at all. So the record
+  carries a deadline instead of waiting for a signal that never comes, and the
+  file empties itself rather than filling until the cap has to make a decision.
+  A rejected passphrase is deliberately *not* that failure: the consent page
+  comes back for another go, and the record has to still be there for the retry
+  to have something to authorize. What lifts the deadline is being authorized,
+  which is permanent — `authorized_at` outlives every token it led to, so a
+  connector left alone for longer than its refresh token lives still finds its
+  record where it left it.
 - **A code is single use**, lives 60 seconds, and is bound to the client, the
   redirect URI, the challenge and the resource. Redeeming one twice fails *and*
   revokes every token the first redemption issued — a replayed code means it

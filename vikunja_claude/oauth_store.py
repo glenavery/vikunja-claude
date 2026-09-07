@@ -28,6 +28,15 @@ from .config import is_chatgpt_connector_redirect_uri
 # internet, so the file must not be able to grow without bound.
 MAX_CLIENTS = 20
 
+#: How long a registration that was never authorized is kept. A connector
+#: registers and consents in one gesture, so an hour is a long time to be
+#: part-way through one. Past that the record is an attempt that did not
+#: happen — an abandoned dialog, a passphrase given up on, a stranger's POST —
+#: and an attempt that did not happen should not still be occupying the file.
+#: A wrong passphrase is not that: the consent page comes back for another go,
+#: and the record has to survive for the retry to have something to authorize.
+PENDING_CLIENT_TTL_SECONDS = 3600
+
 
 class ClientStoreFull(RuntimeError):
     """The cap is reached and every client in the file has been authorized.
@@ -109,6 +118,18 @@ class OAuthStore:
                 for key, record in state[section].items()
                 if record.get("expires_at", 0) > now
             }
+        # Clients last, and read against what the grants above left behind:
+        # an authorization is what makes a registration permanent, so one that
+        # never got there is an attempt, and an attempt has a deadline. This
+        # is why the cap is reached by connectors rather than by everything
+        # that ever knocked — nothing has to fill up for junk to leave.
+        authorized = self._authorized(state)
+        state["clients"] = {
+            client_id: record
+            for client_id, record in state["clients"].items()
+            if client_id in authorized
+            or record.get("issued_at", 0) > now - PENDING_CLIENT_TTL_SECONDS
+        }
 
     # -- clients ------------------------------------------------------------
 
