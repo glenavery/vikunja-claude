@@ -343,6 +343,42 @@ class AuthorizationServer:
         configured = self.oauth.static_client(client_id)
         return configured or self.store.get_client(client_id)
 
+    def _readmissible(
+        self, client_id: str, params: dict[str, str]
+    ) -> dict[str, Any] | None:
+        """The record a connector the file has no row for would have had.
+
+        Which connections this server has is decided by the configured
+        redirect URIs; the state file is where the *grants* live, and a
+        client_id is a name this server handed out rather than a secret it
+        keeps. A caller presenting an admitted callback is therefore a
+        connector this server knows, whatever became of its row — and refusing
+        it is a dead end, because nothing the connector can do gets it back
+        in: its dialog registered once, when it was created, and every attempt
+        since replays the id it was given. That is what "Unknown client_id"
+        meant every time it was seen here, and the only way out was editing
+        the state file by hand.
+
+        Nothing is written. This returns a record for the request to be
+        checked against, and it is stored only where a code is issued, which
+        is downstream of the passphrase. A wrong guess at this endpoint
+        therefore leaves the file exactly as it was.
+        """
+        redirect_uri = (params.get("redirect_uri") or "").strip()
+        if not redirect_uri or not self.oauth.registerable_redirect_uri(redirect_uri):
+            return None
+        # A bound on what could later become a key in the file. Not a check on
+        # who is asking — nothing at this endpoint is one.
+        if not client_id.startswith("cid_") or len(client_id) > 128:
+            return None
+        return {
+            "client_id": client_id,
+            "client_name": "re-admitted client",
+            "redirect_uris": [redirect_uri],
+            "token_endpoint_auth_method": "none",
+            "issued_at": int(self._now()),
+        }
+
     # -- authorization endpoint --------------------------------------------
 
     def _validated_request(self, params: dict[str, str]) -> dict[str, Any]:
@@ -353,11 +389,15 @@ class AuthorizationServer:
         """
         client_id = (params.get("client_id") or "").strip()
         client = self._client(client_id) if client_id else None
+        readmitted = client is None
+        if readmitted:
+            client = self._readmissible(client_id, params)
         if client is None:
             raise AuthorizationError(
                 "invalid_client",
-                "Unknown client_id. Register the client first, or configure it "
-                "on the server.",
+                "Unknown client_id, and the redirect_uri presented with it is "
+                "not one this server admits. Register the client first, or "
+                "configure it on the server.",
             )
 
         # Exact equality against what this client registered, and nothing else.
@@ -412,6 +452,7 @@ class AuthorizationServer:
 
         return {
             "client": client,
+            "readmitted": readmitted,
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "code_challenge": challenge,
@@ -503,6 +544,18 @@ class AuthorizationServer:
                 request, params, message="That passphrase is not correct.", status=401
             )
         self._failures.clear()
+
+        # A re-admitted connector gets its row back here and nowhere else:
+        # this is the first line past the passphrase, so nothing a stranger
+        # can reach writes to the file. put_code stamps it authorized in the
+        # same breath, which is what stops the cap ever spending it again.
+        if request["readmitted"]:
+            try:
+                self.store.register_client(request["client"])
+            except ClientStoreFull as exc:
+                return self._error_page(
+                    AuthorizationError("temporarily_unavailable", str(exc))
+                )
 
         code = new_secret()
         self.store.put_code(
