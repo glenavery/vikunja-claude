@@ -93,8 +93,11 @@ DEFAULT_REDIRECT_URIS = ("https://chatgpt.com/connector_platform_oauth_redirect"
 
 # ChatGPT now mints a callback per connector, so the address is not knowable
 # until the connector exists: the live dialog registered
-# https://chatgpt.com/connector/oauth/jFpZaNIKITJA and was refused, because a
-# configured list can only name the fixed path above.
+# https://chatgpt.com/connector/oauth/jFpZaNIKlTJA and was refused, because a
+# configured list can only name the fixed path above. (That identifier is
+# transcribed from the access log; read it there rather than from here, because
+# capital I and lowercase l are one glyph in most fonts and this line held the
+# wrong one until 2026-09-07.)
 #
 # That shape is therefore admitted by its form rather than by name — at dynamic
 # client registration, and nowhere else. What is stored on the client is the

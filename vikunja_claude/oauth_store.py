@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .config import is_chatgpt_connector_redirect_uri
+
 # A registered client is cheap but not free: registration is reachable from the
 # internet, so the file must not be able to grow without bound.
 MAX_CLIENTS = 20
@@ -37,17 +39,28 @@ class ClientStoreFull(RuntimeError):
     """
 
 
+#: The identity of every client admitted through the ChatGPT connector door.
+#: That door is the one gate that is not exact equality — the per-connector
+#: callback does not exist until the connector does — so it is a single slot
+#: rather than an open list, and the name a caller supplies is not part of it.
+CHATGPT_CONNECTOR_SLOT = ("chatgpt-connector", ())
+
+
 def _identity(record: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
     """What makes two registrations the same connector rather than two.
 
     Everything a client tells the server about itself, and nothing the server
     told it: the client_id cannot appear here, because being given a new one
     is what re-registering *is*.
+
+    Anything holding a ChatGPT per-connector callback is that one slot,
+    whatever it calls itself. There is one ChatGPT connector, so a second is
+    not a second client to keep alongside the first.
     """
-    return (
-        str(record.get("client_name") or ""),
-        tuple(sorted(str(uri) for uri in record.get("redirect_uris") or ())),
-    )
+    uris = tuple(sorted(str(uri) for uri in record.get("redirect_uris") or ()))
+    if any(is_chatgpt_connector_redirect_uri(uri) for uri in uris):
+        return CHATGPT_CONNECTOR_SLOT
+    return (str(record.get("client_name") or ""), uris)
 
 
 def new_secret() -> str:
@@ -137,15 +150,10 @@ class OAuthStore:
         the cap has to choose between clients, and choosing wrongly is what
         stranded ChatGPT.
 
-        Identity is what the connector says about itself, its name and its
-        callbacks, because a re-registration is precisely the act of being
-        given a new client_id. ChatGPT's callback carries a per-connector
-        path, so two connectors of the same product stay distinct.
-
-        Only from an authorization, never from a registration: until the new
-        connection exists the old one is still the working one, and a
-        connector that registers speculatively without ever authorizing must
-        not be able to end a live session by asking.
+        This is the half that may take an *authorized* record, and it runs
+        only from an authorization: until the new connection exists the old
+        one is still the working one, and registration proves nothing about
+        who is asking. Registration has its own, narrower half below.
         """
         identity = _identity(client)
         for other_id, other in list(state["clients"].items()):
@@ -195,19 +203,26 @@ class OAuthStore:
         an id nothing recognises any more (task 840). Raises
         :class:`ClientStoreFull` rather than evicting an authorized client.
 
-        Nothing is spendable here for claiming to be a client already in the
-        file. Registration takes no passphrase and an identity is a thing a
-        stranger can state — "Qwen Code" at localhost:7777 is a guess, not a
-        credential — so a same-identity eviction *here* would hand an
-        unauthenticated caller the one power the cap exists to deny. A
-        reconnection replaces its predecessor at the consent screen, which is
-        the first point anything has proved it is the connector it says it is.
+        A registration does displace the *unauthorized* records of the same
+        identity: one pending registration per identity is all that is ever
+        useful, and this is what keeps the ChatGPT connector door — the one
+        gate that is not exact equality — to a single slot no matter how many
+        callbacks a stranger invents. It stops there. An authorized record is
+        not spendable here, because registration takes no passphrase and an
+        identity is a thing a stranger can state: "Qwen Code" at
+        localhost:7777 is a guess, not a credential. Only the consent screen
+        has proved which connector is speaking, so only it may retire a
+        working one.
         """
         with self._lock:
             state = self._read()
             self._expire(state)
             clients = state["clients"]
             authorized = self._authorized(state)
+            identity = _identity(record)
+            for client_id, held in list(clients.items()):
+                if client_id not in authorized and _identity(held) == identity:
+                    del clients[client_id]
             # Oldest first, and never one holding a grant. A client that
             # registered and never came back is the one nobody misses.
             evictable = sorted(

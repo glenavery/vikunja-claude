@@ -1381,9 +1381,20 @@ What holds:
   authorization to everything that looks, and holds a slot open for a
   connection nobody can make. Identity is what the connector states about
   itself, its `client_name` and its `redirect_uris`, because being issued a new
-  `client_id` is what re-registering *is*; ChatGPT's callback carries a
-  per-connector path, so two ChatGPT connectors stay distinct and neither
-  deletes the other.
+  `client_id` is what re-registering *is*.
+- **The ChatGPT connector door is one slot, and only one client is ever in
+  it.** Every other redirect URI is admitted by exact equality against
+  `VIKUNJA_MCP_OAUTH_REDIRECT_URIS`, so each one names a connector the operator
+  wrote down. ChatGPT's cannot be written down — the per-connector path does
+  not exist until the connector does — so that door admits a *shape*,
+  `https://chatgpt.com/connector/oauth/<identifier>`, and a shape is not a
+  whitelist entry: anyone can mint callbacks through it without limit. So every
+  client holding a connector-shaped callback shares one identity, whatever
+  `client_name` it supplies, and the rules above then hold the door to a single
+  record. Registering an invented callback displaces only what nobody
+  authorized, so a stranger's twenty-five attempts leave one junk record and
+  never touch the connected one; replacing the connected one still takes the
+  consent screen.
 - **Replacement happens at the consent screen, and only there.** Two reasons,
   and the second is the one with teeth. Until the new connection exists the old
   one is still the working one — OpenCode registered a third time while holding

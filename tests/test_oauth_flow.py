@@ -283,6 +283,11 @@ class TestReconnectingRetiresTheConnectionItReplaces(HttpTestCase):
     def stored(self) -> dict:
         return json.loads(self.config.oauth_state_path.read_text())["clients"]
 
+    @staticmethod
+    def connector_uri(identifier: str) -> str:
+        """A callback of ChatGPT's per-connector shape, which anyone can mint."""
+        return f"https://chatgpt.com/connector/oauth/{identifier}"
+
     def connect(
         self, client_name: str = CLIENT_NAME, redirect_uri: str = REDIRECT_URI
     ) -> tuple[str, str]:
@@ -355,16 +360,57 @@ class TestReconnectingRetiresTheConnectionItReplaces(HttpTestCase):
         status, _, body = self.rpc("tools/list", token=token)
         self.assertEqual(status, 200, body)
 
-    def test_two_connectors_of_one_product_are_kept_apart(self):
-        """Identity is the name *and* the callbacks, and that is load-bearing.
+    def test_the_chatgpt_connector_door_holds_exactly_one_client(self):
+        """One ChatGPT connector, whatever callback or name it arrives with.
 
-        ChatGPT's callback carries a path issued per connector, so two of them
-        on one account differ where it counts. Collapsing them on the name
-        alone would make adding a second connector delete the first.
+        Every other redirect URI is admitted by exact equality against the
+        configured list, so each names a connector the operator wrote down.
+        The per-connector callback is the one gate that cannot: the path does
+        not exist until the connector does, so the door admits a shape rather
+        than a value. A shape is not a whitelist entry, so the door is a
+        single slot instead — a second ChatGPT client replaces the first
+        rather than sitting beside it.
         """
-        first, _ = self.connect()
-        second, _ = self.connect(redirect_uri=CONNECTOR_REDIRECT_URI)
-        self.assertEqual(set(self.stored()), {first, second})
+        first, _ = self.connect(redirect_uri=CONNECTOR_REDIRECT_URI)
+        second, _ = self.connect(
+            "a different name", redirect_uri=self.connector_uri("SecondConnector")
+        )
+        self.assertNotEqual(first, second)
+        self.assertEqual(set(self.stored()), {second})
+
+    def test_invented_callbacks_cannot_grow_the_file(self):
+        """The flood the door made possible, which the slot closes.
+
+        `https://chatgpt.com/connector/oauth/<anything>` is admitted by shape,
+        so a stranger can mint distinct callbacks without limit and no
+        whitelist entry is being violated. One slot means twenty-five of them
+        leave one record, not twenty-five.
+        """
+        for number in range(MAX_CLIENTS + 5):
+            registered = self.register_client(
+                client_name=f"impostor {number}",
+                redirect_uris=[self.connector_uri(f"Invented{number}")],
+            )
+            self.assertEqual(registered["status"], 201, registered)
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_an_invented_callback_cannot_displace_the_connected_one(self):
+        """The slot is one, but only the consent screen may empty it.
+
+        The door is open to anyone, so if merely registering through it could
+        retire whatever it found there, stranding the live ChatGPT connector
+        would be one unauthenticated POST — the failure this whole change is
+        about, handed out as a feature.
+        """
+        client_id, token = self.connect(redirect_uri=CONNECTOR_REDIRECT_URI)
+        registered = self.register_client(
+            client_name="impostor",
+            redirect_uris=[self.connector_uri("Invented")],
+        )
+        self.assertEqual(registered["status"], 201, registered)
+        self.assertIn(client_id, self.stored())
+        status, _, body = self.rpc("tools/list", token=token)
+        self.assertEqual(status, 200, body)
 
     def test_the_file_is_bounded_by_connectors_not_by_reconnections(self):
         """The claim the cap needed: re-adding one connector costs no slots."""
@@ -478,9 +524,13 @@ class TestTheChatGptConnectorCallback(HttpTestCase):
         would be accepted, and a code for this client would be sent to an
         address it never registered.
         """
-        client_id = self.assertRegisters(CONNECTOR_REDIRECT_URI)
+        # The other callback goes first, and its own registration is what
+        # shows the shape is registerable. It cannot be held open alongside:
+        # the connector door is one slot, so the registration that follows
+        # takes it — which is why this order, not the reverse.
         other = "https://chatgpt.com/connector/oauth/someOtherConnector"
-        self.assertRegisters(other)  # so it is not the shape that is refusing
+        self.assertRegisters(other)
+        client_id = self.assertRegisters(CONNECTOR_REDIRECT_URI)
 
         _, challenge = self.pkce()
         status, headers, page = self.open(
