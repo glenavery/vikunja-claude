@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .config import is_chatgpt_connector_redirect_uri
+
 # A registered client is cheap but not free: registration is reachable from the
 # internet, so the file must not be able to grow without bound.
 MAX_CLIENTS = 20
@@ -35,6 +37,30 @@ class ClientStoreFull(RuntimeError):
     taking out a working connector to make room for an unknown one trades the
     thing the boundary is for against the thing it is defending from.
     """
+
+
+#: The identity of every client admitted through the ChatGPT connector door.
+#: That door is the one gate that is not exact equality — the per-connector
+#: callback does not exist until the connector does — so it is a single slot
+#: rather than an open list, and the name a caller supplies is not part of it.
+CHATGPT_CONNECTOR_SLOT = ("chatgpt-connector", ())
+
+
+def _identity(record: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    """What makes two registrations the same connector rather than two.
+
+    Everything a client tells the server about itself, and nothing the server
+    told it: the client_id cannot appear here, because being given a new one
+    is what re-registering *is*.
+
+    Anything holding a ChatGPT per-connector callback is that one slot,
+    whatever it calls itself. There is one ChatGPT connector, so a second is
+    not a second client to keep alongside the first.
+    """
+    uris = tuple(sorted(str(uri) for uri in record.get("redirect_uris") or ()))
+    if any(is_chatgpt_connector_redirect_uri(uri) for uri in uris):
+        return CHATGPT_CONNECTOR_SLOT
+    return (str(record.get("client_name") or ""), uris)
 
 
 def new_secret() -> str:
@@ -109,6 +135,50 @@ class OAuthStore:
                     approved.add(client_id)
         return approved
 
+    def _supersede(
+        self,
+        state: dict[str, dict[str, Any]],
+        client_id: str,
+        client: dict[str, Any],
+    ) -> None:
+        """Retire the earlier registrations this connection has replaced.
+
+        A connector that is re-added registers afresh, so the record it was
+        using before is one nothing can reach: its id is gone from the only
+        place that held it. Left in the file those records accumulate — nine
+        for Qwen Code against a single live grant, three for OpenCode — until
+        the cap has to choose between clients, and choosing wrongly is what
+        stranded ChatGPT.
+
+        This is the half that may take an *authorized* record, and it runs
+        only from an authorization: until the new connection exists the old
+        one is still the working one, and registration proves nothing about
+        who is asking. Registration has its own, narrower half below.
+        """
+        identity = _identity(client)
+        for other_id, other in list(state["clients"].items()):
+            if other_id == client_id or _identity(other) != identity:
+                continue
+            del state["clients"][other_id]
+            self._forget_grants(state, other_id)
+
+    @staticmethod
+    def _forget_grants(state: dict[str, dict[str, Any]], client_id: str) -> None:
+        """Drop what a removed client held, in the same write that removes it.
+
+        A token outliving its client record is the state the live file was
+        found in: unreachable by the connector, because the id it would
+        present is gone, yet still evidence of an authorization to everything
+        that reads the file — so the cap goes on protecting a slot for a
+        connection nobody can make.
+        """
+        for section in ("codes", "tokens"):
+            state[section] = {
+                key: record
+                for key, record in state[section].items()
+                if record.get("client_id") != client_id
+            }
+
     def _note_authorization(
         self, state: dict[str, dict[str, Any]], client_id: str | None
     ) -> None:
@@ -118,24 +188,41 @@ class OAuthStore:
         cannot be evicted from a store it was never in.
         """
         client = state["clients"].get(client_id or "")
-        if client is not None and not client.get("authorized_at"):
+        if client is None:
+            return
+        if not client.get("authorized_at"):
             client["authorized_at"] = int(self._now())
+        self._supersede(state, client_id or "", client)
 
     def register_client(self, record: dict[str, Any]) -> dict[str, Any]:
         """Store a newly registered client, evicting only an unused one.
 
         Registration is reachable from the internet and a connector registers
-        exactly once, when it is created — so "the oldest client" is the
-        working one, not the disposable one, and evicting by age alone strands
-        the connector with an id nothing recognises any more (task 840).
-        Raises :class:`ClientStoreFull` rather than evicting an authorized
-        client.
+        when it is *created*, so its record stays among the oldest in the file
+        for as long as it keeps working: evicting by age alone strands it with
+        an id nothing recognises any more (task 840). Raises
+        :class:`ClientStoreFull` rather than evicting an authorized client.
+
+        A registration does displace the *unauthorized* records of the same
+        identity: one pending registration per identity is all that is ever
+        useful, and this is what keeps the ChatGPT connector door — the one
+        gate that is not exact equality — to a single slot no matter how many
+        callbacks a stranger invents. It stops there. An authorized record is
+        not spendable here, because registration takes no passphrase and an
+        identity is a thing a stranger can state: "Qwen Code" at
+        localhost:7777 is a guess, not a credential. Only the consent screen
+        has proved which connector is speaking, so only it may retire a
+        working one.
         """
         with self._lock:
             state = self._read()
             self._expire(state)
             clients = state["clients"]
             authorized = self._authorized(state)
+            identity = _identity(record)
+            for client_id, held in list(clients.items()):
+                if client_id not in authorized and _identity(held) == identity:
+                    del clients[client_id]
             # Oldest first, and never one holding a grant. A client that
             # registered and never came back is the one nobody misses.
             evictable = sorted(

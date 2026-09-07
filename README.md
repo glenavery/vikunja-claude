@@ -1359,16 +1359,57 @@ What holds:
   reading the log and guessing.
 - **The client store is capped, and the cap may only spend clients nobody
   authorized** (task 840). `/oauth/register` is reachable from the internet, so
-  the file cannot grow without bound — but a connector registers exactly *once*,
-  when it is created, and never again, so under eviction by age alone the
-  working connector is always the oldest record and always the first to go.
-  A client the operator carried through the consent screen is therefore never
-  evicted: it is marked when its code is issued, which is downstream of the
-  passphrase, and a client the file still holds a code or token for counts as
-  marked whether or not it says so. If the cap is reached with nothing
-  unauthorized to remove, the registration is refused — `503`,
+  the file cannot grow without bound — but a connector registers when it is
+  *created*, not when it is used, so its record is among the oldest in the file
+  for as long as it keeps working, and under eviction by age alone it is always
+  the first to go. A client the operator carried through the consent screen is
+  therefore never evicted: it is marked when its code is issued, which is
+  downstream of the passphrase, and a client the file still holds a code or
+  token for counts as marked whether or not it says so. If the cap is reached
+  with nothing unauthorized to remove, the registration is refused — `503`,
   `temporarily_unavailable` — rather than a working connector being taken out
   to make room for an unknown one.
+- **One connector holds one registration, however often it is re-added.**
+  Re-adding a connector registers it afresh, and the record it was using before
+  is then unreachable — the only copy of that id was the one it just replaced.
+  Left in the file those pile up: the live store reached its cap of twenty
+  holding nine Qwen Code records against a single live grant, three for
+  OpenCode and two duplicate ChatGPT verifications, which is how a cap sized
+  for connectors ran out on connection attempts. So authorizing a client
+  retires the earlier registrations carrying the same identity, and their
+  grants go with them — a token outliving its client record reads as an
+  authorization to everything that looks, and holds a slot open for a
+  connection nobody can make. Identity is what the connector states about
+  itself, its `client_name` and its `redirect_uris`, because being issued a new
+  `client_id` is what re-registering *is*.
+- **The ChatGPT connector door is one slot, and only one client is ever in
+  it.** Every other redirect URI is admitted by exact equality against
+  `VIKUNJA_MCP_OAUTH_REDIRECT_URIS`, so each one names a connector the operator
+  wrote down. ChatGPT's cannot be written down — the per-connector path does
+  not exist until the connector does — so that door admits a *shape*,
+  `https://chatgpt.com/connector/oauth/<identifier>`, and a shape is not a
+  whitelist entry: anyone can mint callbacks through it without limit. So every
+  client holding a connector-shaped callback shares one identity, whatever
+  `client_name` it supplies, and the rules above then hold the door to a single
+  record. Registering an invented callback displaces only what nobody
+  authorized, so a stranger's twenty-five attempts leave one junk record and
+  never touch the connected one; replacing the connected one still takes the
+  consent screen.
+- **Replacement happens at the consent screen, and only there.** Two reasons,
+  and the second is the one with teeth. Until the new connection exists the old
+  one is still the working one — OpenCode registered a third time while holding
+  a refresh token good for another month — so a connector that asks for an id
+  and never returns with it has replaced nothing. And an identity is a thing a
+  stranger can *state*: `/oauth/register` takes no passphrase, and `Qwen Code`
+  at `http://localhost:7777/oauth/callback` is a guess rather than a
+  credential. A same-identity eviction at registration would therefore hand an
+  unauthenticated caller the one power the cap exists to deny, which is the
+  rule above defeated by asking for it in the right words. So a full store
+  still refuses a registration that names a client already in it — `503` — and
+  the consent screen stays the first point at which anything has proved which
+  connector is speaking. The two rules are complementary rather than
+  overlapping: replacement removes the way the file filled in practice, and the
+  cap governs what happens when it fills anyway.
 - **A code is single use**, lives 60 seconds, and is bound to the client, the
   redirect URI, the challenge and the resource. Redeeming one twice fails *and*
   revokes every token the first redemption issued — a replayed code means it
@@ -1557,8 +1598,9 @@ Two ways back, and the first is the ordinary one:
 
 - **Re-add the connector in ChatGPT.** It registers again on creation, gets a
   fresh `client_id` and a fresh per-connector callback, and the authorization
-  that follows marks it as one that must not be evicted. Nothing on the server
-  needs changing.
+  that follows marks it as one that must not be evicted — and retires the
+  record it replaced, so coming back this way costs the file nothing. Nothing
+  on the server needs changing.
 - **Pin the id instead**, if the same `client_id` has to keep working — a
   configured client is not in the state file at all, so nothing can evict it.
   Both variables are needed: the id ChatGPT presents, and *that connector's*
