@@ -24,7 +24,11 @@ from pathlib import Path
 from unittest import mock
 
 from vikunja_claude.oauth import MAX_FAILED_ATTEMPTS, SCOPE, AuthorizationServer
-from vikunja_claude.oauth_store import MAX_CLIENTS, OAuthStore
+from vikunja_claude.oauth_store import (
+    MAX_CLIENTS,
+    PENDING_CLIENT_TTL_SECONDS,
+    OAuthStore,
+)
 
 from .fakes import PROJECT_ID
 from .support import (
@@ -437,6 +441,78 @@ class TestReconnectingRetiresTheConnectionItReplaces(HttpTestCase):
         self.assertEqual(set(self.stored()), {first, second})
         status, _, body = self.rpc("tools/list", token=token)
         self.assertEqual(status, 200, body)
+
+
+class TestARegistrationThatWasNeverAuthorized(HttpTestCase):
+    """An attempt that did not become a connection does not stay in the file.
+
+    Registering is one half of adding a connector and consenting is the other,
+    and nothing reports the half that did not happen: an abandoned dialog, a
+    passphrase given up on and a stranger's POST all look alike, which is to
+    say they look like nothing at all. So the record carries a deadline rather
+    than waiting for a signal that is never sent.
+    """
+
+    def stored(self) -> dict:
+        return json.loads(self.config.oauth_state_path.read_text())["clients"]
+
+    def age(self, client_id: str, seconds: int) -> None:
+        """Move one registration back in time, since the suite runs in one."""
+        state = json.loads(self.config.oauth_state_path.read_text())
+        state["clients"][client_id]["issued_at"] = int(time.time()) - seconds
+        self.config.oauth_state_path.write_text(json.dumps(state))
+
+    def touch(self) -> None:
+        """Any write to the store, which is when expiry is applied."""
+        self.register_client(client_name="some other connector")
+
+    def test_it_is_gone_once_its_deadline_passes(self):
+        client_id = self.register_client(client_name="never came back")["client_id"]
+        self.age(client_id, PENDING_CLIENT_TTL_SECONDS + 60)
+        self.touch()
+        self.assertNotIn(client_id, self.stored())
+
+    def test_it_is_kept_until_then(self):
+        """The deadline is a deadline, not a sweep of everything pending."""
+        client_id = self.register_client(client_name="mid-flow")["client_id"]
+        self.age(client_id, PENDING_CLIENT_TTL_SECONDS - 60)
+        self.touch()
+        self.assertIn(client_id, self.stored())
+
+    def test_a_wrong_passphrase_leaves_the_attempt_alone(self):
+        """The retry needs something to authorize.
+
+        A rejected passphrase re-renders the consent page so the operator can
+        try again — it is the one failure that is not the end of the attempt,
+        and removing the record there would turn a typo into "register the
+        client first".
+        """
+        client = self.register_client()
+        _, challenge = self.pkce()
+        params = self.authorize_params(client["client_id"], challenge)
+        status, _, _ = self.approve(params, passphrase="wrong")
+        self.assertEqual(status, 401)
+        self.assertIn(client["client_id"], self.stored())
+        status, headers, body = self.approve(params)
+        self.assertEqual(status, 302, body)
+        self.assertIn("code", self.redirect_query(headers))
+
+    def test_a_connection_has_no_deadline(self):
+        """What separates the two: the consent screen, and nothing else.
+
+        Aged far past the deadline and with every grant it held removed, so
+        the only thing keeping it is the record of having been authorized.
+        """
+        code, verifier, client_id = self.obtain_code()
+        status, payload = self.exchange(code, verifier, client_id)
+        self.assertEqual(status, 200, payload)
+        state = json.loads(self.config.oauth_state_path.read_text())
+        state["codes"], state["tokens"] = {}, {}
+        state["clients"][client_id]["issued_at"] = 1
+        self.config.oauth_state_path.write_text(json.dumps(state))
+
+        self.touch()
+        self.assertIn(client_id, self.stored())
 
 
 class TestTheChatGptConnectorCallback(HttpTestCase):
