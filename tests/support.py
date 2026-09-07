@@ -55,6 +55,10 @@ TOKEN = "test-token-never-in-prompts"
 PASSPHRASE = "test-operator-passphrase-long-enough-to-be-plausible"
 ISSUER = "http://127.0.0.1:8443"
 REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect"
+
+#: The default connector a test speaks as. Named, because a client's name is
+#: half of what tells the store one connector from another.
+CLIENT_NAME = "ChatGPT (test)"
 #: The per-connector callback ChatGPT actually submits now. The identifier is
 #: the one from the live failure, because a made-up one would not show that the
 #: value is opaque and unknown until the connector exists.
@@ -424,7 +428,7 @@ class HttpTestCase(unittest.TestCase):
 
     def register_client(self, **overrides) -> dict:
         payload = {
-            "client_name": "ChatGPT (test)",
+            "client_name": CLIENT_NAME,
             "redirect_uris": [REDIRECT_URI],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
@@ -473,9 +477,15 @@ class HttpTestCase(unittest.TestCase):
             ).items()
         }
 
-    def obtain_code(self, **overrides) -> tuple[str, str, str]:
-        """Run the flow up to the authorization code. Returns (code, verifier, client_id)."""
-        client = self.register_client()
+    def obtain_code(
+        self, client_name: str = CLIENT_NAME, **overrides
+    ) -> tuple[str, str, str]:
+        """Run the flow up to the authorization code. Returns (code, verifier, client_id).
+
+        ``client_name`` is how a test says "a different connector", which the
+        store now distinguishes from the same one coming back.
+        """
+        client = self.register_client(client_name=client_name)
         verifier, challenge = self.pkce()
         params = self.authorize_params(client["client_id"], challenge, **overrides)
         status, headers, _ = self.approve(params)

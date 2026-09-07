@@ -28,6 +28,7 @@ from vikunja_claude.oauth_store import MAX_CLIENTS, OAuthStore
 
 from .fakes import PROJECT_ID
 from .support import (
+    CLIENT_NAME,
     CONNECTOR_REDIRECT_URI,
     PASSPHRASE,
     REDIRECT_URI,
@@ -144,7 +145,7 @@ class TestTheClientCapDoesNotStrandAConnector(HttpTestCase):
             registered = self.register_client(client_name=f"throwaway {number}")
             self.assertEqual(registered["status"], 201, registered)
 
-    def connected_client(self) -> str:
+    def connected_client(self, client_name: str = CLIENT_NAME) -> str:
         """A client carried all the way to a token, as a connector is.
 
         Then aged, deliberately, so that it is the *first* record any
@@ -154,7 +155,7 @@ class TestTheClientCapDoesNotStrandAConnector(HttpTestCase):
         about 1 record in 20, which is to say it passes whether the rule holds
         or not.
         """
-        code, verifier, client_id = self.obtain_code()
+        code, verifier, client_id = self.obtain_code(client_name=client_name)
         status, payload = self.exchange(code, verifier, client_id)
         self.assertEqual(status, 200, payload)
         state = json.loads(self.config.oauth_state_path.read_text())
@@ -213,11 +214,13 @@ class TestTheClientCapDoesNotStrandAConnector(HttpTestCase):
 
         The cap is patched down because the rule is about the shape of the
         store, not about the number twenty, and reaching twenty authorizations
-        is twenty consent screens.
+        is twenty consent screens. The two are named apart because two
+        connections from one connector are not two clients any more: the
+        second supersedes the first, and the store would hold one.
         """
         with mock.patch("vikunja_claude.oauth_store.MAX_CLIENTS", 2):
-            first = self.connected_client()
-            second = self.connected_client()
+            first = self.connected_client("one connector")
+            second = self.connected_client("another connector")
             refused = self.register_client(client_name="one too many")
         self.assertEqual(refused["status"], 503, refused)
         self.assertEqual(refused["error"], "temporarily_unavailable")
@@ -264,6 +267,126 @@ class TestTheClientCapDoesNotStrandAConnector(HttpTestCase):
         clients = self.stored()
         self.assertTrue(clients[client_id]["authorized_at"])
         self.assertNotIn("authorized_at", clients[bystander])
+
+
+class TestReconnectingRetiresTheConnectionItReplaces(HttpTestCase):
+    """One connector holds one registration, however often it is re-added.
+
+    Task 840 stopped the cap from spending a client somebody was using. It did
+    not stop the file filling up in the first place, and the live store filled
+    the way it did because every reconnection left its predecessor behind:
+    nine Qwen Code records against one live grant, three for OpenCode, two
+    duplicate ChatGPT verifications. Twenty slots bounded by attempts rather
+    than by connectors is a cap that is always about to have to choose.
+    """
+
+    def stored(self) -> dict:
+        return json.loads(self.config.oauth_state_path.read_text())["clients"]
+
+    def connect(
+        self, client_name: str = CLIENT_NAME, redirect_uri: str = REDIRECT_URI
+    ) -> tuple[str, str]:
+        """Add one connector, the whole way. Returns (client_id, access token).
+
+        Registration, consent and exchange, rather than the shared helper,
+        because both halves of what the store calls one connector — the name
+        and the callback — have to be a knob a test can turn.
+        """
+        client = self.register_client(
+            client_name=client_name, redirect_uris=[redirect_uri]
+        )
+        self.assertEqual(client["status"], 201, client)
+        verifier, challenge = self.pkce()
+        params = self.authorize_params(
+            client["client_id"], challenge, redirect_uri=redirect_uri
+        )
+        status, headers, body = self.approve(params)
+        self.assertEqual(status, 302, body)
+        status, payload = self.exchange(
+            self.redirect_query(headers)["code"],
+            verifier,
+            client["client_id"],
+            redirect_uri=redirect_uri,
+        )
+        self.assertEqual(status, 200, payload)
+        return client["client_id"], str(payload["access_token"])
+
+    def test_reconnecting_retires_the_earlier_registration(self):
+        first, _ = self.connect()
+        second, _ = self.connect()
+        self.assertNotEqual(first, second)
+        self.assertEqual(set(self.stored()), {second})
+
+    def test_the_retired_registration_takes_its_grants_with_it(self):
+        """The half that makes the slot actually free.
+
+        A token outliving its client record is the exact state the live file
+        was found in, and it reads as an authorization to everything that
+        looks: the cap would go on protecting a connection nobody can reach.
+        """
+        retired, superseded = self.connect()
+        self.connect()
+        status, _, body = self.rpc("tools/list", token=superseded)
+        self.assertEqual(status, 401, body)
+        state = json.loads(self.config.oauth_state_path.read_text())
+        for section in ("codes", "tokens"):
+            self.assertEqual(
+                [],
+                [
+                    key
+                    for key, record in state[section].items()
+                    if record.get("client_id") == retired
+                ],
+                section,
+            )
+
+    def test_registering_again_without_authorizing_leaves_the_live_one_alone(self):
+        """Why this happens at the consent screen and not at /oauth/register.
+
+        OpenCode registered a third time on 2026-09-06 while still holding a
+        refresh token good until October. A connector that asks for an id and
+        never comes back with it has replaced nothing, and must not be able to
+        end a working session by asking.
+        """
+        client_id, token = self.connect()
+        again = self.register_client()
+        self.assertEqual(again["status"], 201, again)
+        self.assertIn(client_id, self.stored())
+        status, _, body = self.rpc("tools/list", token=token)
+        self.assertEqual(status, 200, body)
+
+    def test_two_connectors_of_one_product_are_kept_apart(self):
+        """Identity is the name *and* the callbacks, and that is load-bearing.
+
+        ChatGPT's callback carries a path issued per connector, so two of them
+        on one account differ where it counts. Collapsing them on the name
+        alone would make adding a second connector delete the first.
+        """
+        first, _ = self.connect()
+        second, _ = self.connect(redirect_uri=CONNECTOR_REDIRECT_URI)
+        self.assertEqual(set(self.stored()), {first, second})
+
+    def test_the_file_is_bounded_by_connectors_not_by_reconnections(self):
+        """The claim the cap needed: re-adding one connector costs no slots."""
+        for _ in range(MAX_CLIENTS + 5):
+            self.connect()
+        self.assertEqual(len(self.stored()), 1)
+
+    def test_a_reconnection_is_not_refused_by_a_store_full_of_itself(self):
+        """The failure mode 840 left behind, at the size it happens.
+
+        Before this, twenty reconnections of one connector filled the store
+        with twenty authorized clients, and the twenty-first was refused 503 —
+        a connector locked out by its own history.
+        """
+        client_id, token = "", ""
+        with mock.patch("vikunja_claude.oauth_store.MAX_CLIENTS", 2):
+            self.connect("one connector")
+            for _ in range(4):
+                client_id, token = self.connect("another connector")
+        status, _, body = self.rpc("tools/list", token=token)
+        self.assertEqual(status, 200, body)
+        self.assertIn(client_id, self.stored())
 
 
 class TestTheChatGptConnectorCallback(HttpTestCase):

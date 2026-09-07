@@ -37,6 +37,19 @@ class ClientStoreFull(RuntimeError):
     """
 
 
+def _identity(record: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
+    """What makes two registrations the same connector rather than two.
+
+    Everything a client tells the server about itself, and nothing the server
+    told it: the client_id cannot appear here, because being given a new one
+    is what re-registering *is*.
+    """
+    return (
+        str(record.get("client_name") or ""),
+        tuple(sorted(str(uri) for uri in record.get("redirect_uris") or ())),
+    )
+
+
 def new_secret() -> str:
     """A credential value: 32 bytes of urandom, URL-safe."""
     return secrets.token_urlsafe(32)
@@ -109,6 +122,55 @@ class OAuthStore:
                     approved.add(client_id)
         return approved
 
+    def _supersede(
+        self,
+        state: dict[str, dict[str, Any]],
+        client_id: str,
+        client: dict[str, Any],
+    ) -> None:
+        """Retire the earlier registrations this connection has replaced.
+
+        A connector that is re-added registers afresh, so the record it was
+        using before is one nothing can reach: its id is gone from the only
+        place that held it. Left in the file those records accumulate — nine
+        for Qwen Code against a single live grant, three for OpenCode — until
+        the cap has to choose between clients, and choosing wrongly is what
+        stranded ChatGPT.
+
+        Identity is what the connector says about itself, its name and its
+        callbacks, because a re-registration is precisely the act of being
+        given a new client_id. ChatGPT's callback carries a per-connector
+        path, so two connectors of the same product stay distinct.
+
+        Only from an authorization, never from a registration: until the new
+        connection exists the old one is still the working one, and a
+        connector that registers speculatively without ever authorizing must
+        not be able to end a live session by asking.
+        """
+        identity = _identity(client)
+        for other_id, other in list(state["clients"].items()):
+            if other_id == client_id or _identity(other) != identity:
+                continue
+            del state["clients"][other_id]
+            self._forget_grants(state, other_id)
+
+    @staticmethod
+    def _forget_grants(state: dict[str, dict[str, Any]], client_id: str) -> None:
+        """Drop what a removed client held, in the same write that removes it.
+
+        A token outliving its client record is the state the live file was
+        found in: unreachable by the connector, because the id it would
+        present is gone, yet still evidence of an authorization to everything
+        that reads the file — so the cap goes on protecting a slot for a
+        connection nobody can make.
+        """
+        for section in ("codes", "tokens"):
+            state[section] = {
+                key: record
+                for key, record in state[section].items()
+                if record.get("client_id") != client_id
+            }
+
     def _note_authorization(
         self, state: dict[str, dict[str, Any]], client_id: str | None
     ) -> None:
@@ -118,8 +180,11 @@ class OAuthStore:
         cannot be evicted from a store it was never in.
         """
         client = state["clients"].get(client_id or "")
-        if client is not None and not client.get("authorized_at"):
+        if client is None:
+            return
+        if not client.get("authorized_at"):
             client["authorized_at"] = int(self._now())
+        self._supersede(state, client_id or "", client)
 
     def register_client(self, record: dict[str, Any]) -> dict[str, Any]:
         """Store a newly registered client, evicting only an unused one.
@@ -129,22 +194,35 @@ class OAuthStore:
         working one, not the disposable one, and evicting by age alone strands
         the connector with an id nothing recognises any more (task 840).
         Raises :class:`ClientStoreFull` rather than evicting an authorized
-        client.
+        client that is not this one.
         """
         with self._lock:
             state = self._read()
             self._expire(state)
             clients = state["clients"]
             authorized = self._authorized(state)
+
+            def by_age(candidates) -> list[tuple[str, dict[str, Any]]]:
+                return sorted(candidates, key=lambda item: item[1].get("issued_at", 0))
+
             # Oldest first, and never one holding a grant. A client that
             # registered and never came back is the one nobody misses.
-            evictable = sorted(
-                (
-                    (client_id, held)
-                    for client_id, held in clients.items()
-                    if client_id not in authorized
-                ),
-                key=lambda item: item[1].get("issued_at", 0),
+            evictable = by_age(
+                (client_id, held)
+                for client_id, held in clients.items()
+                if client_id not in authorized
+            )
+            # Then, and only once there is nothing else left to spend, this
+            # connector's own earlier records. A store full of authorized
+            # clients would otherwise lock out the one connector whose
+            # registration costs the file nothing — the authorization to come
+            # retires those records anyway. It can never reach another
+            # connector's: same name, same callbacks, or not a candidate.
+            identity = _identity(record)
+            evictable += by_age(
+                (client_id, held)
+                for client_id, held in clients.items()
+                if client_id in authorized and _identity(held) == identity
             )
             while len(clients) >= MAX_CLIENTS:
                 if not evictable:
@@ -152,7 +230,9 @@ class OAuthStore:
                         f"all {len(clients)} registered clients have been "
                         "authorized, so there is none to evict"
                     )
-                clients.pop(evictable.pop(0)[0])
+                victim = evictable.pop(0)[0]
+                clients.pop(victim)
+                self._forget_grants(state, victim)
             clients[record["client_id"]] = record
             self._write(state)
         return record
