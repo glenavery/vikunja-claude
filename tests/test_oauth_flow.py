@@ -651,6 +651,71 @@ class TestARegistrationThatWasNeverAuthorized(HttpTestCase):
         self.assertEqual(status, 302, body)
         self.assertIn("code", self.redirect_query(headers))
 
+    def test_a_grant_is_written_down_before_it_can_expire(self):
+        """The four connectors in the live file that predate the stamp.
+
+        They were approved before anything recorded it, so the grant was the
+        only evidence — and the grant expires. Any write to the store now
+        settles that, without a consent screen to restate something already
+        true, and the record then outlives the token it was inferred from.
+        """
+        code, verifier, client_id = self.obtain_code()
+        status, payload = self.exchange(code, verifier, client_id)
+        self.assertEqual(status, 200, payload)
+        state = json.loads(self.config.oauth_state_path.read_text())
+        del state["clients"][client_id]["authorized_at"]
+        state["clients"][client_id]["issued_at"] = 1
+        self.config.oauth_state_path.write_text(json.dumps(state))
+
+        self.touch()
+        self.assertTrue(self.stored()[client_id]["authorized_at"])
+
+    def test_it_survives_losing_that_grant_afterwards(self):
+        """Which is the point: the stamp is what the deadline reads."""
+        code, verifier, client_id = self.obtain_code()
+        self.exchange(code, verifier, client_id)
+        state = json.loads(self.config.oauth_state_path.read_text())
+        del state["clients"][client_id]["authorized_at"]
+        state["clients"][client_id]["issued_at"] = 1
+        self.config.oauth_state_path.write_text(json.dumps(state))
+        self.touch()
+
+        state = json.loads(self.config.oauth_state_path.read_text())
+        state["codes"], state["tokens"] = {}, {}
+        self.config.oauth_state_path.write_text(json.dumps(state))
+        self.touch()
+        self.assertIn(client_id, self.stored())
+
+    def test_a_grant_that_lapsed_since_the_last_write_still_counts(self):
+        """Why the stamp is read before the pruning and not after it.
+
+        Nothing runs between writes, so a token does not expire at its expiry
+        — it is found expired, at some arbitrary later moment, by whatever
+        touches the file next. Pruning first would discard the evidence in the
+        same pass that was supposed to record it, and the connector would go
+        from approved to unknown without anything having happened.
+        """
+        code, verifier, client_id = self.obtain_code()
+        self.exchange(code, verifier, client_id)
+        state = json.loads(self.config.oauth_state_path.read_text())
+        del state["clients"][client_id]["authorized_at"]
+        # Both sections, or this proves nothing: a redeemed code stays in the
+        # file for the rest of its 60 seconds, and it is a grant too — so
+        # lapsing only the tokens leaves the stamp a second source to read
+        # and the ordering under test stops being what decides the answer.
+        for section in ("codes", "tokens"):
+            for record in state[section].values():
+                record["expires_at"] = 1
+        self.config.oauth_state_path.write_text(json.dumps(state))
+
+        self.touch()
+        self.assertTrue(self.stored()[client_id].get("authorized_at"))
+
+    def test_nothing_is_stamped_that_holds_no_grant(self):
+        client_id = self.register_client(client_name="never came back")["client_id"]
+        self.touch()
+        self.assertNotIn("authorized_at", self.stored()[client_id])
+
     def test_a_connection_has_no_deadline(self):
         """What separates the two: the consent screen, and nothing else.
 

@@ -112,6 +112,16 @@ class OAuthStore:
 
     def _expire(self, state: dict[str, dict[str, Any]]) -> None:
         now = self._now()
+        # Write down what the grants are evidence of, before they are pruned.
+        # A grant in the file means the operator approved this client, and that
+        # is a fact about the past which does not expire — but until it is
+        # written on the client it is only *inferred* from something that does,
+        # so a connector left alone for longer than its refresh token lives
+        # would quietly stop being one this server knows it approved. Reading
+        # it here rather than only where a code is issued is what covers the
+        # clients authorized before the stamp existed, without asking them to
+        # sit through a consent screen to say something already true.
+        self._stamp_from_grants(state)
         for section in ("codes", "tokens"):
             state[section] = {
                 key: record
@@ -199,6 +209,21 @@ class OAuthStore:
                 for key, record in state[section].items()
                 if record.get("client_id") != client_id
             }
+
+    def _stamp_from_grants(self, state: dict[str, dict[str, Any]]) -> None:
+        """Make the approval a client's grants imply into a durable one.
+
+        Nothing is granted here and nothing changes hands: this records, on the
+        client, an approval the file already asserts elsewhere. It is the two
+        halves of :meth:`_authorized` converging, so that the half that expires
+        cannot be the only one that remembers.
+        """
+        now = int(self._now())
+        for section in ("codes", "tokens"):
+            for record in state[section].values():
+                client = state["clients"].get(record.get("client_id") or "")
+                if client is not None and not client.get("authorized_at"):
+                    client["authorized_at"] = now
 
     def _note_authorization(
         self, state: dict[str, dict[str, Any]], client_id: str | None
