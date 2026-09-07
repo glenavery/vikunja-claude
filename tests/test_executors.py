@@ -848,3 +848,56 @@ class ExecutorDataclass(unittest.TestCase):
         )
         self.assertEqual(executor.apply({"A": "old", "B": "gone", "C": "kept"}),
                          {"A": "new", "C": "kept"})
+
+
+# --------------------------------------------------------------------------- #
+# The repository's own rules reach the run (task 839)                           #
+# --------------------------------------------------------------------------- #
+
+class TheRepositoryRulesAreInjected(Repo):
+    """OpenCode reads ``AGENTS.md`` and not ``CLAUDE.md``, so the runner names it.
+
+    Task 839: between task 810 making this executor OpenCode and that ticket, a
+    local run received none of the repository's rules. The repository's
+    ``AGENTS.md`` points at ``CLAUDE.md`` rather than copying it -- one
+    authority, no duplicate to keep in step -- and naming it in the generated
+    config is what makes that pointer resolve.
+    """
+
+    def test_claude_md_is_named_as_an_instruction_file(self):
+        (self.workdir / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
+        settings = opencode_settings(self.local())
+        self.assertEqual(["CLAUDE.md"], settings.get("instructions"))
+
+    def test_the_path_is_relative_so_it_lands_on_the_worktree(self):
+        """A run's cwd is a worktree, not the checkout the seat was read from.
+
+        An absolute path here would inject the CHECKOUT's copy while the run
+        edits the worktree's, so a run could be judged against rules it could
+        not see itself changing.
+        """
+        (self.workdir / "CLAUDE.md").write_text("# rules\n", encoding="utf-8")
+        for entry in opencode_settings(self.local())["instructions"]:
+            self.assertFalse(
+                Path(entry).is_absolute(),
+                f"{entry!r} is absolute; OpenCode resolves instructions against "
+                "the repository, and the run works in a worktree of it.",
+            )
+
+    def test_a_repository_without_one_is_not_an_error(self):
+        """Absent is absent, not a refusal.
+
+        A missing graph is refused because the query would answer 'not found'
+        while reporting success. A missing CLAUDE.md just leaves the run where
+        every run before task 839 already was.
+        """
+        claude_md = self.workdir / "CLAUDE.md"
+        if claude_md.exists():
+            claude_md.unlink()
+        settings = opencode_settings(self.local())
+        self.assertNotIn(
+            "instructions",
+            settings,
+            "an empty instructions list is not the same as the key being "
+            "absent to every config reader",
+        )

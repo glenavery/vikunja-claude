@@ -124,6 +124,24 @@ DEFAULT_OUTPUT_TOKENS = 32768
 #: keep in step. The interpreter in particular is graphify's own answer to
 #: "which python can import me" — under a venv or a ``uv tool`` install the
 #: system ``python3`` cannot, and graphify records the one that can.
+#: The repository's own instructions to an agent working in it, injected into
+#: the run. A path rather than a setting, for the reason ``MANIFEST_PATH`` is
+#: one: it is a fact about that repository's layout.
+#:
+#: OpenCode reads ``AGENTS.md`` natively and does **not** read this file, which
+#: is what task 839 found: between task 810 making this executor OpenCode and
+#: that ticket, a local run received none of the repository's rules. The
+#: repository now carries an ``AGENTS.md`` that OpenCode injects on its own, and
+#: that file deliberately POINTS AT ``CLAUDE.md`` rather than copying it -- a
+#: second copy of the rules is two things to keep in step, and the stale one is
+#: the one nobody reads. Naming it here is what makes the pointer resolve: the
+#: authority is injected, in one place, with no duplicate to maintain.
+#:
+#: It costs roughly 9,000 tokens of every request, about 5% of a 188k window.
+#: That is the price of a run knowing the rules it is judged against, and task
+#: 839 is the record of what their absence cost.
+CLAUDE_MD = Path("CLAUDE.md")
+
 GRAPHIFY_DIR = Path("graphify-out")
 GRAPHIFY_GRAPH = GRAPHIFY_DIR / "graph.json"
 GRAPHIFY_INTERPRETER = GRAPHIFY_DIR / ".graphify_python"
@@ -328,7 +346,29 @@ def graphify_server(workdir: Path) -> dict:
     }
 
 
-def opencode_config(model: str, context: int, base_url: str, graphify: dict) -> dict:
+def instruction_files(workdir: Path) -> list[str]:
+    """The repository's own rules, named so OpenCode injects them.
+
+    Relative to the repository, which is how OpenCode resolves an instructions
+    entry -- and a run's cwd is a worktree of that repository, so a relative
+    name lands on the worktree's own copy rather than the checkout's.
+
+    Unlike :func:`graphify_server` this does not refuse when the file is
+    missing. A missing graph is a query that answers "graph.json not found"
+    while reporting success, which a run must never be handed; a missing
+    ``CLAUDE.md`` is just a repository that does not have one, and the run is no
+    worse off than every run before task 839.
+    """
+    return [str(CLAUDE_MD)] if (workdir / CLAUDE_MD).is_file() else []
+
+
+def opencode_config(
+    model: str,
+    context: int,
+    base_url: str,
+    graphify: dict,
+    instructions: list[str] | None = None,
+) -> dict:
     """The whole of what OpenCode is told, derived from the approved record.
 
     Handed to the child as ``OPENCODE_CONFIG_CONTENT`` rather than written to a
@@ -381,6 +421,9 @@ def opencode_config(model: str, context: int, base_url: str, graphify: dict) -> 
         },
         "permission": {"edit": "allow", "bash": "allow", "webfetch": "allow"},
         "mcp": {GRAPHIFY_SERVER_NAME: graphify},
+        # Named only when there is something to name. A repository without a
+        # CLAUDE.md is not an error, it is one this executor can still work in.
+        **({"instructions": instructions} if instructions else {}),
     }
 
 
@@ -420,6 +463,7 @@ def local_executor(config: "Config") -> Executor:
         context,
         config.local_executor_base_url.rstrip("/"),
         graphify_server(config.workdir),
+        instructions=instruction_files(config.workdir),
     )
     return Executor(
         name=LOCAL_EXECUTOR,
