@@ -141,6 +141,162 @@ PRIORITY_NAMES = {
 }
 
 
+#: The fields every `set_task_status` answer carries, whatever it did.
+_STATUS_ANSWER_COMMON = (
+    "changed", "task_number", "reference", "project", "project_id", "title",
+)
+
+
+def _status_answer_shape(
+    description: str, *fields: str, **fixed: Any
+) -> dict[str, Any]:
+    """One answer shape: these fields, all of them, and nothing else.
+
+    The closed key set is the point. A branch that only listed what it
+    REQUIRES would still accept an answer carrying another branch's fields
+    too, so a completed move that also handed back an approval_token — a
+    contradiction, and the shape a merge bug produces — would validate as a
+    move. Naming the whole set makes each branch a description of one answer
+    rather than a floor under several.
+
+    Types are not repeated here: they are declared once on the root's
+    properties, which every branch is validated against as well.
+    """
+    names = (*_STATUS_ANSWER_COMMON, *fields)
+    return {
+        "description": description,
+        "properties": {
+            name: ({"const": fixed[name]} if name in fixed else {}) for name in names
+        },
+        "required": list(names),
+        "additionalProperties": False,
+    }
+
+
+#: A column-and-done pair, used for both halves of a preview's before/after.
+_BUCKET_AND_DONE = {
+    "type": "object",
+    "properties": {
+        "bucket": {
+            "type": "string",
+            "description": "The column, as the board spells it.",
+        },
+        "done": {
+            "type": "boolean",
+            "description": "Whether the task is closed in that column.",
+        },
+    },
+    "required": ["bucket", "done"],
+    "additionalProperties": False,
+}
+
+#: The shape of every `set_task_status` answer (task 853).
+#:
+#: READ OFF THE THREE RETURNS, not designed beside them. The method answers in
+#: exactly three shapes — the task is already in the column, a preview that
+#: changed nothing, and a completed move -- and each is a branch of the
+#: ``oneOf`` below, so a fourth shape appearing in the method fails to validate
+#: rather than being quietly published as one of these.
+#:
+#: The branches are mutually exclusive, which is what makes ``oneOf`` the right
+#: keyword rather than ``anyOf``: ``changed`` separates the completed move from
+#: the other two, and ``reason`` against ``approval_required`` separates those
+#: two from each other. A client can therefore tell "nothing to do" from
+#: "waiting for your approval" from the schema alone.
+#:
+#: A refusal is NOT a fourth branch. A ToolError comes back as ``isError`` with
+#: text and no ``structuredContent``, so there is nothing for this to describe;
+#: describing one here would advertise a failure shape that is never sent.
+SET_TASK_STATUS_OUTPUT_SCHEMA = {
+    "type": "object",
+    "description": (
+        "The outcome of one set_task_status call: a task already in the "
+        "column, a preview that changed nothing, or a completed move."
+    ),
+    "properties": {
+        "changed": {
+            "type": "boolean",
+            "description": "Whether the board was written to by this call.",
+        },
+        "task_number": {
+            "type": "integer",
+            "description": (
+                "The #N the board shows beside the task, on this board."
+            ),
+        },
+        "reference": {
+            "type": "string",
+            "description": "How the board names the task, e.g. '#647'.",
+        },
+        "project": {"type": "string", "description": "The board's title."},
+        "project_id": {"type": "integer", "description": "The board's project id."},
+        "title": {"type": "string", "description": "The task's title."},
+        "reason": {
+            "type": "string",
+            "description": (
+                "Why nothing was done, when the task is already in the column."
+            ),
+        },
+        "bucket": {
+            "type": "string",
+            "description": "The column the task is in now.",
+        },
+        "done": {
+            "type": "boolean",
+            "description": "Whether the task is closed, read back from the board.",
+        },
+        "reopened": {
+            "type": "boolean",
+            "description": "True when this move took the task out of the done column.",
+        },
+        "approval_required": {
+            "const": True,
+            "description": (
+                "Present on a preview: nothing was changed and a token "
+                "was issued."
+            ),
+        },
+        "current": {
+            **_BUCKET_AND_DONE,
+            "description": "Where the task is now, on a preview.",
+        },
+        "proposed": {
+            **_BUCKET_AND_DONE,
+            "description": "Where the previewed move would put it.",
+        },
+        "approval_token": {
+            "type": "string",
+            "description": (
+                "The token that authorises this one move, on a second call."
+            ),
+        },
+        "next_step": {
+            "type": "string",
+            "description": "What the caller must do before the move will happen.",
+        },
+    },
+    "required": [
+        "changed", "task_number", "reference", "project", "project_id", "title",
+    ],
+    "additionalProperties": False,
+    "oneOf": [
+        _status_answer_shape(
+            "The move was made.",
+            "bucket", "done", "reopened", changed=True,
+        ),
+        _status_answer_shape(
+            "The task was already in that column; nothing was done.",
+            "reason", "bucket", "done", changed=False,
+        ),
+        _status_answer_shape(
+            "A preview. Nothing was changed and an approval is needed.",
+            "approval_required", "current", "proposed", "approval_token",
+            "next_step", changed=False, approval_required=True,
+        ),
+    ],
+}
+
+
 def _optional_int(value: Any) -> int | None:
     """An argument that may be absent, as an int or as None.
 
@@ -2645,6 +2801,7 @@ class McpService:
                     "required": ["task_number", "bucket"],
                     "additionalProperties": False,
                 },
+                output_schema=SET_TASK_STATUS_OUTPUT_SCHEMA,
                 annotations={
                     "readOnlyHint": False,
                     "destructiveHint": False,

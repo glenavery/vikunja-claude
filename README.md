@@ -751,6 +751,30 @@ Reaching that check needs a fake that can accept a move and do something else,
 which is why `FakeVikunja` grew `couple_done` and `misroute_moves_to` — without
 them both guards pass every test while being unable to fail one.
 
+**The three answers are declared, not only returned (task 853).** A tool may
+advertise an `outputSchema` beside its `inputSchema`, and a client that reads
+one validates `structuredContent` against it — so declaring one is a promise
+about every successful answer, not documentation. `set_task_status` declares
+one, read off its three returns: the task is already in that column, a preview
+that changed nothing, and a completed move. Each is one branch of a `oneOf`,
+and each branch names its **whole** key set rather than only what it requires.
+A branch listing only its required fields would accept a completed move that
+also handed back an `approval_token` — a contradiction rather than a shape, and
+the thing a merge bug produces — so closing the set is what makes the two-step
+contract legible from the schema alone. A refusal is deliberately not a fourth
+branch: a `ToolError` comes back as `isError` with text and **no**
+`structuredContent`, so there is nothing there for a schema to describe, and
+describing one would advertise a failure shape that is never sent.
+
+The key is **omitted** on the tools that declare no schema, never emptied: an
+empty schema promises a shape nobody set. `tests/test_mcp_output_schema.py`
+validates real answers — driven through the protocol — against the schema the
+same protocol advertised in `tools/list`, so a constant edited without the
+method changing fails there. Its checker is the small one in that file rather
+than a dependency, because the default run is stdlib-only; it implements
+exactly the keywords this schema uses and **raises** on any other, so a
+keyword it could not enforce is a failure rather than a line it skips.
+
 **`list_recently_done` is the read half.** `list_open_tasks` never includes a
 done task, `get_task` needs a number and `search_tasks` needs text, so nothing
 enumerated finished work. It is limited where `list_open_tasks` is not, and the

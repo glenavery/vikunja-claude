@@ -70,16 +70,25 @@ class Tool:
     input_schema: dict[str, Any]
     run: Callable[[dict[str, Any]], Any]
     annotations: dict[str, Any] = field(default_factory=dict)
+    #: The shape of this tool's ``structuredContent``, advertised as
+    #: ``outputSchema``. Optional, and OMITTED rather than emptied when there
+    #: is none (task 853): declaring one is a promise that every successful
+    #: result validates against it, so an empty schema would advertise a
+    #: promise nobody made, where an absent key advertises none.
+    output_schema: dict[str, Any] | None = None
 
     def descriptor(self) -> dict[str, Any]:
         """The `tools/list` shape. Never includes `run`."""
-        return {
+        descriptor: dict[str, Any] = {
             "name": self.name,
             "title": self.title,
             "description": self.description,
             "inputSchema": self.input_schema,
             "annotations": self.annotations,
         }
+        if self.output_schema is not None:
+            descriptor["outputSchema"] = self.output_schema
+        return descriptor
 
     def required_arguments(self) -> list[str]:
         return list(self.input_schema.get("required") or [])
